@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use phoxal::bus::{ContractBody, DEFAULT_QUERY_TIMEOUT, Querier, Subscribe, Subscriber, Topic};
-use phoxal::raw::{Bus, BusConfig};
 use phoxal_api::v0_1 as api;
+use phoxal_bus::{Bus, BusConfig};
+use phoxal_bus::{ContractBody, DEFAULT_QUERY_TIMEOUT, Querier, Subscribe, Subscriber, Topic};
 use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use phoxal_cli_observation::sanitize_terminal_text;
 use tokio::time::timeout;

@@ -25,8 +25,8 @@ use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
 use phoxal_cli_core::project::layout::DriverSelection;
 use phoxal_cli_core::project::layout::RuntimeLayout;
+use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::official_binary_name;
 use phoxal_cli_core::runtime::ParticipantKind;
 use phoxal_cli_core::runtime::ParticipantSpec;
@@ -63,7 +63,7 @@ pub(crate) fn source_dirs_by_participant(
 /// requires, so [`RuntimeLayout::construct_plan`] can inspect the complete set
 /// off-disk before any process launches (#936). This is the staging-side
 /// counterpart of the execution path: it is the only code that resolves source,
-/// keyed by the resolved graph (`ResolvedRobot`) and its source-participant
+/// keyed by the resolved graph (`BundlePlan`) and its source-participant
 /// records, never by a plan.
 ///
 /// It links: every user service and workspace/path-overridden component driver,
@@ -80,7 +80,7 @@ pub(crate) fn source_dirs_by_participant(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stage_complete_bin_store(
     staged_root: &Path,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
     source_participants: &[SourceParticipant],
     drivers: &DriverSelection,
     offline: bool,
@@ -187,7 +187,7 @@ pub(crate) fn stage_complete_bin_store(
 /// from local source runs from its crate directory, and an extracted-bundle run
 /// passes a closure returning `None` (a bundle has no source). Board
 /// classification, the component-driver missing-device check (read straight
-/// from the compiled `robot.yaml`), and readiness/env/policy encoding are
+/// from compiler-owned participant declarations), and readiness/env/policy encoding are
 /// shared by both. Driver policy needs no gate here: the plan constructor
 /// already excluded non-selected drivers, so every driver in the plan launches.
 pub(crate) fn build_layout_specs(
@@ -223,7 +223,7 @@ pub(crate) fn build_layout_specs(
             if matches!(
                 participant.execution,
                 ParticipantExecution::ComponentDriver { .. }
-            ) && let Some(note) = layout_device_missing_note(layout, &id)
+            ) && let Some(note) = layout_device_missing_note(layout, &id)?
             {
                 prepared.push(PreparedParticipant {
                     key,
@@ -267,22 +267,37 @@ pub(crate) fn build_layout_specs(
 }
 
 /// The missing-device board note for a driver participant in a compiled
-/// `robot.yaml`, computed directly from the layout's robot model (no resolved
+/// authored source, computed directly from the layout's canonical model (no resolved
 /// graph). Mirrors [`device_missing_note`], which reads the same connection
-/// config off a `ResolvedRobot`.
-fn layout_device_missing_note(layout: &RuntimeLayout, participant_id: &str) -> Option<String> {
-    let component = layout.robot().robot.components.get(participant_id)?;
-    let driver = component.driver.as_ref()?;
-    let missing = missing_device_path(&driver.connection)?;
-    Some(format!(
+/// config off a `BundlePlan`.
+fn layout_device_missing_note(
+    layout: &RuntimeLayout,
+    participant_id: &str,
+) -> Result<Option<String>> {
+    let Some(participant) = layout.participants().iter().find(|participant| {
+        participant.kind == phoxal_manifest::ParticipantKind::Driver
+            && participant.component_instance.as_deref() == Some(participant_id)
+    }) else {
+        return Ok(None);
+    };
+    let Some(config) = participant.config.clone() else {
+        return Ok(None);
+    };
+    let driver: phoxal_manifest::source::robot::v0::DriverConfig =
+        serde_json::from_value(config)
+            .with_context(|| format!("compiled driver config for '{participant_id}' is invalid"))?;
+    let Some(missing) = missing_device_path(&driver.connection) else {
+        return Ok(None);
+    };
+    Ok(Some(format!(
         "DeviceMissing: {missing} for driver {participant_id}"
-    ))
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_robot_participants(
     plan: &LaunchPlan,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
     source_dirs: &BTreeMap<String, PathBuf>,
     staged_root: &Path,
     driver_policy: &DriverPolicy,
@@ -394,7 +409,7 @@ pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (Participant
 /// the same `ResolvedPlatformRuntime` shape and is keyed by its component
 /// id). Source-sourced drivers are not here - they build from their crate
 /// through the source-execution path.
-fn official_runtimes_by_name(resolved: &ResolvedRobot) -> BTreeMap<&str, &ResolvedPlatformRuntime> {
+fn official_runtimes_by_name(resolved: &BundlePlan) -> BTreeMap<&str, &ResolvedPlatformRuntime> {
     resolved
         .platform_runtimes
         .iter()
@@ -422,7 +437,7 @@ fn official_runtimes_by_name(resolved: &ResolvedRobot) -> BTreeMap<&str, &Resolv
 fn resolve_participant_source(
     staged_root: &Path,
     participant: &ParticipantLaunchRecord,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
     official_by_name: &BTreeMap<&str, &ResolvedPlatformRuntime>,
     source_dirs: &BTreeMap<String, PathBuf>,
     offline: bool,
@@ -549,7 +564,7 @@ fn stage_and_inspect(
 /// (overridden officials and tools).
 pub(crate) fn source_cwd(
     participant: &ParticipantLaunchRecord,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
     source_dirs: &BTreeMap<String, PathBuf>,
 ) -> Option<PathBuf> {
     let id = &participant.launch.participant_id;
@@ -616,14 +631,14 @@ fn participant_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal::participant::launch::{
-        BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
-    };
     use phoxal_cli_core::check::participant_metadata::host_architecture;
     use phoxal_cli_core::identity::{ExecutionId, ProducerId};
     use phoxal_cli_core::project::launch_plan::RunIdentity;
     use phoxal_cli_core::runtime::RuntimeFailurePolicy;
     use phoxal_cli_core::runtime::StartupRequirement;
+    use phoxal_runtime_contract::{
+        BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
+    };
 
     /// Synthesize a host-format object of a given architecture carrying the
     /// phoxal metadata section, so inspection is exercised against real object
@@ -632,7 +647,7 @@ mod tests {
     /// must match the required runtime's identity, so a
     /// caller staging more than one required runtime must give each its own
     /// matching id rather than reusing a fixed payload).
-    fn synthesize_binary_with_id(arch: object::Architecture, id: &str) -> Vec<u8> {
+    fn synthesize_binary_with_id(arch: object::Architecture, id: &str, kind: &str) -> Vec<u8> {
         use object::write::Object;
         let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
         let (segment, name): (&[u8], &[u8]) = match format {
@@ -645,7 +660,9 @@ mod tests {
             name.to_vec(),
             object::SectionKind::ReadOnlyData,
         );
-        let payload = format!(r#"{{"id":"{id}","config_schema":{{"type":"null"}}}}"#);
+        let payload = format!(
+            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{id}","kind":"{kind}","class":"checked","config_schema":{{"type":"null"}}}}"#
+        );
         obj.append_section_data(section, payload.as_bytes(), 1);
         obj.write().expect("synthesize object file")
     }
@@ -653,7 +670,7 @@ mod tests {
     /// [`synthesize_binary_with_id`] for a fixture whose only participant is
     /// `mission`.
     fn synthesize_binary(arch: object::Architecture) -> Vec<u8> {
-        synthesize_binary_with_id(arch, "mission")
+        synthesize_binary_with_id(arch, "mission", "service")
     }
 
     fn user_service_record(id: &str) -> ParticipantLaunchRecord {
@@ -674,7 +691,7 @@ mod tests {
                 },
                 clock: ClockMode::Real,
                 config: None,
-                robot_root: None,
+                bundle_root: None,
                 component_instance: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
@@ -724,6 +741,36 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn malformed_compiled_driver_config_fails_instead_of_hiding_device_state() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        crate::stage::write_test_layout(dir.path(), LAYOUT_ROBOT_YAML)?;
+        let participants_path = dir
+            .path()
+            .join(phoxal_cli_core::project::layout::ASSETS_DIR)
+            .join(phoxal_cli_core::project::layout::PARTICIPANTS_ASSET);
+        let mut participants =
+            phoxal_cli_core::project::layout::decode_participants(&participants_path)?;
+        participants.push(phoxal_manifest::Participant {
+            id: "wheel".to_string(),
+            kind: phoxal_manifest::ParticipantKind::Driver,
+            component_instance: Some("wheel".to_string()),
+            config: Some(serde_json::json!({"connection": {"type": "serial"}})),
+        });
+        std::fs::write(
+            &participants_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "phoxal/participants/v0",
+                "participants": participants,
+            }))?,
+        )?;
+        let error = RuntimeLayout::open(dir.path())
+            .expect_err("invalid typed driver config must fail while opening the layout")
+            .to_string();
+        assert!(error.contains("invalid typed config"), "{error}");
+        Ok(())
+    }
+
     const LAYOUT_ROBOT_YAML: &str = r#"schema: robot/v0
 robot:
   id: testbot
@@ -751,9 +798,8 @@ services:
     fn layout_specs_resolve_every_executable_from_bin_with_no_other_state() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path();
-        std::fs::write(root.join("robot.yaml"), LAYOUT_ROBOT_YAML)?;
+        crate::stage::write_test_layout(root, LAYOUT_ROBOT_YAML)?;
         let bin = root.join("bin");
-        std::fs::create_dir_all(&bin)?;
         // Stray `.phoxal/` state the layout path must never touch: if it were
         // consulted the run would depend on it, defeating the bundle guarantee.
         std::fs::create_dir_all(root.join(".phoxal/resolve"))?;
@@ -767,7 +813,24 @@ services:
             }
             std::fs::write(
                 bin.join(&required.binary_name),
-                synthesize_binary_with_id(host_architecture(), &required.identity),
+                synthesize_binary_with_id(
+                    host_architecture(),
+                    &required.identity,
+                    match required.kind {
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialService
+                        | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserService => {
+                            "service"
+                        }
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialTool
+                        | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserTool => "tool",
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::ComponentDriver => {
+                            "driver"
+                        }
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure => {
+                            unreachable!("infrastructure skipped above")
+                        }
+                    },
+                ),
             )?;
         }
 
@@ -799,8 +862,8 @@ services:
                 "a staged layout participant has no source crate cwd"
             );
         }
-        // The user service is present, proving the compiled robot.yaml's own
-        // services join the plan alongside the officials.
+        // The user service is present, proving compiled participant declarations
+        // join the plan alongside the officials.
         assert!(
             specs.iter().any(|spec| spec.id == "mission"),
             "the user service `mission` must be launchable from the layout"
@@ -817,9 +880,8 @@ services:
     fn source_overridden_officials_are_marked_local_on_the_board() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path();
-        std::fs::write(root.join("robot.yaml"), LAYOUT_ROBOT_YAML)?;
+        crate::stage::write_test_layout(root, LAYOUT_ROBOT_YAML)?;
         let bin = root.join("bin");
-        std::fs::create_dir_all(&bin)?;
 
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {
@@ -830,7 +892,24 @@ services:
             }
             std::fs::write(
                 bin.join(&required.binary_name),
-                synthesize_binary_with_id(host_architecture(), &required.identity),
+                synthesize_binary_with_id(
+                    host_architecture(),
+                    &required.identity,
+                    match required.kind {
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialService
+                        | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserService => {
+                            "service"
+                        }
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialTool
+                        | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserTool => "tool",
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::ComponentDriver => {
+                            "driver"
+                        }
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure => {
+                            unreachable!("infrastructure skipped above")
+                        }
+                    },
+                ),
             )?;
         }
 

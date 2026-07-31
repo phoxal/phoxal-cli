@@ -1,6 +1,6 @@
 //! Metadata responsibilities for check.
 
-use super::{RawArtifact, RawParticipantReport, default_participant_class};
+use super::{RawArtifact, RawParticipantReport};
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -52,26 +52,11 @@ pub(crate) fn extract_participant_report_from_staged_tool(
     )
 }
 
-/// Every native tool (`tool-router`, `tool-joypad`) is privileged (host/root
-/// access); every other kind is a checked participant. Neither the catalog
-/// nor a binary's extracted metadata carries `participant_class` anymore, so
-/// the kind -> class mapping (always fixed) is derived here instead of read
-/// off either source.
-pub(crate) fn default_participant_class_for_kind(artifact_kind: &str) -> String {
-    if artifact_kind == "tool" {
-        "privileged".to_string()
-    } else {
-        default_participant_class()
-    }
-}
-
 /// Fetches a native tool binary's config-schema report by extracting its
 /// compiled-in participant metadata section directly from the built artifact
-/// file, never by executing it. The section carries the
-/// participant's own declared `id` and its config schema, but not an
-/// artifact `kind` label; the kind is supplied from what is already known
-/// about `tool`, and the declared `id` is checked against `tool`'s own
-/// expected identity before the schema is trusted (see
+/// file, never by executing it. The section carries the participant's declared
+/// identity, kind, class, and config schema; caller-owned expectations are
+/// checked before any of them is trusted (see
 /// [`raw_participant_report_from_extracted_metadata`]).
 pub(crate) fn fetch_participant_report_from_tool(
     tool: &ToolParticipant,
@@ -97,9 +82,8 @@ pub(crate) fn fetch_participant_report_from_tool(
 /// [`fetch_participant_report_from_tool`] and
 /// [`build_participant_report_by_building`](super::build::build_participant_report_by_building).
 ///
-/// The embedded metadata carries the participant's own declared `id` and its
-/// config schema. That `id` is the participant's own truth about which artifact this
-/// binary implements - the caller's `expected_artifact_id` is a claim made
+/// The embedded metadata carries the participant's declared identity, kind,
+/// class, and config schema. The caller's expectations are claims made
 /// from context (a resolved runtime name, a registry package, an
 /// `expected_artifact_id` field) that could disagree with it, for instance if
 /// two staged binaries were swapped on disk. This function is the one place
@@ -126,12 +110,32 @@ pub(crate) fn raw_participant_report_from_extracted_metadata(
             meta.id,
         );
     }
+    let kind = match meta.kind {
+        phoxal_runtime_contract::ParticipantKind::Service => "service",
+        phoxal_runtime_contract::ParticipantKind::Driver => "driver",
+        phoxal_runtime_contract::ParticipantKind::Simulator => "simulator",
+        phoxal_runtime_contract::ParticipantKind::Tool => "tool",
+    };
+    if kind != artifact_kind {
+        bail!(
+            "{} at {} declares participant kind '{}', but it was selected as a '{}' artifact; \
+             the staged/built binary does not match the kind that selected it",
+            meta.id,
+            binary_path.display(),
+            kind,
+            artifact_kind,
+        );
+    }
+    let participant_class = match meta.class {
+        phoxal_runtime_contract::ParticipantClass::Checked => "checked",
+        phoxal_runtime_contract::ParticipantClass::Privileged => "privileged",
+    };
     Ok(RawParticipantReport {
         artifact: RawArtifact {
-            kind: artifact_kind.to_string(),
+            kind: kind.to_string(),
             id: meta.id,
         },
-        participant_class: default_participant_class_for_kind(artifact_kind),
+        participant_class: participant_class.to_string(),
         config_schema: Some(meta.config_schema),
     })
 }
@@ -185,7 +189,10 @@ mod tests {
 
     fn meta(id: &str) -> participant_metadata::ParticipantMeta {
         participant_metadata::ParticipantMeta {
+            schema: phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA.to_string(),
             id: id.to_string(),
+            kind: phoxal_runtime_contract::ParticipantKind::Service,
+            class: phoxal_runtime_contract::ParticipantClass::Checked,
             config_schema: serde_json::json!({"type": "object", "properties": {"speed": {"type": "integer"}}}),
         }
     }
@@ -203,6 +210,7 @@ mod tests {
         )?;
         assert_eq!(raw.artifact.id, "drive");
         assert_eq!(raw.artifact.kind, "service");
+        assert_eq!(raw.participant_class, "checked");
         assert_eq!(
             raw.config_schema,
             Some(
@@ -210,6 +218,20 @@ mod tests {
             )
         );
         Ok(())
+    }
+
+    #[test]
+    fn mismatched_kind_fails_before_metadata_enters_the_graph() {
+        let error = raw_participant_report_from_extracted_metadata(
+            "driver",
+            "drive",
+            Path::new("bin/phoxal-component-drive"),
+            meta("drive"),
+        )
+        .expect_err("a binary declaring the wrong kind must be rejected")
+        .to_string();
+        assert!(error.contains("service"), "{error}");
+        assert!(error.contains("driver"), "{error}");
     }
 
     #[test]

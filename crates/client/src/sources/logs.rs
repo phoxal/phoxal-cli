@@ -3,9 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
-use phoxal::bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscriber};
-use phoxal::raw::Bus;
 use phoxal_api::v0_1 as api;
+use phoxal_bus::Bus;
+use phoxal_bus::{DEFAULT_QUERY_TIMEOUT, Querier, Subscriber};
 use phoxal_cli_observation::{
     AttachmentEpoch, AttachmentEvent, LogRow, LogScope, LogSeverity, LogSource, StoreChanged,
     bounded_log_text,

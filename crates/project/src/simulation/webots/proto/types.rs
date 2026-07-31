@@ -20,5 +20,5 @@ impl FixedSubtreeRender {
 #[derive(Debug, Clone)]
 pub struct StagedCollision {
     pub origin: nalgebra::Isometry3<f64>,
-    pub geometry: urdf_rs::Geometry,
+    pub geometry: phoxal_model::structure::Geometry,
 }

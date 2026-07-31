@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow};
+use phoxal_model::structure::{Joint, JointKind};
 use webots_proto::r2025a::{
     HingeJoint, HingeJointParameters, JointParameters, Node, Physics, Pose, SliderJoint, Solid,
 };
@@ -11,7 +12,7 @@ use crate::simulation::webots::proto::native_fields::{
 };
 use crate::simulation::webots::proto::scene::WebotsSceneDescription;
 use crate::simulation::webots::proto::support::inertia::transform_inertial;
-use crate::simulation::webots::proto::support::urdf::{
+use crate::simulation::webots::proto::support::pose::{
     JointType, convert_joint_type, has_inertial, pose_to_isometry,
 };
 use crate::simulation::webots::proto::types::{FixedSubtreeRender, StagedCollision};
@@ -31,8 +32,8 @@ impl WebotsSceneDescription {
                 return link_id;
             };
             if has_inertial(link)
-                || !link.visual.is_empty()
-                || !link.collision.is_empty()
+                || link.visuals().len() != 0
+                || link.collisions().len() != 0
                 || self
                     .mounted_components_for_link
                     .contains_key(link_id.as_str())
@@ -45,9 +46,9 @@ impl WebotsSceneDescription {
                 match child_joints.next() {
                     Some(child_joint)
                         if child_joints.next().is_none()
-                            && child_joint.joint_type == urdf_rs::JointType::Fixed =>
+                            && child_joint.kind() == JointKind::Fixed =>
                     {
-                        Some(child_joint.child.link.clone())
+                        Some(child_joint.child().to_string())
                     }
                     _ => None,
                 }
@@ -67,10 +68,7 @@ impl WebotsSceneDescription {
         link_id: &str,
         mesh_url_prefix: &str,
     ) -> Result<Node> {
-        let joint_from_parent = self
-            .joints
-            .values()
-            .find(|joint| joint.child.link == link_id);
+        let joint_from_parent = self.joints.values().find(|joint| joint.child() == link_id);
 
         if !self.is_physical_link(link_id) {
             let mut children = Vec::new();
@@ -91,7 +89,7 @@ impl WebotsSceneDescription {
             .with_translation(Self::joint_translation(joint_from_parent))
             .with_rotation(Self::joint_rotation(joint_from_parent))
             .with_children(assembly.children);
-        if self.component_mesh_prefix.is_some() {
+        if self.is_component_proto {
             solid.name = WebotsField::Is(Self::solid_name_field_name(link_id));
         }
 
@@ -131,18 +129,21 @@ impl WebotsSceneDescription {
         Ok(Node::Solid(solid))
     }
 
-    fn render_joint(&self, joint: &urdf_rs::Joint, mesh_url_prefix: &str) -> Result<Node> {
+    fn render_joint(&self, joint: &Joint, mesh_url_prefix: &str) -> Result<Node> {
         let child_body =
-            self.render_link_subtree_with_mesh_url_prefix(&joint.child.link, mesh_url_prefix)?;
-        let axis = Self::vec3([joint.axis.xyz[0], joint.axis.xyz[1], joint.axis.xyz[2]]);
-        let joint_type = convert_joint_type(&joint.joint_type)?;
+            self.render_link_subtree_with_mesh_url_prefix(joint.child(), mesh_url_prefix)?;
+        let axis = Self::vec3(joint.axis());
+        let joint_type = convert_joint_type(joint.kind())?;
 
         match joint_type {
             JointType::Fixed => Ok(child_body),
             JointType::Continuous | JointType::Revolute => {
-                let damping = joint.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0);
-                let friction = joint.dynamics.as_ref().map(|d| d.friction).unwrap_or(0.0);
-                let joint_origin = pose_to_isometry(&joint.origin);
+                let damping = joint.dynamics().map(|value| value.damping()).unwrap_or(0.0);
+                let friction = joint
+                    .dynamics()
+                    .map(|value| value.friction())
+                    .unwrap_or(0.0);
+                let joint_origin = pose_to_isometry(joint.origin());
                 let anchor = Self::vec3([
                     joint_origin.translation.vector.x,
                     joint_origin.translation.vector.y,
@@ -155,34 +156,39 @@ impl WebotsSceneDescription {
                     .with_damping_constant(damping)
                     .with_static_friction(friction);
                 if joint_type == JointType::Revolute {
+                    let limit = joint.limit();
                     joint_parameters = joint_parameters
-                        .with_min_stop(joint.limit.lower)
-                        .with_max_stop(joint.limit.upper);
+                        .with_min_stop(limit.lower())
+                        .with_max_stop(limit.upper());
                 }
 
                 let mut hinge_joint = HingeJoint::new()
                     .with_joint_parameters(Box::new(Node::HingeJointParameters(joint_parameters)))
                     .with_end_point(Box::new(child_body));
-                let capabilities = self.render_joint_capabilities(joint.name.as_str());
+                let capabilities = self.render_joint_capabilities(joint.name());
                 if !capabilities.is_empty() {
                     hinge_joint = hinge_joint.with_device(capabilities);
                 }
                 Ok(Node::HingeJoint(hinge_joint))
             }
             JointType::Prismatic => {
-                let damping = joint.dynamics.as_ref().map(|d| d.damping).unwrap_or(0.0);
-                let friction = joint.dynamics.as_ref().map(|d| d.friction).unwrap_or(0.0);
+                let damping = joint.dynamics().map(|value| value.damping()).unwrap_or(0.0);
+                let friction = joint
+                    .dynamics()
+                    .map(|value| value.friction())
+                    .unwrap_or(0.0);
+                let limit = joint.limit();
                 let mut slider_joint = SliderJoint::new()
                     .with_joint_parameters(Box::new(Node::JointParameters(
                         JointParameters::new()
                             .with_axis(axis)
-                            .with_min_stop(joint.limit.lower)
-                            .with_max_stop(joint.limit.upper)
+                            .with_min_stop(limit.lower())
+                            .with_max_stop(limit.upper())
                             .with_damping_constant(damping)
                             .with_static_friction(friction),
                     )))
                     .with_end_point(Box::new(child_body));
-                let capabilities = self.render_joint_capabilities(joint.name.as_str());
+                let capabilities = self.render_joint_capabilities(joint.name());
                 if !capabilities.is_empty() {
                     slider_joint = slider_joint.with_device(capabilities);
                 }
@@ -203,11 +209,11 @@ impl WebotsSceneDescription {
             .ok_or_else(|| anyhow!("missing link '{}'", link_id))?;
         let mut assembly = FixedSubtreeRender::default();
 
-        for visual in &link.visual {
-            let origin = transform_to_root * pose_to_isometry(&visual.origin);
+        for visual in link.visuals() {
+            let origin = transform_to_root * pose_to_isometry(visual.origin());
             assembly
                 .children
-                .push(self.render_visual(&visual.geometry, &origin, mesh_url_prefix));
+                .push(self.render_visual(visual.geometry(), &origin, mesh_url_prefix));
         }
         for binding in self.link_bindings(link_id) {
             if let Some(node) = self.render_link_capability(
@@ -220,22 +226,22 @@ impl WebotsSceneDescription {
                     .push(Self::wrap_with_pose(transform_to_root, node));
             }
         }
-        for collision in &link.collision {
+        for collision in link.collisions() {
             assembly.collisions.push(StagedCollision {
-                origin: transform_to_root * pose_to_isometry(&collision.origin),
-                geometry: collision.geometry.clone(),
+                origin: transform_to_root * pose_to_isometry(collision.origin()),
+                geometry: collision.geometry().clone(),
             });
         }
         if has_inertial(link) {
             assembly
                 .mass_properties
-                .add_inertial(&transform_inertial(&link.inertial, transform_to_root));
+                .add_inertial(&transform_inertial(link.inertial(), transform_to_root));
         }
         for joint in self.child_joints(link_id) {
-            if joint.joint_type == urdf_rs::JointType::Fixed {
-                let child_transform = transform_to_root * pose_to_isometry(&joint.origin);
+            if joint.kind() == JointKind::Fixed {
+                let child_transform = transform_to_root * pose_to_isometry(joint.origin());
                 assembly.extend(self.collect_fixed_subtree(
-                    &joint.child.link,
+                    joint.child(),
                     &child_transform,
                     mesh_url_prefix,
                 )?);
@@ -254,8 +260,8 @@ impl WebotsSceneDescription {
         let Some(link) = self.links.get(link_id) else {
             return false;
         };
-        !link.visual.is_empty()
-            || !link.collision.is_empty()
+        link.visuals().len() != 0
+            || link.collisions().len() != 0
             || has_inertial(link)
             || !self.link_bindings(link_id).is_empty()
             || self.mounted_components_for_link.contains_key(link_id)
@@ -273,7 +279,7 @@ impl WebotsSceneDescription {
     fn collect_rendered_solid_link_ids_from(&self, link_id: &str, link_ids: &mut BTreeSet<String>) {
         if !self.is_physical_link(link_id) {
             for joint in self.child_joints(link_id) {
-                self.collect_rendered_solid_link_ids_from(joint.child.link.as_str(), link_ids);
+                self.collect_rendered_solid_link_ids_from(joint.child(), link_ids);
             }
             return;
         }
@@ -288,13 +294,13 @@ impl WebotsSceneDescription {
         link_ids: &mut BTreeSet<String>,
     ) {
         for joint in self.child_joints(link_id) {
-            if joint.joint_type == urdf_rs::JointType::Fixed {
+            if joint.kind() == JointKind::Fixed {
                 self.collect_jointed_rendered_solid_link_ids_under_fixed_subtree(
-                    joint.child.link.as_str(),
+                    joint.child(),
                     link_ids,
                 );
             } else {
-                self.collect_rendered_solid_link_ids_from(joint.child.link.as_str(), link_ids);
+                self.collect_rendered_solid_link_ids_from(joint.child(), link_ids);
             }
         }
     }
@@ -320,10 +326,10 @@ impl WebotsSceneDescription {
         transform.translation.vector.norm() <= 1.0e-12 && transform.rotation.angle() <= 1.0e-12
     }
 
-    pub fn joint_translation(joint: Option<&urdf_rs::Joint>) -> SFVec3f {
+    pub fn joint_translation(joint: Option<&Joint>) -> SFVec3f {
         joint
             .map(|joint| {
-                let joint_origin = pose_to_isometry(&joint.origin);
+                let joint_origin = pose_to_isometry(joint.origin());
                 Self::vec3([
                     joint_origin.translation.vector.x,
                     joint_origin.translation.vector.y,
@@ -333,9 +339,9 @@ impl WebotsSceneDescription {
             .unwrap_or_else(|| Self::vec3([0.0, 0.0, 0.0]))
     }
 
-    pub fn joint_rotation(joint: Option<&urdf_rs::Joint>) -> SFRotation {
+    pub fn joint_rotation(joint: Option<&Joint>) -> SFRotation {
         joint
-            .map(|joint| Self::rotation_from_isometry(&pose_to_isometry(&joint.origin)))
+            .map(|joint| Self::rotation_from_isometry(&pose_to_isometry(joint.origin())))
             .unwrap_or_else(|| Self::rotation([0.0, 0.0, 1.0, 0.0]))
     }
 

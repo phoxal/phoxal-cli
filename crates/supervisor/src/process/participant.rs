@@ -115,9 +115,9 @@ impl RunningParticipant {
             instance.producer = producer;
             self.spec
                 .env
-                .retain(|(key, _)| key != phoxal::participant::launch::env::PRODUCER_ID);
+                .retain(|(key, _)| key != phoxal_runtime_contract::env::PRODUCER_ID);
             self.spec.env.push((
-                phoxal::participant::launch::env::PRODUCER_ID.to_string(),
+                phoxal_runtime_contract::env::PRODUCER_ID.to_string(),
                 producer.to_string(),
             ));
             board.set_producer(&self.spec.key, producer);

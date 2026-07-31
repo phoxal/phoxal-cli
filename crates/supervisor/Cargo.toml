@@ -11,7 +11,8 @@ anyhow = { workspace = true }
 getrandom = { workspace = true }
 hex = { workspace = true }
 libc = { workspace = true }
-phoxal = { workspace = true }
+phoxal-bus = { workspace = true }
+phoxal-runtime-contract = { workspace = true }
 phoxal-cli-core = { workspace = true }
 phoxal-cli-protocol = { workspace = true }
 serde = { workspace = true }

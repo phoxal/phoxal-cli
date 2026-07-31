@@ -16,8 +16,8 @@ use anyhow::anyhow;
 use phoxal_cli_core::project::launch_plan::{
     SIMULATOR_CONTROLLER_ARTIFACT_NAME, simulation_root_dir,
 };
+use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -26,7 +26,7 @@ use std::path::Path;
 /// `.phoxal/webots/controllers/<name>/<name>`.
 pub(crate) fn stage_simulator_controller_binaries(
     project_root: &Path,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
     offline: bool,
     ui: &dyn crate::Reporter,
     webots_home: Option<&Path>,

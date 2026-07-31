@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use phoxal_cli_core::project::launch_plan::runtime_layout_dir;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::resolver::BundlePlan;
 
 use super::candidate::StagedCandidate;
 
@@ -15,7 +15,7 @@ const PREVIOUS_LAYOUT_SUFFIX: &str = ".previous";
 /// `project_root`. `run`, live simulation, and `build` all stage and execute
 /// this one root.
 #[must_use]
-pub(crate) fn layout_path(project_root: &Path, _resolved: &ResolvedRobot) -> PathBuf {
+pub(crate) fn layout_path(project_root: &Path, _resolved: &BundlePlan) -> PathBuf {
     runtime_layout_dir(project_root)
 }
 
@@ -26,7 +26,7 @@ pub(crate) fn layout_path(project_root: &Path, _resolved: &ResolvedRobot) -> Pat
 /// the only step allowed to touch the live path.
 pub(crate) fn publish_runtime_layout(
     candidate: StagedCandidate,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
 ) -> Result<PathBuf> {
     let StagedCandidate {
         dir: candidate,

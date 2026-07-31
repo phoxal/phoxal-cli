@@ -2,21 +2,22 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use phoxal::model::source::robot::v0::Manifest as Robot;
 use phoxal_cli_core::project::catalog::{self, ArtifactKind};
 pub use phoxal_cli_core::project::host_target_triple;
 use phoxal_cli_core::project::resolve_manifest::{
     ComponentDependency, resolve_manifest_package_dirs, write_resolve_manifest,
 };
 use phoxal_cli_core::project::tooling::hash_tree;
+use phoxal_manifest::source::robot::v0::Manifest as Robot;
 
 /// The provider every official Phoxal package uses in catalog identities.
 const PHOXAL_PROVIDER: &str = "phoxal";
 
 use phoxal_cli_core::project::resolver::{
-    ResolveOptions, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-    ResolvedPathOverride, ResolvedPathOverrideKind, ResolvedPlatformRuntime, ResolvedRobot,
-    ResolvedTool, ResolvedUserRuntime, UndeclaredRuntime, official_binary_name,
+    BundlePlan, CompiledBundle, ResolveOptions, ResolvedComponent, ResolvedComponentPackage,
+    ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
+    ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, UndeclaredRuntime,
+    official_binary_name,
 };
 
 /// Resolve a robot manifest against the CLI-internal official catalog
@@ -25,18 +26,26 @@ use phoxal_cli_core::project::resolver::{
 /// driver package materializes later via `cargo install` at exactly the
 /// locked framework train; official component *assets* resolve their
 /// on-disk directory via the generated `.phoxal/resolve/Cargo.toml` and
-/// `cargo metadata` here, since staging needs to read `component.yaml` and
-/// friends without a binary to install.
-pub fn resolve(
-    robot: &Robot,
-    project_root: &Path,
-    options: ResolveOptions,
-) -> Result<ResolvedRobot> {
+/// `cargo metadata` here, so the manifest compiler receives the exact component
+/// source root without learning Cargo or registry policy.
+pub fn resolve(robot: &Robot, project_root: &Path, options: ResolveOptions) -> Result<BundlePlan> {
     // Declaration invariants are the very first check (#950): an invalid
     // workspace lock must not mask a dual/official declaration error.
     phoxal_cli_core::project::layout::validate_runtime_declarations(robot)?;
     let project =
         phoxal_cli_core::project::train::resolve_locked_project(project_root, options.offline)?;
+    resolve_with_locked_project(robot, project_root, options, &project)
+}
+
+/// Resolve against a locked workspace the caller has already loaded. `check`
+/// uses this entry so structural workspace reporting and canonical compilation
+/// share one `cargo metadata --locked` result.
+pub(crate) fn resolve_with_locked_project(
+    robot: &Robot,
+    project_root: &Path,
+    options: ResolveOptions,
+    project: &phoxal_cli_core::project::train::LockedProject,
+) -> Result<BundlePlan> {
     // The catalog below is one current snapshot, not per-train history
     // (organization#951 WS4 review, medium 3): reject a locked train it
     // predates before applying it, rather than silently resolving an
@@ -107,8 +116,31 @@ pub fn resolve(
         &options.drivers,
     )?;
 
-    Ok(ResolvedRobot {
-        robot: robot.clone(),
+    let component_roots = components
+        .iter()
+        .map(|component| {
+            let root = component.assets.path_override().with_context(|| {
+                format!(
+                    "resolved component '{}' has no compiler asset root",
+                    component.source_name
+                )
+            })?;
+            Ok((component.source_name.clone(), root.to_path_buf()))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+    let robot_manifest = project_root.join("robot.yaml");
+    let compiled = CompiledBundle::from_project(
+        phoxal_manifest::compile(phoxal_manifest::SourceSet {
+            project_root: project_root.to_path_buf(),
+            robot_manifest,
+            component_roots,
+        })
+        .context("failed to compile the resolved source project")?,
+    )?;
+
+    Ok(BundlePlan {
+        source_manifest: robot.clone(),
+        compiled,
         train,
         target,
         platform_runtimes,
@@ -535,7 +567,7 @@ pub fn resolve_target_triple(selector: &str) -> Result<String> {
     })
 }
 
-fn join_errors(errors: Vec<phoxal::model::source::robot::v0::ValidationError>) -> String {
+fn join_errors(errors: Vec<phoxal_manifest::source::robot::v0::ValidationError>) -> String {
     errors
         .iter()
         .map(ToString::to_string)

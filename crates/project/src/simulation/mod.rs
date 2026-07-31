@@ -20,5 +20,5 @@ pub(crate) struct SimulateOptions {
 pub(crate) struct ResolvedSimulation {
     pub(crate) project_root: std::path::PathBuf,
     pub(crate) world_path: std::path::PathBuf,
-    pub(crate) resolved: phoxal_cli_core::project::resolver::ResolvedRobot,
+    pub(crate) resolved: phoxal_cli_core::project::resolver::BundlePlan,
 }

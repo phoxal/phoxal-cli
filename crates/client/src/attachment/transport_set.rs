@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use phoxal::raw::{Bus, BusConfig};
+use phoxal_bus::{Bus, BusConfig};
 use phoxal_cli_core::identity::ProducerId;
 use phoxal_cli_core::runtime::{ProcessScope, RobotKey};
 use phoxal_cli_protocol::SupervisorSnapshotV0;

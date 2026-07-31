@@ -34,8 +34,8 @@ use phoxal_cli_core::check::participant_metadata::expected_target_for_triple;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::layout::{LayoutInspection, PlanOptions, RuntimeLayout};
+use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolveOptions;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::discover_robot_yaml;
 use phoxal_cli_core::project::resolver::load_robot;
 use std::collections::BTreeMap;
@@ -56,7 +56,7 @@ use std::path::PathBuf;
 /// validation pass over already-validated bytes.
 pub(crate) struct StagedProject {
     pub(crate) project_root: std::path::PathBuf,
-    pub(crate) resolved: ResolvedRobot,
+    pub(crate) resolved: BundlePlan,
     pub(crate) source_participants: Vec<phoxal_cli_core::check::source::SourceParticipant>,
     pub(crate) driver_policy: DriverPolicy,
     /// The staged runtime layout root - `.phoxal/bundle/`.
@@ -229,15 +229,15 @@ pub(crate) fn refresh_staging(
 
     // The plan above was constructed and validated against the unpublished
     // candidate - `validate_layout_plan` opened the layout at
-    // `candidate.path()`, so every participant's `ParticipantLaunch::robot_root`
-    // (the `--robot-root` every launched process receives) was baked in as the
+    // `candidate.path()`, so every participant's `ParticipantLaunch::bundle_root`
+    // (the `--bundle-root` every launched process receives) was baked in as the
     // candidate path. The rename just above made `staged_root` the live layout
     // and the candidate path no longer exists, so every one of those recorded
     // roots is now dangling. Repoint them to the published root - the same fix
     // `simulate` already applies to its specs' `executable`/`cwd`
     // (`repoint_after_publish`), for the identical reason: both stage against a
     // path that publish then renames away.
-    repoint_plan_robot_roots(&mut plan, &candidate_path, &staged_root);
+    repoint_plan_bundle_roots(&mut plan, &candidate_path, &staged_root);
 
     Ok(StagedProject {
         // `project_root` borrows `robot_path`, so clone rather than move it.
@@ -283,7 +283,7 @@ pub(crate) fn prepare_source_run(
     // gets for why hardware rows are absent (#936, finding 8).
     report_excluded_drivers(
         &staged.driver_policy,
-        &driven_instances(&staged.resolved.robot),
+        &driven_instances(&staged.resolved.source_manifest),
         ui,
     );
 
@@ -316,7 +316,7 @@ pub(crate) fn prepare_source_run(
     // staging copies `router.config` into the layout under its relative path, so
     // a source run and an extracted `build.phoxal` resolve the identical staged
     // asset (#936, finding 4).
-    let router_config = resolve_router_config(&staged.resolved.robot, &staged.staged_root)?;
+    let router_config = resolve_layout_router_config(&staged.staged_root)?;
     let StagedProject {
         project_root,
         resolved,
@@ -359,7 +359,13 @@ pub(crate) fn prepare_layout_run(
     // The same driver policy the source path applies, so `--drivers off` runs an
     // extracted bundle on a host whose driver binaries it cannot inspect (#936):
     // excluded drivers are not required, resolved, inspected, or planned.
-    let driver_policy = DriverPolicy::from_options(&options, &driven_instances(layout.robot()))?;
+    let driven = layout
+        .participants()
+        .iter()
+        .filter(|participant| participant.kind == phoxal_manifest::ParticipantKind::Driver)
+        .filter_map(|participant| participant.component_instance.clone())
+        .collect();
+    let driver_policy = DriverPolicy::from_options(&options, &driven)?;
     let plan_options = phoxal_cli_core::project::layout::PlanOptions {
         drivers: driver_policy.selection(),
     };
@@ -376,7 +382,7 @@ pub(crate) fn prepare_layout_run(
     // crate cwd - the closure always yields `None` (#936, finding 3).
     let participants = build_layout_specs(&plan, &layout, &|_| None)?;
 
-    let router_config = resolve_router_config(layout.robot(), layout_root)?;
+    let router_config = resolve_layout_router_config(layout_root)?;
 
     Ok(PreparedRun {
         project_root: layout_root.to_path_buf(),
@@ -449,7 +455,7 @@ fn classify_run_root(root: &Path) -> Result<RunRootKind> {
     }
     anyhow::bail!(
         "{} is neither a buildable source project (no robot.yaml/Cargo train anchor) nor a \
-         staged runtime layout (no robot.yaml next to bin/); run from a robot project or extract \
+         staged runtime layout (no robot.json/assets next to bin/); run from a robot project or extract \
          a build.phoxal bundle first",
         root.display()
     );
@@ -472,42 +478,28 @@ pub(crate) fn apply_session_connect(
         if let Some((_, value)) = launch
             .env
             .iter_mut()
-            .find(|(key, _)| key == phoxal::participant::launch::env::CONNECT)
+            .find(|(key, _)| key == phoxal_runtime_contract::env::CONNECT)
         {
             *value = endpoint.to_string();
         }
     }
 }
 
-pub(crate) fn resolve_router_config(
-    robot: &phoxal::model::source::robot::v0::Manifest,
-    root: &Path,
-) -> Result<Option<PathBuf>> {
-    let config = robot
-        .router
-        .config
-        .as_ref()
-        .map(|config| phoxal_cli_core::project::tooling::resolve_project_path(root, config));
-    if let Some(config) = &config {
-        anyhow::ensure!(
-            config.is_file(),
-            "router.config file {} does not exist",
-            config.display()
-        );
-    }
-    Ok(config)
+pub(crate) fn resolve_layout_router_config(root: &Path) -> Result<Option<PathBuf>> {
+    let path = root.join(phoxal_cli_core::project::layout::ROUTER_CONFIG_PATH);
+    Ok(path.is_file().then_some(path))
 }
 
-/// Repoint every participant's `robot_root` from the unpublished candidate to
+/// Repoint every participant's `bundle_root` from the unpublished candidate to
 /// the published layout, in place. `construct_plan`/`construct_plan_from_selected`
-/// (`crates/core/src/project/layout/plan.rs`) set `robot_root` to the exact
+/// (`crates/core/src/project/layout/plan.rs`) set `bundle_root` to the exact
 /// root the plan was constructed against - the candidate, here - so every
 /// participant carries it, never only some.
-pub(crate) fn repoint_plan_robot_roots(plan: &mut LaunchPlan, candidate: &Path, published: &Path) {
+pub(crate) fn repoint_plan_bundle_roots(plan: &mut LaunchPlan, candidate: &Path, published: &Path) {
     for robot in &mut plan.robots {
         for participant in &mut robot.participants {
-            if let Some(robot_root) = participant.launch.robot_root.as_mut() {
-                repoint_after_publish(robot_root, candidate, published);
+            if let Some(bundle_root) = participant.launch.bundle_root.as_mut() {
+                repoint_after_publish(bundle_root, candidate, published);
             }
         }
     }
@@ -518,7 +510,7 @@ pub(crate) fn repoint_plan_robot_roots(plan: &mut LaunchPlan, candidate: &Path, 
 /// directory, never under either, and is correctly left untouched. `fs::rename`
 /// (the publish step) preserves the relative structure exactly, so this prefix
 /// swap is exact, never an approximation. Shared by `run`
-/// ([`repoint_plan_robot_roots`], above) and `simulate`
+/// ([`repoint_plan_bundle_roots`], above) and `simulate`
 /// (`simulation::setup::live_simulate_setup`, which repoints each spec's
 /// `executable`/`cwd`) - both stage against an unpublished candidate and must
 /// repoint every candidate-derived path once publish renames it away.
@@ -532,6 +524,20 @@ pub(crate) fn repoint_after_publish(path: &mut PathBuf, candidate: &Path, publis
 mod root_classification_tests {
     use super::*;
 
+    const LAYOUT_YAML: &str = r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components: {}
+"#;
+
     #[test]
     fn classifies_source_layout_and_neither_without_resolving_dependencies() -> Result<()> {
         let source = tempfile::tempdir()?;
@@ -539,8 +545,7 @@ mod root_classification_tests {
         assert_eq!(classify_run_root(source.path())?, RunRootKind::Source);
 
         let layout = tempfile::tempdir()?;
-        std::fs::write(layout.path().join("robot.yaml"), "schema: robot/v0\n")?;
-        std::fs::create_dir(layout.path().join("bin"))?;
+        crate::stage::write_test_layout(layout.path(), LAYOUT_YAML)?;
         assert_eq!(classify_run_root(layout.path())?, RunRootKind::Layout);
 
         let source_with_bin = tempfile::tempdir()?;
@@ -568,8 +573,8 @@ mod root_classification_tests {
 /// re-validates config over the staged layout.
 fn run_source_check(
     staged_root: &Path,
-    robot: &phoxal::model::source::robot::v0::Manifest,
-    resolved: &ResolvedRobot,
+    robot: &phoxal_manifest::source::robot::v0::Manifest,
+    resolved: &BundlePlan,
     source_participants: &[phoxal_cli_core::check::source::SourceParticipant],
     offline: bool,
     reporter: &dyn crate::Reporter,
@@ -647,7 +652,7 @@ robot:
     /// required runtime's own identity must match, so
     /// `RuntimeLayout::construct_plan` can inspect a real object shape off-disk
     /// with no actual binary built (mirrors `run::participants`' own fixture).
-    fn synthesize_binary_with_id(id: &str) -> Vec<u8> {
+    fn synthesize_binary_with_id(id: &str, kind: &str) -> Vec<u8> {
         use object::write::Object;
         let format = host_binary_format();
         let (segment, name): (&[u8], &[u8]) = match format {
@@ -660,21 +665,21 @@ robot:
             name.to_vec(),
             object::SectionKind::ReadOnlyData,
         );
-        let payload = format!(r#"{{"id":"{id}","config_schema":{{"type":"null"}}}}"#);
+        let payload = format!(
+            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{id}","kind":"{kind}","class":"checked","config_schema":{{"type":"null"}}}}"#
+        );
         obj.append_section_data(section, payload.as_bytes(), 1);
         obj.write().expect("synthesize object file")
     }
 
-    /// Stage a minimal but complete layout - compiled `robot.yaml` plus a
+    /// Stage a minimal but complete layout - canonical `robot.json` plus a
     /// synthesized binary for every runtime the loader requires - directly at
     /// `root`, mirroring what `stager::begin_runtime_layout` +
     /// `stage_complete_bin_store` leave behind in a real candidate directory,
     /// with no Cargo or network involved.
     fn stage_layout(root: &Path) -> Result<()> {
-        std::fs::create_dir_all(root)?;
-        std::fs::write(root.join("robot.yaml"), ROBOT_YAML)?;
+        crate::stage::write_test_layout(root, ROBOT_YAML)?;
         let bin = root.join("bin");
-        std::fs::create_dir_all(&bin)?;
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {
             if required.kind == RequiredRuntimeKind::Infrastructure {
@@ -682,7 +687,19 @@ robot:
             }
             std::fs::write(
                 bin.join(&required.binary_name),
-                synthesize_binary_with_id(&required.identity),
+                synthesize_binary_with_id(
+                    &required.identity,
+                    match required.kind {
+                        RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => {
+                            "service"
+                        }
+                        RequiredRuntimeKind::OfficialTool | RequiredRuntimeKind::UserTool => "tool",
+                        RequiredRuntimeKind::ComponentDriver => "driver",
+                        RequiredRuntimeKind::Infrastructure => {
+                            unreachable!("infrastructure skipped above")
+                        }
+                    },
+                ),
             )?;
         }
         Ok(())
@@ -692,15 +709,15 @@ robot:
     /// the launch plan against the unpublished candidate
     /// (`crate::load::layout::validate_layout_plan(candidate.path(), ...)`), which
     /// bakes the candidate root into every participant's
-    /// `ParticipantLaunch::robot_root` (`crates/core/src/project/layout/plan.rs`,
-    /// `construct_plan_from_selected`: `robot_root = self.root().to_path_buf()`).
+    /// `ParticipantLaunch::bundle_root` (`crates/core/src/project/layout/plan.rs`,
+    /// `construct_plan_from_selected`: `bundle_root = self.root().to_path_buf()`).
     /// `publish_runtime_layout` then renames that candidate away, so every one
     /// of those recorded roots goes stale - the real symptom was every launched
-    /// participant's `--robot-root` naming a `.bundle-candidate-*` directory
-    /// that no longer existed. This fails if `repoint_plan_robot_roots` is not
+    /// participant's `--bundle-root` naming a `.bundle-candidate-*` directory
+    /// that no longer existed. This fails if `repoint_plan_bundle_roots` is not
     /// called, or is called with the wrong `(candidate, published)` pair.
     #[test]
-    fn repoint_plan_robot_roots_leaves_no_participant_pointing_at_the_candidate() -> Result<()> {
+    fn repoint_plan_bundle_roots_leaves_no_participant_pointing_at_the_candidate() -> Result<()> {
         let project = tempfile::tempdir()?;
         // Named like a real staging candidate (`stager::begin_runtime_layout`
         // prefixes with `.bundle-candidate-`); the repoint itself only cares
@@ -726,7 +743,7 @@ robot:
         // candidate root - otherwise this test would pass trivially.
         for participant in plan.robots.iter().flat_map(|robot| &robot.participants) {
             assert_eq!(
-                participant.launch.robot_root.as_deref(),
+                participant.launch.bundle_root.as_deref(),
                 Some(candidate.as_path()),
                 "{} must start out pointing at the candidate",
                 participant.launch.participant_id
@@ -734,20 +751,20 @@ robot:
         }
 
         let published = project.path().join(".phoxal/bundle");
-        repoint_plan_robot_roots(&mut plan, &candidate, &published);
+        repoint_plan_bundle_roots(&mut plan, &candidate, &published);
 
         for participant in plan.robots.iter().flat_map(|robot| &robot.participants) {
-            let robot_root = participant.launch.robot_root.as_ref().unwrap_or_else(|| {
-                panic!("{} lost its robot_root", participant.launch.participant_id)
+            let bundle_root = participant.launch.bundle_root.as_ref().unwrap_or_else(|| {
+                panic!("{} lost its bundle_root", participant.launch.participant_id)
             });
             assert!(
-                !robot_root.starts_with(&candidate),
+                !bundle_root.starts_with(&candidate),
                 "{} still references the unpublished candidate: {}",
                 participant.launch.participant_id,
-                robot_root.display()
+                bundle_root.display()
             );
             assert_eq!(
-                robot_root, &published,
+                bundle_root, &published,
                 "{} did not repoint to the published layout",
                 participant.launch.participant_id
             );

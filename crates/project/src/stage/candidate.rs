@@ -1,32 +1,17 @@
-//! Candidate construction and asset validation before publication.
+//! Canonical runtime-bundle candidate construction and validation.
 
+use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::layout::{
+    ASSETS_DIR, PARTICIPANTS_ASSET, ROBOT_FILE, ROUTER_CONFIG_ASSET, RUNTIME_HEADER_ASSET,
+};
+use phoxal_cli_core::project::resolver::{BundlePlan, CompiledBundle};
 
-const BEHAVIORS_DIR: &str = "behaviors";
-const MESHES_DIR: &str = "meshes";
-const COMPONENT_FILE: &str = "component.yaml";
-const COMPONENT_OPTIONAL_FILES: [&str; 2] = ["structure.urdf", "simulation.yaml"];
-
-/// An unpublished runtime-layout candidate: the compiled `robot.yaml` and
-/// runtime assets already staged (and manifest-shape validated), but NOT yet
-/// swapped into the live `.phoxal/bundle/`.
-///
-/// This is the type that makes the stager's atomicity promise real: every
-/// caller MUST materialize officials
-/// ([`materialize_official_store`](super::participants::materialize_official_store)),
-/// build/stage source and override binaries, run its source/loader
-/// validation, and only THEN call
-/// [`publish_runtime_layout`](super::publish::publish_runtime_layout). A failure at
-/// any point before publish touches only this candidate's own temporary
-/// directory - the previous live bundle is untouched and still runnable.
-/// [`StagedCandidate::path`] is a plain filesystem path, so every existing
-/// staging function (`materialize_official_store`, `stage_named_binary`,
-/// `crate::load::layout::validate_layout_plan`, ...) that takes `staged_root: &Path`
-/// already works against it with no changes.
+/// An unpublished bundle candidate. The live `.phoxal/bundle/` is replaced
+/// only after binaries and every canonical input have passed validation.
 pub(crate) struct StagedCandidate {
     pub(super) dir: tempfile::TempDir,
     pub(super) project_root: PathBuf,
@@ -39,25 +24,13 @@ impl StagedCandidate {
     }
 }
 
-/// Stage the compiled `robot.yaml` and runtime assets into a fresh,
-/// UNPUBLISHED candidate directory - a sibling of the live `.phoxal/bundle/`,
-/// never the live path itself. The caller owns the project run lock for the
-/// whole operation (candidate creation through
-/// [`publish_runtime_layout`](super::publish::publish_runtime_layout)),
-/// so no participant observes anything until the single atomic rename at the
-/// end. `bin/` is created empty; the caller populates it (typically with
-/// [`materialize_official_store`](super::participants::materialize_official_store)
-/// and [`stage_participant_binary`](super::participants::stage_participant_binary))
-/// and runs
-/// its own validation against [`StagedCandidate::path`] BEFORE publishing -
-/// see the module docs.
 pub(crate) fn begin_runtime_layout(
     project_root: &Path,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
 ) -> Result<StagedCandidate> {
-    let build_dir =
+    let live =
         project_root.join(phoxal_cli_core::project::launch_plan::RUNTIME_BUNDLE_ROOT_RELATIVE);
-    let parent = build_dir
+    let parent = live
         .parent()
         .context("runtime bundle directory has no parent")?;
     fs::create_dir_all(parent).with_context(|| {
@@ -76,9 +49,8 @@ pub(crate) fn begin_runtime_layout(
             )
         })?;
 
-    let compiled = compile_manifest(resolved);
-    stage_candidate(project_root, candidate.path(), resolved, &compiled)?;
-    validate_candidate(candidate.path(), resolved, &compiled)?;
+    stage_candidate(project_root, candidate.path(), resolved, &resolved.compiled)?;
+    validate_candidate(candidate.path(), &resolved.compiled)?;
 
     Ok(StagedCandidate {
         dir: candidate,
@@ -86,217 +58,234 @@ pub(crate) fn begin_runtime_layout(
     })
 }
 
-/// The compiled `robot/v0` manifest for the staged layout. Under the
-/// declaration model (#950) the authored `services:` and `tools:` maps are
-/// already complete - they select which discovered workspace runtimes belong
-/// to the robot - so compilation carries them verbatim (the `extends:` chain
-/// was already flattened by the framework loader); nothing is injected from
-/// discovery.
-fn compile_manifest(resolved: &ResolvedRobot) -> phoxal::model::source::robot::v0::Manifest {
-    resolved.robot.clone()
-}
-
 fn stage_candidate(
     project_root: &Path,
     candidate: &Path,
-    resolved: &ResolvedRobot,
-    compiled: &phoxal::model::source::robot::v0::Manifest,
+    resolved: &BundlePlan,
+    compiled: &CompiledBundle,
 ) -> Result<()> {
-    phoxal::model::source::robot::write_to_dir(compiled, candidate)
-        .context("failed to write compiled runtime robot.yaml")?;
+    ensure!(
+        !compiled.robot.is_empty(),
+        "resolved bundle plan has no canonical compiler output"
+    );
+    for reserved in [
+        PARTICIPANTS_ASSET,
+        ROUTER_CONFIG_ASSET,
+        RUNTIME_HEADER_ASSET,
+    ] {
+        ensure!(
+            !compiled
+                .assets
+                .keys()
+                .any(|asset| asset.as_str() == reserved),
+            "compiled asset '{reserved}' collides with CLI-owned bundle metadata"
+        );
+    }
+    fs::write(candidate.join(ROBOT_FILE), &compiled.robot)
+        .context("failed to write canonical robot.json")?;
     crate::load::header::RuntimeHeader::for_phoxal_version(&resolved.train)
         .write_to(candidate)
-        .context("failed to write compiled runtime compatibility header")?;
+        .context("failed to write runtime compatibility header")?;
 
-    let structure = &resolved.robot.robot.structure;
-    ensure_safe_relative_path(structure, "robot structure")?;
-    copy_file_preserving_path(project_root, candidate, structure, "robot structure")?;
-    if let Some(structure_parent) = structure.parent() {
-        let mesh_path = structure_parent.join(MESHES_DIR);
-        copy_optional_dir_preserving_path(project_root, candidate, &mesh_path)?;
+    let asset_root = candidate.join(ASSETS_DIR);
+    fs::create_dir_all(&asset_root)
+        .with_context(|| format!("failed to create {}", asset_root.display()))?;
+    for (id, bytes) in &compiled.assets {
+        write_asset(&asset_root, id.as_str(), bytes)?;
     }
-    copy_optional_dir_preserving_path(project_root, candidate, Path::new(BEHAVIORS_DIR))?;
+    let participants =
+        phoxal_cli_core::project::layout::encode_participants(&compiled.participants)?;
+    write_asset(&asset_root, PARTICIPANTS_ASSET, &participants)?;
 
-    // The router's optional Zenoh config file is a real runtime asset: stage it
-    // into the layout under its runtime-root-relative path so a `build.phoxal`
-    // extracted anywhere resolves the same relative path a source run does
-    // (#936, finding 4). It must be a safe relative path with no escapes, exactly
-    // like the robot structure.
-    if let Some(router_config) = &resolved.robot.router.config {
-        ensure_safe_relative_path(router_config, "router.config")?;
-        copy_file_preserving_path(project_root, candidate, router_config, "router.config")?;
+    if let Some(source) = &resolved.source_manifest.router.config {
+        ensure!(
+            !source.as_os_str().is_empty()
+                && source
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_))),
+            "router.config must be a non-empty relative path without '.' or '..': {}",
+            source.display()
+        );
+        let source = project_root.join(source);
+        let bytes = fs::read(&source)
+            .with_context(|| format!("failed to read router config {}", source.display()))?;
+        write_asset(&asset_root, ROUTER_CONFIG_ASSET, &bytes)?;
     }
-
-    stage_component_bundles(candidate, resolved)
-        .context("failed to stage component assets into the runtime layout")
-}
-
-/// Copy every distinct component's asset bundle (`component.yaml`, the
-/// optional `structure.urdf`/`simulation.yaml`, and `meshes/`) into the
-/// staged layout, from whichever on-disk directory resolution already
-/// settled for it - a workspace crate directory or a registry package's
-/// extraction directory `cargo metadata` reported. Both sources are read the
-/// same way: resolution is the only place that knows which is which.
-fn stage_component_bundles(candidate: &Path, resolved: &ResolvedRobot) -> Result<()> {
-    let mut staged = std::collections::BTreeSet::new();
-    for component in &resolved.components {
-        let component_id = &component.source_name;
-        if !staged.insert(component_id.clone()) {
-            continue;
-        }
-        let source_dir = component
-            .assets
-            .path_override()
-            .with_context(|| format!("failed to locate component assets for '{component_id}'"))?;
-        // Schema gate every referenced component document before it is
-        // staged: verify the declared `component/vX` revision this CLI
-        // supports, then strict-parse it, so an unknown field or unsupported
-        // revision fails here - naming the exact file - instead of being
-        // copied through silently (#936, finding 5).
-        gate_component_document(source_dir, component_id)?;
-        let dest_dir = candidate.join("components").join(component_id);
-        if source_dir == dest_dir {
-            continue;
-        }
-        copy_component_bundle_files(source_dir, &dest_dir)?;
-    }
+    fs::create_dir_all(candidate.join("bin"))
+        .context("failed to create canonical bundle bin directory")?;
     Ok(())
 }
 
-fn gate_component_document(source_dir: &Path, component_id: &str) -> Result<()> {
-    let component_file = source_dir.join(COMPONENT_FILE);
-    phoxal_cli_core::schema::ensure_supported_revision(
-        &component_file,
-        phoxal_cli_core::schema::DocumentKind::Component,
-    )?;
-    phoxal::model::source::component::read_from_dir(source_dir).with_context(|| {
-        format!(
-            "component '{component_id}' failed strict parsing of {}",
-            component_file.display()
-        )
-    })?;
+fn write_asset(root: &Path, id: &str, bytes: &[u8]) -> Result<()> {
+    let id = phoxal_model::AssetId::new(id.to_string())
+        .context("compiled asset has an invalid logical id")?;
+    validate_asset_path(id.as_str())?;
+    let path = root.join(id.as_str());
+    let parent = path.parent().context("compiled asset has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    fs::write(&path, bytes).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn validate_asset_path(id: &str) -> Result<()> {
+    ensure!(
+        !id.is_empty()
+            && Path::new(id)
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "compiled asset '{id}' must contain only normal relative path components"
+    );
     Ok(())
 }
 
-fn copy_component_bundle_files(source_dir: &Path, dest_dir: &Path) -> Result<()> {
-    fs::create_dir_all(dest_dir)
-        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
-
-    let component_file = source_dir.join(COMPONENT_FILE);
-    fs::copy(&component_file, dest_dir.join(COMPONENT_FILE)).with_context(|| {
-        format!(
-            "failed to stage component metadata {} to {}",
-            component_file.display(),
-            dest_dir.display()
-        )
-    })?;
-
-    for optional_file in COMPONENT_OPTIONAL_FILES {
-        let source_file = source_dir.join(optional_file);
-        if !source_file.is_file() {
-            continue;
-        }
-        fs::copy(&source_file, dest_dir.join(optional_file)).with_context(|| {
+fn validate_candidate(candidate: &Path, compiled: &CompiledBundle) -> Result<()> {
+    let bytes = fs::read(candidate.join(ROBOT_FILE)).context("staged robot.json is missing")?;
+    ensure!(
+        bytes == compiled.robot,
+        "staged robot.json differs from the compiler output"
+    );
+    let robot =
+        phoxal_model::Robot::decode(&bytes).context("staged robot.json failed canonical decode")?;
+    let asset_root = candidate.join(ASSETS_DIR);
+    let canonical_asset_root = asset_root
+        .canonicalize()
+        .context("failed to resolve staged asset root")?;
+    let declared = compiled
+        .assets
+        .keys()
+        .map(phoxal_model::AssetId::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut referenced = robot.structure().asset_ids().collect::<Vec<_>>();
+    for instance in robot.components() {
+        let component = robot
+            .component_for_instance(instance.id())
+            .with_context(|| {
+                format!(
+                    "canonical robot component instance '{}' has no component definition",
+                    instance.id()
+                )
+            })?;
+        referenced.extend(component.structure().asset_ids());
+    }
+    for id in referenced {
+        ensure!(
+            declared.contains(id.as_str()),
+            "canonical robot references undeclared asset '{}'",
+            id.as_str()
+        );
+        validate_asset_path(id.as_str())?;
+        let path = asset_root.join(id.as_str());
+        let metadata = fs::symlink_metadata(&path).with_context(|| {
             format!(
-                "failed to stage {} to {}",
-                source_file.display(),
-                dest_dir.display()
+                "canonical robot asset '{}' is missing below assets/",
+                id.as_str()
             )
         })?;
+        ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "canonical robot asset '{}' must be a regular file below assets/",
+            id.as_str()
+        );
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("failed to resolve staged asset '{}'", id.as_str()))?;
+        ensure!(
+            canonical.starts_with(&canonical_asset_root),
+            "canonical robot asset '{}' escapes the staged asset root",
+            id.as_str()
+        );
     }
-
-    let meshes_source = source_dir.join(MESHES_DIR);
-    if meshes_source.is_dir() {
-        copy_dir_recursive(&meshes_source, &dest_dir.join(MESHES_DIR))?;
-    }
+    phoxal_cli_core::project::layout::decode_participants(&asset_root.join(PARTICIPANTS_ASSET))?;
     Ok(())
 }
 
-fn ensure_safe_relative_path(path: &Path, label: &str) -> Result<()> {
-    ensure!(
-        !path.as_os_str().is_empty()
-            && path
-                .components()
-                .all(|component| matches!(component, Component::Normal(_))),
-        "{label} must be a non-empty relative path without '.' or '..': {}",
-        path.display()
-    );
-    Ok(())
-}
-
-fn validate_candidate(
-    candidate: &Path,
-    resolved: &ResolvedRobot,
-    compiled: &phoxal::model::source::robot::v0::Manifest,
-) -> Result<()> {
-    // Resolution already ran the model's semantic validation. Reparse the
-    // serialized candidate here to prove the on-disk manifest is complete
-    // and strict without losing that owner-specific validation context.
-    let staged = phoxal::model::source::robot::parse_from_dir(candidate)
-        .context("compiled runtime robot.yaml failed strict parsing")?;
-    ensure!(
-        &staged == compiled,
-        "compiled runtime robot.yaml differs from the resolved manifest"
-    );
-    ensure!(
-        candidate.join(&resolved.robot.robot.structure).is_file(),
-        "compiled runtime layout is missing robot structure {}",
-        resolved.robot.robot.structure.display()
-    );
-
-    for component in &resolved.components {
-        {
-            let component_file = candidate
-                .join("components")
-                .join(&component.source_name)
-                .join("component.yaml");
-            ensure!(
-                component_file.is_file(),
-                "compiled runtime layout is missing component metadata {}",
-                component_file.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn copy_file_preserving_path(
-    project_root: &Path,
-    candidate: &Path,
-    relative: &Path,
-    label: &str,
-) -> Result<()> {
-    let source = project_root.join(relative);
-    let dest = candidate.join(relative);
-    let parent = dest
-        .parent()
-        .context("runtime layout destination has no parent")?;
-    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
-    fs::copy(&source, &dest).with_context(|| {
-        format!(
-            "failed to stage {label} {} to {}",
-            source.display(),
-            dest.display()
-        )
+#[cfg(test)]
+pub(crate) fn compile_test_bundle(
+    source_manifest: &phoxal_manifest::source::robot::v0::Manifest,
+) -> Result<CompiledBundle> {
+    let source = tempfile::tempdir()?;
+    let component = source.path().join("components/wheel");
+    fs::create_dir_all(&component)?;
+    fs::write(
+        source.path().join("robot.yaml"),
+        r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  structure: structure.urdf
+  kinematic:
+    kind: omnidirectional
+    actuators:
+      - wheel.motor
+    encoders: []
+  components:
+    wheel:
+      component: wheel
+      mount_link: base_link
+"#,
+    )?;
+    fs::write(
+        source.path().join("structure.urdf"),
+        r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
+    )?;
+    fs::write(
+        component.join("component.yaml"),
+        "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+    )?;
+    fs::write(
+        component.join("structure.urdf"),
+        r#"<robot name="wheel"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
+    )?;
+    let compiled = phoxal_manifest::compile(phoxal_manifest::SourceSet {
+        project_root: source.path().to_path_buf(),
+        robot_manifest: source.path().join("robot.yaml"),
+        component_roots: std::collections::BTreeMap::from([("wheel".to_string(), component)]),
     })?;
+    let mut bundle = CompiledBundle::from_project(compiled)?;
+    bundle.participants = source_manifest
+        .services
+        .iter()
+        .map(|(id, service)| phoxal_manifest::Participant {
+            id: id.clone(),
+            kind: phoxal_manifest::ParticipantKind::Service,
+            component_instance: None,
+            config: service.config.clone(),
+        })
+        .chain(
+            source_manifest
+                .tools
+                .iter()
+                .map(|(id, tool)| phoxal_manifest::Participant {
+                    id: id.clone(),
+                    kind: phoxal_manifest::ParticipantKind::Tool,
+                    component_instance: None,
+                    config: tool.config.clone(),
+                }),
+        )
+        .collect();
+    Ok(bundle)
+}
+
+#[cfg(test)]
+pub(crate) fn write_test_layout(root: &Path, robot_yaml: &str) -> Result<()> {
+    let source_manifest = phoxal_manifest::source::robot::parse_from_string(robot_yaml)?;
+    let compiled = compile_test_bundle(&source_manifest)?;
+    fs::create_dir_all(root.join(ASSETS_DIR))?;
+    fs::create_dir_all(root.join("bin"))?;
+    fs::write(root.join(ROBOT_FILE), &compiled.robot)?;
+    fs::write(
+        root.join(ASSETS_DIR).join(PARTICIPANTS_ASSET),
+        phoxal_cli_core::project::layout::encode_participants(&compiled.participants)?,
+    )?;
+    for (id, bytes) in &compiled.assets {
+        write_asset(&root.join(ASSETS_DIR), id.as_str(), bytes)?;
+    }
     Ok(())
 }
 
-fn copy_optional_dir_preserving_path(
-    project_root: &Path,
-    candidate: &Path,
-    relative: &Path,
-) -> Result<()> {
-    let source = project_root.join(relative);
-    if !source.is_dir() {
-        return Ok(());
-    }
-    copy_dir_recursive(&source, &candidate.join(relative))
-}
-
-/// Copy a directory tree into `dest` (files and directories; permissions
-/// preserved by `fs::copy`). Shared with `phoxal build`'s container path, which
-/// publishes the snapshot-staged layout into the real project (#936).
+/// Copy a validated staged tree into a build destination.
 pub(crate) fn copy_tree_into(source: &Path, dest: &Path) -> Result<()> {
     copy_dir_recursive(source, dest)
 }
@@ -309,10 +298,15 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
         let entry = entry?;
         let source_path = entry.path();
         let dest_path = dest.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
+        let metadata = fs::symlink_metadata(&source_path)?;
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "bundle content must not contain symlinks: {}",
+            source_path.display()
+        );
+        if metadata.is_dir() {
             copy_dir_recursive(&source_path, &dest_path)?;
-        } else if file_type.is_file() {
+        } else if metadata.is_file() {
             fs::copy(&source_path, &dest_path).with_context(|| {
                 format!(
                     "failed to stage runtime asset {} to {}",

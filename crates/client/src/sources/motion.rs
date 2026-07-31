@@ -1,5 +1,5 @@
 use anyhow::Result;
-use phoxal::raw::Bus;
+use phoxal_bus::Bus;
 
 use super::TelemetryBackend;
 

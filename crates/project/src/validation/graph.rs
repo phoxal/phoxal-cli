@@ -6,7 +6,7 @@ use super::{
 };
 use anyhow::Context;
 use anyhow::Result;
-use phoxal::check as graph_check;
+use phoxal_cli_core::check as graph_check;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::check::source::ToolParticipant;

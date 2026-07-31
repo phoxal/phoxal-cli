@@ -1,39 +1,43 @@
 //! The single staged-runtime-layout loader.
 //!
-//! Execution consumes ONLY a staged runtime layout - `<root>/robot.yaml` (the
-//! compiled, flattened `robot/v0` document), a flat `bin/` lookup store, and
-//! runtime assets. There is no source loader and no compiled loader: this one
-//! loader reads the same layout whether it was staged from a source project
-//! into `.phoxal/bundle/` or extracted from a `build.phoxal` bundle
-//! (#936). Staging (`cargo install` materialization, `extends:` flattening)
-//! is the only code that knows about source; the loader never does.
+//! Execution consumes only the canonical staged bundle: `robot.json`,
+//! `assets/`, and `bin/`. Authored YAML, component documents, simulation
+//! documents, and URDF never enter this loader.
 //!
 //! The loader derives the required runtime set from two authorities - the
-//! CLI-internal official catalog ([`super::catalog`]) and the compiled
-//! `robot.yaml` (user services, driven component instances, robot model) -
+//! CLI-internal official catalog ([`super::catalog`]) and the compiler-owned
+//! participant declarations beside `robot.json` -
 //! resolves every required runtime to exactly one canonical binary under
 //! `bin/`, and inspects only the selected binaries (host-architecture
 //! compatibility plus embedded metadata) without ever executing them.
 //! Unreferenced extra files in `bin/` are ignored and never inspected.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
-use phoxal::model::source::robot::{self as robot_source, v0::Manifest as RobotModel};
+use anyhow::{Context, Result, bail, ensure};
+use phoxal_manifest::{Participant, ParticipantKind};
 
 use super::catalog::{self, ArtifactKind, OfficialRuntime};
 use super::resolver::official_binary_name;
 use crate::check::participant_metadata::{
     ExpectedTarget, ParticipantMeta, expected_target_for_host, inspect_selected_binary_for_target,
 };
-use crate::schema::{DocumentKind, ensure_supported_revision};
 
 pub mod plan;
 
 pub use plan::PlanOptions;
 
-const ROBOT_FILE: &str = "robot.yaml";
+pub const ROBOT_FILE: &str = "robot.json";
+pub const ASSETS_DIR: &str = "assets";
+pub const PARTICIPANTS_ASSET: &str = "participants.json";
+pub const ROUTER_CONFIG_ASSET: &str = "router/config.json5";
+pub const RUNTIME_HEADER_ASSET: &str = "runtime.json";
+pub const PARTICIPANTS_PATH: &str = "assets/participants.json";
+pub const ROUTER_CONFIG_PATH: &str = "assets/router/config.json5";
+pub const RUNTIME_HEADER_PATH: &str = "assets/runtime.json";
+const BEHAVIOR_CATALOG_ASSET: &str = "behavior/catalog.json";
+const PARTICIPANTS_SCHEMA: &str = "phoxal/participants/v0";
 const BIN_DIR: &str = "bin";
 
 /// Which target signature the loader inspects selected binaries against (#936).
@@ -107,14 +111,13 @@ pub enum RequiredRuntimeKind {
     OfficialTool,
     Infrastructure,
     UserService,
-    /// A declared additional user tool (`tools:` in robot.yaml, #950).
+    /// A compiled additional user tool.
     UserTool,
     ComponentDriver,
 }
 
 /// One runtime the compiled layout requires, with the canonical `bin/` file
-/// name the staging step wrote it under and any config the compiled
-/// `robot.yaml` carries for it.
+/// name the staging step wrote it under and any compiler-owned config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequiredRuntime {
     /// The launch/board identity, used in diagnostics: the official short name
@@ -125,8 +128,8 @@ pub struct RequiredRuntime {
     /// runtime under, and the only file the loader ever looks up for it.
     pub binary_name: String,
     pub kind: RequiredRuntimeKind,
-    /// Config carried by the compiled `robot.yaml` `services` map. `None` for a
-    /// runtime with no authored config.
+    /// Config carried by the compiler-owned participant declaration. `None`
+    /// for a runtime with no authored config.
     pub config: Option<serde_json::Value>,
 }
 
@@ -145,46 +148,44 @@ pub struct SelectedBinary {
 #[derive(Debug, Clone)]
 pub struct RuntimeLayout {
     root: PathBuf,
-    robot: RobotModel,
+    robot: phoxal_model::Robot,
+    participants: Vec<Participant>,
 }
 
 impl RuntimeLayout {
-    /// Whether `root` is shaped like a staged runtime layout - a `robot.yaml`
-    /// next to a `bin/` store. Cheap existence checks only (no parse), used by
+    /// Whether `root` is shaped like a staged runtime layout - canonical
+    /// `robot.json`, `assets/`, and `bin/`. Cheap existence checks only, used by
     /// universal `run` root classification to tell an extracted bundle / staged
     /// `.phoxal/bundle/` directory (run in place) from a source project
     /// (staged first).
     #[must_use]
     pub fn is_layout_root(root: &Path) -> bool {
-        root.join(ROBOT_FILE).is_file() && root.join(BIN_DIR).is_dir()
+        root.join(ROBOT_FILE).is_file()
+            && root.join(ASSETS_DIR).is_dir()
+            && root.join(BIN_DIR).is_dir()
     }
 
-    /// Parse the compiled `robot.yaml` at `root` through the per-document
-    /// schema-revision gate and the framework's strict `robot/v0` parser. An
-    /// unsupported declared revision fails with the exact "update the CLI"
-    /// message before anything else runs.
+    /// Strictly decode the canonical robot and compiled participant
+    /// declarations. No source-format parser is available on this path.
     pub fn open(root: &Path) -> Result<Self> {
         let robot_path = root.join(ROBOT_FILE);
-        ensure_supported_revision(&robot_path, DocumentKind::Robot)?;
-        // Declaration invariants are re-checked here, not only at source
-        // resolution: an extracted bundle is untrusted input, and a hand-edited
-        // `tools:`/`services:` map naming an official identity or a dual name
-        // must fail before the required set is derived (#950).
-        let robot = robot_source::parse_from_dir(root).with_context(|| {
-            format!(
-                "failed to parse compiled robot.yaml in staged runtime layout {}",
-                root.display()
-            )
-        })?;
-        validate_runtime_declarations(&robot).with_context(|| {
-            format!(
-                "compiled robot.yaml in staged runtime layout {} declares an invalid runtime set",
-                root.display()
-            )
-        })?;
+        let robot = phoxal_model::Robot::decode(
+            &std::fs::read(&robot_path)
+                .with_context(|| format!("failed to read {}", robot_path.display()))?,
+        )
+        .with_context(|| format!("failed to decode canonical {}", robot_path.display()))?;
+        validate_model_assets(root, &robot)?;
+        let participants = decode_participants(&root.join(ASSETS_DIR).join(PARTICIPANTS_ASSET))?;
+        validate_participant_model_membership(&robot, &participants)?;
+        if participants.iter().any(|participant| {
+            participant.kind == ParticipantKind::Service && participant.id == "behavior"
+        }) {
+            validate_bundle_asset(root, BEHAVIOR_CATALOG_ASSET, "compiled behavior catalog")?;
+        }
         Ok(Self {
             root: root.to_path_buf(),
             robot,
+            participants,
         })
     }
 
@@ -194,8 +195,13 @@ impl RuntimeLayout {
     }
 
     #[must_use]
-    pub fn robot(&self) -> &RobotModel {
+    pub fn robot(&self) -> &phoxal_model::Robot {
         &self.robot
+    }
+
+    #[must_use]
+    pub fn participants(&self) -> &[Participant] {
+        &self.participants
     }
 
     #[must_use]
@@ -235,66 +241,68 @@ impl RuntimeLayout {
                 // never members of the official runtime set.
                 ArtifactKind::ComponentAssets | ArtifactKind::ComponentDriver => continue,
             };
-            // Official runtimes take no configuration from robot.yaml (#950):
-            // the declaration maps are user-only, and `open` rejected any
-            // official identity declared in them.
+            // Official runtimes take no authored service-map configuration.
+            // The framework compiler does, however, own the behavior service's
+            // typed `{root, autostart}` declaration.
+            let config = self
+                .participants
+                .iter()
+                .find(|participant| {
+                    participant.kind == ParticipantKind::Service && participant.id == short
+                })
+                .and_then(|participant| participant.config.clone());
             required.push(RequiredRuntime {
                 identity: short.clone(),
                 binary_name: official_binary_name(official.kind, &short),
                 kind,
-                config: None,
-            });
-        }
-
-        for (name, service) in &self.robot.services {
-            if official_services.contains(name.as_str()) {
-                continue;
-            }
-            required.push(RequiredRuntime {
-                identity: name.clone(),
-                binary_name: name.clone(),
-                kind: RequiredRuntimeKind::UserService,
-                config: service.config.clone(),
-            });
-        }
-
-        // The tools declaration (#950): each declared additional user tool is
-        // required under its own identity, exactly like a user service.
-        // Resolution already rejects official identities in this map.
-        for (name, tool) in &self.robot.tools {
-            required.push(RequiredRuntime {
-                identity: name.clone(),
-                binary_name: name.clone(),
-                kind: RequiredRuntimeKind::UserTool,
-                config: tool.config.clone(),
+                config,
             });
         }
 
         let mut seen_driver_ids = BTreeSet::new();
-        for (instance, component) in &self.robot.robot.components {
-            if component.driver.is_none() {
-                continue;
+        for participant in &self.participants {
+            match participant.kind {
+                ParticipantKind::Service
+                    if !official_services.contains(participant.id.as_str()) =>
+                {
+                    required.push(RequiredRuntime {
+                        identity: participant.id.clone(),
+                        binary_name: participant.id.clone(),
+                        kind: RequiredRuntimeKind::UserService,
+                        config: participant.config.clone(),
+                    });
+                }
+                ParticipantKind::Tool => required.push(RequiredRuntime {
+                    identity: participant.id.clone(),
+                    binary_name: participant.id.clone(),
+                    kind: RequiredRuntimeKind::UserTool,
+                    config: participant.config.clone(),
+                }),
+                ParticipantKind::Driver => {
+                    let Some(instance) = participant.component_instance.as_deref() else {
+                        continue;
+                    };
+                    if !drivers.includes_instance(instance)
+                        || !seen_driver_ids.insert(participant.id.clone())
+                    {
+                        continue;
+                    }
+                    required.push(RequiredRuntime {
+                        identity: participant.id.clone(),
+                        binary_name: official_binary_name(
+                            ArtifactKind::ComponentDriver,
+                            &participant.id,
+                        ),
+                        kind: RequiredRuntimeKind::ComponentDriver,
+                        // Driver configuration is instance-scoped. The shared
+                        // required binary cannot carry one representative
+                        // instance's config; plan construction joins each
+                        // driver declaration back to its own launch record.
+                        config: None,
+                    });
+                }
+                ParticipantKind::Simulator | ParticipantKind::Service => {}
             }
-            // The policy gates the required set: an instance the run excludes
-            // (drivers off, or not named in a `--driver` subset) does not pull
-            // its driver binary into resolution/inspection. A driver binary is
-            // still required if any other instance of the same component id is
-            // selected.
-            if !drivers.includes_instance(instance) {
-                continue;
-            }
-            if !seen_driver_ids.insert(component.component.clone()) {
-                continue;
-            }
-            required.push(RequiredRuntime {
-                identity: component.component.clone(),
-                binary_name: official_binary_name(
-                    ArtifactKind::ComponentDriver,
-                    &component.component,
-                ),
-                kind: RequiredRuntimeKind::ComponentDriver,
-                config: None,
-            });
         }
 
         required
@@ -328,7 +336,7 @@ impl RuntimeLayout {
     /// `required.identity` before the caller ever sees its config schema
     /// before the schema is trusted. `required.identity` is the canonical
     /// short/component id `required_runtimes` derived from the compiled
-    /// `robot.yaml` plus the CLI catalog - the official short name, the user
+    /// participant declarations plus the CLI catalog - the official short name, the user
     /// service/tool name, or the component id shared by every driven
     /// instance - which is exactly the identity a matching binary's own
     /// `#[phoxal::service]`/`driver`/`tool` attribute declares. A mismatch
@@ -363,8 +371,76 @@ impl RuntimeLayout {
                 required.identity,
             );
         }
+        let expected_kind = match required.kind {
+            RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => {
+                phoxal_runtime_contract::ParticipantKind::Service
+            }
+            RequiredRuntimeKind::OfficialTool
+            | RequiredRuntimeKind::Infrastructure
+            | RequiredRuntimeKind::UserTool => phoxal_runtime_contract::ParticipantKind::Tool,
+            RequiredRuntimeKind::ComponentDriver => {
+                phoxal_runtime_contract::ParticipantKind::Driver
+            }
+        };
+        ensure!(
+            meta.kind == expected_kind,
+            "staged runtime layout {} binary bin/{} declares participant kind {:?}, but required \
+             runtime `{}` expects {:?}; the wrong participant kind is staged at this canonical path",
+            self.root.display(),
+            required.binary_name,
+            meta.kind,
+            required.identity,
+            expected_kind,
+        );
         Ok(SelectedBinary { path, meta })
     }
+}
+
+/// Validate every canonical model asset against the staged asset root. This is
+/// repeated while opening an extracted or hand-provided bundle; candidate
+/// validation alone cannot protect a bundle after publication or transport.
+fn validate_model_assets(root: &Path, robot: &phoxal_model::Robot) -> Result<()> {
+    let mut referenced = robot.structure().asset_ids().collect::<Vec<_>>();
+    for instance in robot.components() {
+        let component = robot
+            .component_for_instance(instance.id())
+            .with_context(|| {
+                format!(
+                    "canonical robot component instance '{}' has no component definition",
+                    instance.id()
+                )
+            })?;
+        referenced.extend(component.structure().asset_ids());
+    }
+    for id in referenced {
+        validate_bundle_asset(root, id.as_str(), "canonical robot asset")?;
+    }
+    Ok(())
+}
+
+fn validate_bundle_asset(root: &Path, relative: &str, label: &str) -> Result<()> {
+    let asset_root = root.join(ASSETS_DIR);
+    let canonical_root = asset_root.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve bundle asset root {}",
+            asset_root.display()
+        )
+    })?;
+    let path = asset_root.join(relative);
+    let metadata = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("{label} '{relative}' is missing"))?;
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "{label} '{relative}' must be a regular file below assets/"
+    );
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {label} '{relative}'"))?;
+    ensure!(
+        canonical.starts_with(&canonical_root),
+        "{label} '{relative}' escapes the bundle asset root"
+    );
+    Ok(())
 }
 
 /// The short (kind-stripped) name of one catalog official, e.g.
@@ -385,6 +461,154 @@ fn official_short_name(official: &OfficialRuntime) -> String {
         .to_string()
 }
 
+#[derive(serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParticipantsWire<'a> {
+    schema: &'static str,
+    participants: &'a [Participant],
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParticipantsWireOwned {
+    schema: String,
+    participants: Vec<Participant>,
+}
+
+pub fn encode_participants(participants: &[Participant]) -> Result<Vec<u8>> {
+    validate_participants(participants)?;
+    serde_json::to_vec_pretty(&ParticipantsWire {
+        schema: PARTICIPANTS_SCHEMA,
+        participants,
+    })
+    .context("failed to encode compiled participant declarations")
+}
+
+pub fn decode_participants(path: &Path) -> Result<Vec<Participant>> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read compiled participants {}", path.display()))?;
+    let wire: ParticipantsWireOwned = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to decode compiled participants {}", path.display()))?;
+    anyhow::ensure!(
+        wire.schema == PARTICIPANTS_SCHEMA,
+        "unsupported compiled participant schema '{}'",
+        wire.schema
+    );
+    validate_participants(&wire.participants)?;
+    Ok(wire.participants)
+}
+
+fn validate_participants(participants: &[Participant]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    let mut user_namespace = BTreeMap::new();
+    let official_names = official_service_short_names()
+        .into_iter()
+        .chain(official_tool_short_names())
+        .collect::<BTreeSet<_>>();
+    for participant in participants {
+        let kind = match participant.kind {
+            ParticipantKind::Service => "service",
+            ParticipantKind::Driver => "driver",
+            ParticipantKind::Simulator => "simulator",
+            ParticipantKind::Tool => "tool",
+        };
+        anyhow::ensure!(
+            seen.insert((
+                kind,
+                participant.id.as_str(),
+                participant.component_instance.as_deref()
+            )),
+            "duplicate compiled participant declaration '{}'",
+            participant.id
+        );
+        match participant.kind {
+            ParticipantKind::Service | ParticipantKind::Tool => {
+                anyhow::ensure!(
+                    participant.component_instance.is_none(),
+                    "compiled {kind} participant '{}' must not name a component instance",
+                    participant.id
+                );
+                let compiler_owned_behavior = participant.kind == ParticipantKind::Service
+                    && participant.id == "behavior"
+                    && participant.config.is_some();
+                anyhow::ensure!(
+                    !official_names.contains(participant.id.as_str()) || compiler_owned_behavior,
+                    "compiled {kind} participant '{}' collides with a catalog-owned runtime",
+                    participant.id
+                );
+                if let Some(previous) = user_namespace.insert(participant.id.as_str(), kind) {
+                    anyhow::ensure!(
+                        previous == kind,
+                        "compiled participant '{}' is declared as both {previous} and {kind}",
+                        participant.id
+                    );
+                }
+            }
+            ParticipantKind::Driver | ParticipantKind::Simulator => {
+                anyhow::ensure!(
+                    participant.component_instance.is_some(),
+                    "compiled {kind} participant '{}' must name a component instance",
+                    participant.id
+                );
+                if participant.kind == ParticipantKind::Driver {
+                    let config = participant.config.clone().with_context(|| {
+                        format!(
+                            "compiled driver participant '{}' must carry typed config",
+                            participant.id
+                        )
+                    })?;
+                    serde_json::from_value::<phoxal_manifest::source::robot::v0::DriverConfig>(
+                        config,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "compiled driver participant '{}' has invalid typed config",
+                            participant.id
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_participant_model_membership(
+    robot: &phoxal_model::Robot,
+    participants: &[Participant],
+) -> Result<()> {
+    for participant in participants {
+        if !matches!(
+            participant.kind,
+            ParticipantKind::Driver | ParticipantKind::Simulator
+        ) {
+            continue;
+        }
+        let instance_id = participant
+            .component_instance
+            .as_deref()
+            .context("compiled component participant has no component instance")?;
+        let instance = robot
+            .components()
+            .find(|instance| instance.id() == instance_id)
+            .with_context(|| {
+                format!(
+                    "compiled {:?} participant '{}' names unknown component instance '{}'",
+                    participant.kind, participant.id, instance_id
+                )
+            })?;
+        ensure!(
+            instance.component_type() == participant.id,
+            "compiled {:?} participant '{}' does not match component instance '{}' of type '{}'",
+            participant.kind,
+            participant.id,
+            instance_id,
+            instance.component_type()
+        );
+    }
+    Ok(())
+}
+
 /// Validate the runtime declaration maps of a `robot/v0` document against the
 /// CLI catalog (#950), shared by source resolution (which runs it FIRST, before
 /// any workspace scanning) and by [`RuntimeLayout::open`] (so a hand-edited
@@ -393,11 +617,11 @@ fn official_short_name(official: &OfficialRuntime) -> String {
 /// - a name may be declared under `services:` or `tools:`, never both (one
 ///   binary namespace);
 /// - official identities are never declared - official runtimes are
-///   catalog-owned, always run, and take no configuration from robot.yaml. A
+///   catalog-owned, always run, and take no authored configuration. A
 ///   workspace crate overriding an official identity does so WITHOUT a
 ///   declaration.
 pub fn validate_runtime_declarations(
-    robot: &phoxal::model::source::robot::v0::Manifest,
+    robot: &phoxal_manifest::source::robot::v0::Manifest,
 ) -> Result<()> {
     // Officials share ONE binary namespace across services and tools, so a
     // declared name is checked against the WHOLE reserved catalog set, not just
@@ -452,7 +676,7 @@ fn official_tool_short_names() -> BTreeSet<&'static str> {
 
 /// The short names of every official service in the CLI catalog, so the loader
 /// can tell an official-service config entry from a user service in the
-/// compiled `robot.yaml` `services` map.
+/// compiler-owned participant declarations.
 fn official_service_short_names() -> BTreeSet<&'static str> {
     catalog::NATIVE
         .iter()
@@ -467,10 +691,80 @@ fn official_service_short_names() -> BTreeSet<&'static str> {
 }
 
 #[cfg(test)]
+pub(crate) fn write_test_layout(root: &Path, robot_yaml: &str) -> Result<()> {
+    let source = tempfile::tempdir()?;
+    let parsed = phoxal_manifest::source::robot::parse_from_string(robot_yaml)?;
+    let fixture_yaml = parsed
+        .robot
+        .components
+        .keys()
+        .next()
+        .filter(|_| robot_yaml.contains("actuators: []"))
+        .map_or_else(
+            || robot_yaml.to_string(),
+            |instance| {
+                robot_yaml.replace(
+                    "actuators: []",
+                    &format!("actuators:\n      - {instance}.motor"),
+                )
+            },
+        );
+    let manifest = phoxal_manifest::source::robot::parse_from_string(&fixture_yaml)?;
+    phoxal_manifest::source::robot::write_to_dir(&manifest, source.path())?;
+    let structure_path = source.path().join(&manifest.robot.structure);
+    if let Some(parent) = structure_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        &structure_path,
+        r#"<robot name="fixture"><link name="base_footprint"/><link name="base_link"/><link name="base"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="base_mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
+    )?;
+    let mut component_roots = std::collections::BTreeMap::new();
+    for component_type in manifest.used_component_types() {
+        let component_root = source.path().join("components").join(component_type);
+        std::fs::create_dir_all(&component_root)?;
+        std::fs::write(
+            component_root.join("component.yaml"),
+            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+        )?;
+        std::fs::write(
+            component_root.join("structure.urdf"),
+            r#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
+        )?;
+        component_roots.insert(component_type.to_string(), component_root);
+    }
+    let compiled = phoxal_manifest::compile(phoxal_manifest::SourceSet {
+        project_root: source.path().to_path_buf(),
+        robot_manifest: source.path().join("robot.yaml"),
+        component_roots,
+    })?;
+    let (robot, participants, assets) = compiled.into_parts();
+    std::fs::create_dir_all(root.join(ASSETS_DIR))?;
+    std::fs::create_dir_all(root.join(BIN_DIR))?;
+    std::fs::write(root.join(ROBOT_FILE), robot.encode()?)?;
+    std::fs::write(
+        root.join(ASSETS_DIR).join(PARTICIPANTS_ASSET),
+        encode_participants(&participants.into_vec())?,
+    )?;
+    for (id, bytes) in assets.into_map() {
+        let path = root.join(ASSETS_DIR).join(id.as_str());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, bytes)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
+    use phoxal_manifest::source::robot as robot_source;
+
     #[test]
     fn official_identities_are_rejected_in_either_map_across_namespaces() -> anyhow::Result<()> {
-        use phoxal::model::source::robot::v0::{Manifest as RobotManifest, UserService, UserTool};
+        use phoxal_manifest::source::robot::v0::{
+            Manifest as RobotManifest, UserService, UserTool,
+        };
 
         let base = || -> RobotManifest {
             robot_source::parse_from_string(
@@ -518,6 +812,40 @@ robot:
             .insert("lidar-viz".to_string(), UserTool { config: None });
         super::validate_runtime_declarations(&robot).expect("a user tool name is accepted");
         Ok(())
+    }
+
+    #[test]
+    fn bundle_path_constants_match_their_asset_locations() {
+        for (asset, path) in [
+            (PARTICIPANTS_ASSET, PARTICIPANTS_PATH),
+            (ROUTER_CONFIG_ASSET, ROUTER_CONFIG_PATH),
+            (RUNTIME_HEADER_ASSET, RUNTIME_HEADER_PATH),
+        ] {
+            assert_eq!(format!("{ASSETS_DIR}/{asset}"), path);
+        }
+    }
+
+    #[test]
+    fn compiled_official_names_are_rejected_except_typed_behavior_policy() {
+        let service = |id: &str, config| phoxal_manifest::Participant {
+            id: id.to_string(),
+            kind: phoxal_manifest::ParticipantKind::Service,
+            component_instance: None,
+            config,
+        };
+        let error = encode_participants(&[service("drive", None)])
+            .expect_err("catalog-owned service declarations must fail closed")
+            .to_string();
+        assert!(error.contains("catalog-owned runtime"), "{error}");
+        let error = encode_participants(&[service("behavior", None)])
+            .expect_err("the behavior compiler declaration must carry typed policy")
+            .to_string();
+        assert!(error.contains("catalog-owned runtime"), "{error}");
+        encode_participants(&[service(
+            "behavior",
+            Some(serde_json::json!({"root": "system.root", "autostart": true})),
+        )])
+        .expect("typed compiler-owned behavior policy is accepted");
     }
 
     use super::*;
@@ -587,15 +915,164 @@ tools:
         obj.write().expect("synthesize object file")
     }
 
+    fn metadata(id: &str, kind: &str, schema: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema": phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA,
+            "id": id,
+            "kind": kind,
+            "class": "checked",
+            "config_schema": schema,
+        }))
+        .expect("metadata serializes")
+    }
+
     fn write_layout(robot_yaml: &str) -> Result<tempfile::TempDir> {
         let dir = tempfile::tempdir()?;
-        fs::write(dir.path().join(ROBOT_FILE), robot_yaml)?;
-        fs::create_dir_all(dir.path().join(BIN_DIR))?;
+        super::write_test_layout(dir.path(), robot_yaml)?;
         Ok(dir)
     }
 
     fn write_bin(layout: &Path, name: &str, bytes: &[u8]) -> Result<()> {
         fs::write(layout.join(BIN_DIR).join(name), bytes)?;
+        Ok(())
+    }
+
+    #[test]
+    fn behavior_policy_requires_its_compiled_catalog_and_configures_the_official_service()
+    -> Result<()> {
+        let dir = write_layout(ROBOT_YAML)?;
+        let participants_path = dir.path().join(ASSETS_DIR).join(PARTICIPANTS_ASSET);
+        let mut participants = decode_participants(&participants_path)?;
+        let config = serde_json::json!({"root": "system.root", "autostart": true});
+        participants.push(phoxal_manifest::Participant {
+            id: "behavior".to_string(),
+            kind: phoxal_manifest::ParticipantKind::Service,
+            component_instance: None,
+            config: Some(config.clone()),
+        });
+        fs::write(&participants_path, encode_participants(&participants)?)?;
+
+        let error = RuntimeLayout::open(dir.path())
+            .expect_err("behavior policy without its compiler asset must fail")
+            .to_string();
+        assert!(error.contains("compiled behavior catalog"), "{error}");
+
+        let catalog = dir.path().join(ASSETS_DIR).join(BEHAVIOR_CATALOG_ASSET);
+        fs::create_dir_all(catalog.parent().context("behavior catalog has no parent")?)?;
+        fs::write(&catalog, b"{}")?;
+        let layout = RuntimeLayout::open(dir.path())?;
+        let behavior = layout
+            .required_runtimes(&DriverSelection::All)
+            .into_iter()
+            .find(|runtime| runtime.identity == "behavior")
+            .context("behavior service is required")?;
+        assert_eq!(behavior.kind, RequiredRuntimeKind::OfficialService);
+        assert_eq!(behavior.config, Some(config));
+        Ok(())
+    }
+
+    #[test]
+    fn component_participants_must_match_a_canonical_model_instance() -> Result<()> {
+        let dir = write_layout(ROBOT_YAML)?;
+        let participants_path = dir.path().join(ASSETS_DIR).join(PARTICIPANTS_ASSET);
+        let mut participants = decode_participants(&participants_path)?;
+        participants.push(phoxal_manifest::Participant {
+            id: "ddsm115".to_string(),
+            kind: phoxal_manifest::ParticipantKind::Driver,
+            component_instance: Some("unknown_drive".to_string()),
+            config: Some(serde_json::json!({
+                "connection": {"type": "serial", "port": "/dev/null", "baud": 115200}
+            })),
+        });
+        fs::write(&participants_path, encode_participants(&participants)?)?;
+        let error = RuntimeLayout::open(dir.path())
+            .expect_err("an unknown compiled component instance must fail")
+            .to_string();
+        assert!(error.contains("unknown component instance"), "{error}");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_rejects_a_canonical_asset_symlink_escape() -> Result<()> {
+        let source = tempfile::tempdir()?;
+        fs::create_dir_all(source.path().join("meshes"))?;
+        let component = source.path().join("components/wheel");
+        fs::create_dir_all(&component)?;
+        fs::write(
+            source.path().join("robot.yaml"),
+            r#"schema: robot/v0
+robot:
+  id: asset-bot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  structure: structure.urdf
+  kinematic:
+    kind: omnidirectional
+    actuators:
+      - wheel.motor
+    encoders: []
+  components:
+    wheel:
+      component: wheel
+      mount_link: base
+"#,
+        )?;
+        fs::write(
+            source.path().join("structure.urdf"),
+            r#"<robot name="asset-bot"><link name="base_footprint"/><link name="base_link"/><link name="base"><visual><geometry><mesh filename="package://robot/meshes/body.stl"/></geometry></visual></link><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
+        )?;
+        fs::write(
+            source.path().join("meshes/body.stl"),
+            b"solid body\nendsolid body\n",
+        )?;
+        fs::write(
+            component.join("component.yaml"),
+            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+        )?;
+        fs::write(
+            component.join("structure.urdf"),
+            r#"<robot name="wheel"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
+        )?;
+        let compiled = phoxal_manifest::compile(phoxal_manifest::SourceSet {
+            project_root: source.path().to_path_buf(),
+            robot_manifest: source.path().join("robot.yaml"),
+            component_roots: std::collections::BTreeMap::from([("wheel".to_string(), component)]),
+        })?;
+        let (robot, participants, assets) = compiled.into_parts();
+        let dir = tempfile::tempdir()?;
+        fs::create_dir_all(dir.path().join(ASSETS_DIR))?;
+        fs::create_dir_all(dir.path().join(BIN_DIR))?;
+        fs::write(dir.path().join(ROBOT_FILE), robot.encode()?)?;
+        fs::write(
+            dir.path().join(ASSETS_DIR).join(PARTICIPANTS_ASSET),
+            encode_participants(&participants.into_vec())?,
+        )?;
+        for (id, bytes) in assets.into_map() {
+            let path = dir.path().join(ASSETS_DIR).join(id.as_str());
+            fs::create_dir_all(path.parent().context("asset has no parent")?)?;
+            fs::write(path, bytes)?;
+        }
+        let layout = RuntimeLayout::open(dir.path())?;
+        let id = layout
+            .robot()
+            .structure()
+            .asset_ids()
+            .next()
+            .context("fixture canonical robot has no structure asset")?
+            .clone();
+        let asset = dir.path().join(ASSETS_DIR).join(id.as_str());
+        let outside = dir.path().join("outside-asset");
+        fs::write(&outside, b"outside")?;
+        fs::remove_file(&asset)?;
+        std::os::unix::fs::symlink(&outside, &asset)?;
+
+        let error = RuntimeLayout::open(dir.path())
+            .expect_err("a referenced canonical asset symlink must fail closed")
+            .to_string();
+        assert!(error.contains("regular file below assets"), "{error}");
         Ok(())
     }
 
@@ -646,28 +1123,19 @@ tools:
     }
 
     #[test]
-    fn a_hand_edited_bundle_declaring_official_or_dual_names_is_rejected() -> Result<()> {
-        // The loader re-validates declarations (#950): an extracted bundle is
-        // untrusted input.
-        let official = ROBOT_YAML.replace(
-            "tools:\n  lidar-viz:\n    config:\n      port: 9000\n",
-            "tools:\n  log: {}\n",
-        );
-        let dir = write_layout(&official)?;
+    fn a_hand_edited_bundle_with_an_unknown_participant_schema_is_rejected() -> Result<()> {
+        let dir = write_layout(ROBOT_YAML)?;
+        let path = dir.path().join(ASSETS_DIR).join(PARTICIPANTS_ASSET);
+        let edited = fs::read_to_string(&path)?
+            .replace("phoxal/participants/v0", "phoxal/participants/v999");
+        fs::write(path, edited)?;
         let error = RuntimeLayout::open(dir.path())
-            .expect_err("an official identity in tools: must be rejected")
+            .expect_err("an unknown compiled participant schema must be rejected")
             .to_string();
-        assert!(error.contains("invalid runtime set"), "{error}");
-
-        let dual = ROBOT_YAML.replace(
-            "tools:\n  lidar-viz:\n    config:\n      port: 9000\n",
-            "tools:\n  mission: {}\n",
+        assert!(
+            error.contains("unsupported compiled participant schema"),
+            "{error}"
         );
-        let dir = write_layout(&dual)?;
-        let error = RuntimeLayout::open(dir.path())
-            .expect_err("a dual services/tools name must be rejected")
-            .to_string();
-        assert!(error.contains("invalid runtime set"), "{error}");
         Ok(())
     }
 
@@ -756,12 +1224,12 @@ tools:
 
     #[test]
     fn inspecting_a_host_binary_returns_its_embedded_metadata() -> Result<()> {
-        let payload = br#"{"id":"mission","config_schema":{"type":"null"}}"#;
+        let payload = metadata("mission", "service", serde_json::json!({"type":"null"}));
         let dir = write_layout(ROBOT_YAML)?;
         write_bin(
             dir.path(),
             "mission",
-            &synthesize_binary(host_architecture(), payload),
+            &synthesize_binary(host_architecture(), &payload),
         )?;
         let layout = RuntimeLayout::open(dir.path())?;
         let required = layout.required_runtimes(&DriverSelection::All);
@@ -784,12 +1252,12 @@ tools:
     /// not silently pass with its schema paired to the wrong runtime.
     #[test]
     fn inspecting_a_binary_declaring_the_wrong_id_is_rejected() -> Result<()> {
-        let payload = br#"{"id":"drive","config_schema":{"type":"null"}}"#;
+        let payload = metadata("drive", "service", serde_json::json!({"type":"null"}));
         let dir = write_layout(ROBOT_YAML)?;
         write_bin(
             dir.path(),
             "mission",
-            &synthesize_binary(host_architecture(), payload),
+            &synthesize_binary(host_architecture(), &payload),
         )?;
         let layout = RuntimeLayout::open(dir.path())?;
         let required = layout.required_runtimes(&DriverSelection::All);

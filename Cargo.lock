@@ -3031,35 +3031,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal"
-version = "0.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03b7aca13a3755ef501a4c6d288a2885b9d8edf4e4aa7857393053d7f667d7cf"
-dependencies = [
- "anyhow",
- "clap",
- "const_format",
- "libc",
- "nalgebra",
- "phoxal-api",
- "phoxal-bus",
- "phoxal-macros",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "urdf-rs",
-]
-
-[[package]]
 name = "phoxal-api"
-version = "0.44.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63f0c05dcea8b347381e9f43469577edbb8e5f91e3e434b3999c700c033a3f83"
+checksum = "6b02117acaf52a12b82e9afc145625b322069514cda02ee72ce73d5334fa644f"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -3069,15 +3044,14 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bus"
-version = "0.44.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c29967dc584df8b48aacf2f90b73909a7aae480e02ebe45300ed8bc2cce6891c"
+checksum = "6d4fd70813b1a5245be122769afa42c6c6f0ad862ce3c1879d8734abfe3e0f1d"
 dependencies = [
- "getrandom 0.3.4",
  "libc",
+ "phoxal-runtime-contract",
  "rmp-serde",
  "serde",
- "serde_bytes",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
@@ -3122,11 +3096,12 @@ name = "phoxal-cli-client"
 version = "0.28.12"
 dependencies = [
  "anyhow",
- "phoxal",
  "phoxal-api",
+ "phoxal-bus",
  "phoxal-cli-core",
  "phoxal-cli-observation",
  "phoxal-cli-protocol",
+ "phoxal-runtime-contract",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -3140,7 +3115,9 @@ dependencies = [
  "anyhow",
  "hex",
  "object",
- "phoxal",
+ "phoxal-manifest",
+ "phoxal-model",
+ "phoxal-runtime-contract",
  "semver",
  "serde",
  "serde_json",
@@ -3172,8 +3149,11 @@ dependencies = [
  "nalgebra",
  "object",
  "pathdiff",
- "phoxal",
+ "phoxal-bus",
  "phoxal-cli-core",
+ "phoxal-manifest",
+ "phoxal-model",
+ "phoxal-runtime-contract",
  "reqwest",
  "serde",
  "serde_json",
@@ -3181,7 +3161,6 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
- "urdf-rs",
  "webots-proto",
 ]
 
@@ -3204,9 +3183,10 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "libc",
- "phoxal",
+ "phoxal-bus",
  "phoxal-cli-core",
  "phoxal-cli-protocol",
+ "phoxal-runtime-contract",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3231,15 +3211,56 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.44.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "946111b48c4e29bc3bb2ce69d4165bc10c9b4cde35c0cc974a0ad87124580793"
+checksum = "47c6cf74673c356001740ae23a903b11edc9bd1445284696885f0a57eef5fbaf"
 dependencies = [
  "heck",
  "proc-macro2",
  "quote",
  "serde_derive_internals",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "phoxal-manifest"
+version = "0.45.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e26238ba25ab3c29d736dbcdc546befee56780aed1b4ecef00851305d09acde"
+dependencies = [
+ "anyhow",
+ "phoxal-model",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "urdf-rs",
+]
+
+[[package]]
+name = "phoxal-model"
+version = "0.45.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8b9d9ddf50427009587f45a4741b0ac309e3b040f03592cb6ecddd65f1e2fe6"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "phoxal-runtime-contract"
+version = "0.45.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7108a9357742c53cd1a8f5d398db4775b34889ba055ddebcf189d21399d7c6d5"
+dependencies = [
+ "getrandom 0.3.4",
+ "libc",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

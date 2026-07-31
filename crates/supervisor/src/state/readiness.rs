@@ -2,7 +2,7 @@
 
 use crate::SupervisorState;
 use anyhow::{Result, anyhow};
-use phoxal::raw::{Bus, BusConfig, ParticipantLivelinessEvent, ParticipantLivelinessStatus};
+use phoxal_bus::{Bus, BusConfig, ParticipantLivelinessEvent, ParticipantLivelinessStatus};
 use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::runtime::{ParticipantInstanceKey, RobotKey};
@@ -117,7 +117,7 @@ mod tests {
             .expect("test producer id must parse")
     }
     use super::*;
-    use phoxal::raw::ParticipantLivelinessKey;
+    use phoxal_bus::ParticipantLivelinessKey;
     use phoxal_cli_core::runtime::ParticipantKind;
 
     fn event(participant: &str, status: ParticipantLivelinessStatus) -> ParticipantLivelinessEvent {

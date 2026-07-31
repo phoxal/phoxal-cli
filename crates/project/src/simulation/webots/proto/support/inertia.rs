@@ -1,6 +1,6 @@
 use nalgebra::{Isometry3, Matrix3, Vector3};
 
-use crate::simulation::webots::proto::support::urdf::pose_to_isometry;
+use crate::simulation::webots::proto::support::pose::pose_to_isometry;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedInertial {
@@ -87,19 +87,20 @@ impl MassPropertiesAccumulator {
 }
 
 pub fn transform_inertial(
-    inertial: &urdf_rs::Inertial,
+    inertial: phoxal_model::structure::Inertial,
     transform: &Isometry3<f64>,
 ) -> ResolvedInertial {
+    let [ixx, ixy, ixz, iyy, iyz, izz] = inertial.inertia().values();
     let resolved = ResolvedInertial {
-        origin: pose_to_isometry(&inertial.origin),
-        mass: inertial.mass.value,
+        origin: pose_to_isometry(inertial.origin()),
+        mass: inertial.mass_kg(),
         inertia: InertiaMatrix {
-            ixx: inertial.inertia.ixx,
-            ixy: inertial.inertia.ixy,
-            ixz: inertial.inertia.ixz,
-            iyy: inertial.inertia.iyy,
-            iyz: inertial.inertia.iyz,
-            izz: inertial.inertia.izz,
+            ixx,
+            ixy,
+            ixz,
+            iyy,
+            iyz,
+            izz,
         },
     };
     let rotation = transform.rotation.to_rotation_matrix();

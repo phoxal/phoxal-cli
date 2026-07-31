@@ -5,9 +5,9 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use phoxal::model::source::robot::v0::ConnectionConfig;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::tooling::{cargo_binary_name, cargo_package_name};
+use phoxal_manifest::source::robot::v0::ConnectionConfig;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -241,11 +241,12 @@ pub(crate) fn binary_name_with_suffix(binary_name: &str) -> String {
     }
 }
 
-pub(crate) fn device_missing_note(
-    resolved: &ResolvedRobot,
-    participant_id: &str,
-) -> Option<String> {
-    let component = resolved.robot.robot.components.get(participant_id)?;
+pub(crate) fn device_missing_note(resolved: &BundlePlan, participant_id: &str) -> Option<String> {
+    let component = resolved
+        .source_manifest
+        .robot
+        .components
+        .get(participant_id)?;
     let driver = component.driver.as_ref()?;
     let missing = missing_device_path(&driver.connection)?;
     Some(format!(

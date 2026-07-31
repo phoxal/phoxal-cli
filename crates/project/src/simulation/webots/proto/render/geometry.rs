@@ -3,18 +3,19 @@ use webots_proto::r2025a::{
 };
 
 use crate::simulation::webots::proto::scene::WebotsSceneDescription;
-use crate::simulation::webots::proto::support::paths::staged_mesh_path_from_urdf_filename;
+use crate::simulation::webots::proto::support::paths::staged_geometry_path;
 use crate::simulation::webots::proto::types::StagedCollision;
+use phoxal_model::structure::Geometry;
 
 impl WebotsSceneDescription {
     pub fn render_visual(
         &self,
-        geometry: &urdf_rs::Geometry,
+        geometry: &Geometry,
         origin: &nalgebra::Isometry3<f64>,
         mesh_url_prefix: &str,
     ) -> Node {
         let children = match geometry {
-            urdf_rs::Geometry::Mesh { .. } => {
+            Geometry::Mesh { .. } => {
                 vec![self.render_geometry_node(geometry, mesh_url_prefix)]
             }
             _ => vec![Node::Shape(Shape::new().with_geometry(Box::new(
@@ -76,17 +77,10 @@ impl WebotsSceneDescription {
         )
     }
 
-    fn render_bounding_geometry_node(
-        &self,
-        geometry: &urdf_rs::Geometry,
-        mesh_url_prefix: &str,
-    ) -> Node {
+    fn render_bounding_geometry_node(&self, geometry: &Geometry, mesh_url_prefix: &str) -> Node {
         match geometry {
-            urdf_rs::Geometry::Mesh { filename, .. } => {
-                let normalized_staged_path = staged_mesh_path_from_urdf_filename(
-                    filename,
-                    self.component_mesh_prefix.as_deref(),
-                );
+            Geometry::Mesh { asset, .. } => {
+                let normalized_staged_path = staged_geometry_path(asset);
                 Node::Mesh(
                     Mesh::new()
                         .with_url(vec![format!("{mesh_url_prefix}/{normalized_staged_path}")]),
@@ -96,32 +90,23 @@ impl WebotsSceneDescription {
         }
     }
 
-    pub fn render_geometry_node(
-        &self,
-        geometry: &urdf_rs::Geometry,
-        mesh_url_prefix: &str,
-    ) -> Node {
+    pub fn render_geometry_node(&self, geometry: &Geometry, mesh_url_prefix: &str) -> Node {
         match geometry {
-            urdf_rs::Geometry::Box { size } => {
+            Geometry::Box { size } => {
                 Node::Box(BoxNode::new().with_size(Self::vec3([size[0], size[1], size[2]])))
             }
-            urdf_rs::Geometry::Cylinder { radius, length } => {
+            Geometry::Cylinder { radius, length } => {
                 Node::Cylinder(Cylinder::new().with_radius(*radius).with_height(*length))
             }
-            urdf_rs::Geometry::Sphere { radius } => {
-                Node::Sphere(Sphere::new().with_radius(*radius))
-            }
-            urdf_rs::Geometry::Mesh { filename, .. } => {
-                let normalized_staged_path = staged_mesh_path_from_urdf_filename(
-                    filename,
-                    self.component_mesh_prefix.as_deref(),
-                );
+            Geometry::Sphere { radius } => Node::Sphere(Sphere::new().with_radius(*radius)),
+            Geometry::Mesh { asset, .. } => {
+                let normalized_staged_path = staged_geometry_path(asset);
                 Node::CadShape(
                     CadShape::new()
                         .with_url(vec![format!("{mesh_url_prefix}/{normalized_staged_path}")]),
                 )
             }
-            urdf_rs::Geometry::Capsule { radius, length } => {
+            Geometry::Capsule { radius, length } => {
                 Node::Cylinder(Cylinder::new().with_radius(*radius).with_height(*length))
             }
         }

@@ -33,26 +33,3 @@ pub(crate) fn component_driver_crate_dir(
             )
         })
 }
-
-/// Locate the on-disk source directory for a component instance's resolved
-/// `component_assets` package (`component.yaml`, `structure.urdf`,
-/// `simulation.yaml`, `meshes/`). Resolution already settled this directory -
-/// a workspace crate directory or a registry package's extraction directory
-/// `cargo metadata` reported against the generated
-/// `.phoxal/resolve/Cargo.toml` - so both sources collapse into the same
-/// single read.
-pub(crate) fn component_assets_dir(
-    component: &ResolvedComponent,
-    _project_root: &Path,
-) -> Result<PathBuf> {
-    component
-        .assets
-        .path_override()
-        .map(Path::to_path_buf)
-        .with_context(|| {
-            format!(
-                "component instance '{}' has no resolved component_assets directory",
-                component.instance
-            )
-        })
-}

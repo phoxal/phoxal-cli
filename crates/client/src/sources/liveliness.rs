@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use phoxal::raw::{Bus, ParticipantLivelinessEvent, ParticipantLivelinessStatus};
+use phoxal_bus::{Bus, ParticipantLivelinessEvent, ParticipantLivelinessStatus};
 use phoxal_cli_core::runtime::RobotKey;
 use phoxal_cli_observation::AttachmentEvent;
 use tokio::sync::{Notify, RwLock, mpsc};

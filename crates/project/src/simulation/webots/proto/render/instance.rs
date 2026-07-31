@@ -6,7 +6,7 @@ use webots_proto::ast::proto::span::Span;
 
 use crate::simulation::webots::proto::WebotsController;
 use crate::simulation::webots::proto::scene::{ComponentProtoInstance, WebotsSceneDescription};
-use crate::simulation::webots::proto::support::urdf::pose_to_isometry;
+use crate::simulation::webots::proto::support::pose::pose_to_isometry;
 
 impl WebotsSceneDescription {
     pub fn render_robot_instance_node(
@@ -22,7 +22,7 @@ impl WebotsSceneDescription {
         let joint_from_parent = self
             .joints
             .values()
-            .find(|joint| joint.child.link == root_link_id);
+            .find(|joint| joint.child() == root_link_id);
         let mut fields = vec![
             NodeBodyElement::Field(NodeField::new(
                 "translation".to_string(),
@@ -175,10 +175,10 @@ impl WebotsSceneDescription {
         let joint = self
             .joints
             .values()
-            .find(|joint| joint.child.link == link_id)
+            .find(|joint| joint.child() == link_id)
             .ok_or_else(|| anyhow!("missing parent joint for link '{link_id}'"))?;
 
-        let parent_transform = self.transform_from_rendered_root(&joint.parent.link)?;
-        Ok(parent_transform * pose_to_isometry(&joint.origin))
+        let parent_transform = self.transform_from_rendered_root(joint.parent())?;
+        Ok(parent_transform * pose_to_isometry(joint.origin()))
     }
 }

@@ -1,0 +1,99 @@
+//! CLI-owned participant classification and graph-report vocabulary.
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticipantApis {
+    pub participant_id: String,
+    pub artifact_id: String,
+    pub participant_kind: ParticipantKind,
+    pub participant_class: ParticipantClass,
+    pub config_schema: Option<serde_json::Value>,
+    pub scope: ParticipantScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ParticipantKind {
+    Service,
+    Driver,
+    Tool,
+    Simulator,
+    Other(String),
+}
+
+impl ParticipantKind {
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "service" => Self::Service,
+            "driver" => Self::Driver,
+            "tool" => Self::Tool,
+            "simulator" => Self::Simulator,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Service => "service",
+            Self::Driver => "driver",
+            Self::Tool => "tool",
+            Self::Simulator => "simulator",
+            Self::Other(kind) => kind,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_simulator(&self) -> bool {
+        matches!(self, Self::Simulator)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParticipantClass {
+    #[default]
+    Checked,
+    Privileged,
+}
+
+impl ParticipantClass {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "checked" => Self::Checked,
+            "privileged" => Self::Privileged,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub const fn is_checked(self) -> bool {
+        matches!(self, Self::Checked)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ParticipantScope {
+    #[default]
+    Graph,
+    ComponentInstance(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Problem {
+    InvalidConfig {
+        runtime_id: String,
+        errors: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Report {
+    pub problems: Vec<Problem>,
+}
+
+impl Report {
+    #[must_use]
+    pub fn is_ok(&self) -> bool {
+        self.problems.is_empty()
+    }
+}

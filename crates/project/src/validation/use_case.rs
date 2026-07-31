@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal::model::source::robot::v0::Manifest as Robot;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::project::catalog::{self, ArtifactKind};
 use phoxal_cli_core::project::train::{LockedProject, WorkspaceRuntimeKind};
+use phoxal_manifest::source::robot::v0::Manifest as Robot;
 
 use crate::validation::{
     CheckGraphContext, CheckOutcome, RawParticipantReport, build_participant_report_by_building,
@@ -32,7 +32,7 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
                 .first()
                 .context("runtime archive launch plan has no robot")?;
             return Ok(ValidationReport {
-                robot_path: archive.destination.join("robot.yaml"),
+                robot_path: archive.destination.join("robot.json"),
                 robot: robot.id.clone(),
                 train: header.built_with.phoxal,
                 platform_services: Vec::new(),
@@ -63,10 +63,9 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
     phoxal_cli_core::project::layout::validate_runtime_declarations(&robot)
         .map_err(|error| anyhow!("Cargo workspace runtime discovery failed:\n{error:#}"))?;
 
-    // One locked-workspace resolution feeds both the structural workspace
-    // check below AND the config-schema check that follows it - no suite
-    // fetch, no network beyond what a normal `cargo metadata --locked`
-    // needs (organization#951 WS4).
+    // Resolve the locked workspace once and share that result with canonical
+    // compilation and config checking. Resolving component asset roots may
+    // fetch packages from the Phoxal registry unless `--offline` was selected.
     let project = phoxal_cli_core::project::train::resolve_locked_project(
             project_root,
             request.offline,
@@ -76,7 +75,17 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
                 "Cargo workspace runtime discovery failed:\nlocked Cargo workspace is invalid: {error:#}"
             )
         })?;
-    let train = project.train.version.clone();
+    let resolved = crate::resolve::project::resolve_with_locked_project(
+        &robot,
+        project_root,
+        phoxal_cli_core::project::resolver::ResolveOptions {
+            offline: request.offline,
+            ..Default::default()
+        },
+        &project,
+    )
+    .context("failed to compile the resolved project")?;
+    let train = resolved.train;
     let workspace = workspace_runtime_report(&robot, &project);
     for success in &workspace.successes {
         request.reporter.success(success.clone());
@@ -273,7 +282,7 @@ fn check_declared_configs(
     )
 }
 
-fn join_errors(errors: Vec<phoxal::model::source::robot::v0::ValidationError>) -> String {
+fn join_errors(errors: Vec<phoxal_manifest::source::robot::v0::ValidationError>) -> String {
     errors
         .iter()
         .map(ToString::to_string)
@@ -333,7 +342,7 @@ tools:
 "#;
 
     fn minimal_robot() -> Robot {
-        phoxal::model::source::robot::parse_from_string(MINIMAL_ROBOT)
+        phoxal_manifest::source::robot::parse_from_string(MINIMAL_ROBOT)
             .expect("minimal fixture robot.yaml parses")
     }
 
