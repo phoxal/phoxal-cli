@@ -84,10 +84,10 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
             }
         }
     }
-    crate::run::prepare::repoint_plan_robot_roots(&mut plan, &candidate_path, &staged_root);
+    crate::run::prepare::repoint_plan_bundle_roots(&mut plan, &candidate_path, &staged_root);
     let router = PreparedRouter {
         binary: crate::stage::staged_router_binary(&staged_root),
-        config: crate::run::prepare::resolve_router_config(&resolved.resolved.robot, &staged_root)?,
+        config: crate::run::prepare::resolve_layout_router_config(&staged_root)?,
         endpoint: request.target.zenoh_endpoint.clone(),
     };
     crate::run::prepare::apply_session_connect(&mut plan, &mut participants, &router.endpoint);
@@ -95,7 +95,6 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
     crate::progress::ensure_active(request.reporter.as_ref())?;
     super::webots::root::wipe_and_recreate()?;
     let staged_world = super::webots::staging::stage_simulation_for_robot(
-        &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
         &plan,
@@ -161,7 +160,7 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
 /// bridge, but never an execution origin or producer identity.
 fn webots_environment(run: RunIdentity) -> Vec<(String, String)> {
     vec![(
-        phoxal::participant::launch::env::EXECUTION_ID.to_string(),
+        phoxal_runtime_contract::env::EXECUTION_ID.to_string(),
         run.execution().to_string(),
     )]
 }
@@ -191,14 +190,14 @@ mod tests {
         assert_eq!(
             env,
             vec![(
-                phoxal::participant::launch::env::EXECUTION_ID.to_string(),
+                phoxal_runtime_contract::env::EXECUTION_ID.to_string(),
                 run.execution().to_string()
             )]
         );
         assert!(
             env.iter().all(|(key, _)| {
-                key != phoxal::participant::launch::env::EXECUTION_ORIGIN
-                    && key != phoxal::participant::launch::env::PRODUCER_ID
+                key != phoxal_runtime_contract::env::EXECUTION_ORIGIN
+                    && key != phoxal_runtime_contract::env::PRODUCER_ID
             }),
             "Webots must not receive bus or time-authority identity"
         );

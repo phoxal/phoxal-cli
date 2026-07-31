@@ -8,7 +8,7 @@
 //! and bus-level producer fencing share that identity instead of maintaining a
 //! parallel incarnation counter.
 
-pub use phoxal::bus::{ExecutionId, ProducerId};
+pub use phoxal_runtime_contract::{ExecutionId, ProducerId};
 
 #[cfg(test)]
 mod tests {

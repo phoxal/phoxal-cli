@@ -1,7 +1,8 @@
 //! The layout-driven launch-plan constructor (#936).
 //!
 //! Execution derives the complete launch graph from a staged runtime layout
-//! alone: the compiled `robot.yaml`, the CLI-internal official catalog, and the
+//! alone: canonical `robot.json`, compiler-owned participant declarations,
+//! the CLI-internal official catalog, and the
 //! embedded metadata of the binaries under `bin/`. Nothing here reads source
 //! or Cargo - staging already produced the layout, and this module is the
 //! one place that turns that layout into the same
@@ -26,7 +27,7 @@ use std::collections::BTreeMap;
 
 use crate::identity::ProducerId;
 use anyhow::{Context, Result};
-use phoxal::participant::launch::{
+use phoxal_runtime_contract::{
     BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };
 
@@ -60,26 +61,21 @@ pub struct ConstructedPlan {
     /// [`build_launch_plan`](super::super::launch_plan::build_launch_plan)
     /// leg builds for the same robot.
     pub plan: LaunchPlan,
-    /// One schema pairing per declared user runtime (service or tool), so the
-    /// bin can run its jsonschema validator (`validate_user_runtime_config`)
-    /// against the config the compiled `robot.yaml` carries for that runtime.
+    /// One schema pairing per compiler-owned runtime config, so the project
+    /// crate can validate the config the compiled declaration carries.
     pub user_runtime_configs: Vec<UserRuntimeConfig>,
 }
 
-/// A declared user runtime's (service OR tool) embedded config schema paired
-/// with its identity, its AUTHORED config, and the robot.yaml map it was
-/// declared in, so the bin crate can validate the compiled declaration for it.
-/// Core produces the pairing; the bin owns the jsonschema dependency and runs
-/// the check. The config is carried here rather than re-looked-up by the
-/// validator, so a user tool validates its real `tools.<id>.config` and not a
-/// phantom services lookup (#950).
+/// A compiler-owned runtime config paired with the schema embedded in its
+/// selected binary. This covers declared user services/tools and typed
+/// compiler-generated official config such as behavior `{root, autostart}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRuntimeConfig {
     pub runtime_id: String,
     pub config_schema: serde_json::Value,
-    /// The authored config from the compiled robot.yaml (`None` when omitted).
+    /// Config from the compiled participant declaration (`None` when omitted).
     pub config: Option<serde_json::Value>,
-    /// "services" or "tools" - the declaring map, for diagnostics.
+    /// Declaring compiler domain, for diagnostics.
     pub family: &'static str,
 }
 
@@ -138,9 +134,9 @@ impl RuntimeLayout {
         selected: &BTreeMap<String, SelectedBinary>,
         run: RunIdentity,
     ) -> Result<ConstructedPlan> {
-        let robot_id = self.robot().robot.id.clone();
-        let namespace = self.robot().robot.namespace.clone();
-        let robot_root = self.root().to_path_buf();
+        let robot_id = self.robot().robot_id().to_string();
+        let namespace = self.robot().namespace().to_string();
+        let bundle_root = self.root().to_path_buf();
         let service_clock = ClockMode::Real;
 
         let config_schema = |binary_name: &str| -> Result<serde_json::Value> {
@@ -174,11 +170,19 @@ impl RuntimeLayout {
                             &robot_id,
                             service_clock,
                             required.config.clone(),
-                            &robot_root,
+                            &bundle_root,
                             None,
                             run,
                         ),
                     ));
+                    if required.config.is_some() {
+                        user_runtime_configs.push(UserRuntimeConfig {
+                            runtime_id: participant_id,
+                            config_schema: config_schema(&required.binary_name)?,
+                            config: required.config.clone(),
+                            family: "official",
+                        });
+                    }
                 }
                 RequiredRuntimeKind::OfficialTool => {
                     // Tools are per-robot instances (`tool-<short>-<robot_id>`)
@@ -197,7 +201,7 @@ impl RuntimeLayout {
                             &robot_id,
                             ClockMode::Real,
                             None,
-                            &robot_root,
+                            &bundle_root,
                             None,
                             run,
                         ),
@@ -216,7 +220,7 @@ impl RuntimeLayout {
                             &robot_id,
                             service_clock,
                             required.config.clone(),
-                            &robot_root,
+                            &bundle_root,
                             None,
                             run,
                         ),
@@ -241,7 +245,7 @@ impl RuntimeLayout {
                             &robot_id,
                             service_clock,
                             required.config.clone(),
-                            &robot_root,
+                            &bundle_root,
                             None,
                             run,
                         ),
@@ -256,16 +260,22 @@ impl RuntimeLayout {
                     });
                 }
                 RequiredRuntimeKind::ComponentDriver => {
-                    // One binary, N instances: every component instance whose
-                    // component id matches this driver becomes its own graph
-                    // node, all sharing the one `bin/` binary and its contracts.
-                    // An instance the policy excludes (a `--driver` subset that
-                    // names only some instances) is not planned, even though its
-                    // sibling instance kept the shared driver binary required.
-                    for (instance, component) in &self.robot().robot.components {
-                        if component.driver.is_none() || component.component != required.identity {
+                    // One binary, N explicitly compiled driver declarations:
+                    // driverless mounts of the same component type never enter
+                    // the launch graph.
+                    for declaration in self.participants() {
+                        if declaration.kind != phoxal_manifest::ParticipantKind::Driver
+                            || declaration.id != required.identity
+                        {
                             continue;
                         }
+                        let instance =
+                            declaration.component_instance.as_deref().with_context(|| {
+                                format!(
+                                    "compiled driver '{}' has no component instance",
+                                    declaration.id
+                                )
+                            })?;
                         if !options.drivers.includes_instance(instance) {
                             continue;
                         }
@@ -280,8 +290,8 @@ impl RuntimeLayout {
                                 &robot_id,
                                 service_clock,
                                 None,
-                                &robot_root,
-                                Some(instance.clone()),
+                                &bundle_root,
+                                Some(instance.to_string()),
                                 run,
                             ),
                         ));
@@ -319,7 +329,7 @@ fn launch(
     robot_id: &str,
     clock: ClockMode,
     config: Option<serde_json::Value>,
-    robot_root: &std::path::Path,
+    bundle_root: &std::path::Path,
     component_instance: Option<String>,
     run: RunIdentity,
 ) -> ParticipantLaunch {
@@ -335,7 +345,7 @@ fn launch(
         },
         clock,
         config,
-        robot_root: Some(robot_root.to_path_buf()),
+        bundle_root: Some(bundle_root.to_path_buf()),
         component_instance,
         shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
     }
@@ -361,7 +371,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use phoxal::check as graph_check;
+    use crate::check as graph_check;
 
     use super::super::super::catalog;
     use super::super::super::catalog::ArtifactKind;
@@ -370,9 +380,8 @@ mod tests {
         runtime_layout_dir,
     };
     use super::super::super::resolver::{
-        ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-        ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime,
-        official_binary_name,
+        BundlePlan, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
+        ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, official_binary_name,
     };
     use super::super::RuntimeLayout;
     use super::*;
@@ -443,11 +452,31 @@ services:
     /// A binary carries no known config-schema by default; its declared `id`
     /// must still equal the required runtime's own identity, or `inspect_for`
     /// rejects it.
-    fn no_config_payload(id: &str) -> Vec<u8> {
-        format!(r#"{{"id":"{id}","config_schema":{{"type":"null"}}}}"#).into_bytes()
+    fn metadata_payload(id: &str, kind: &str, config_schema: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema": phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA,
+            "id": id,
+            "kind": kind,
+            "class": "checked",
+            "config_schema": config_schema,
+        }))
+        .expect("metadata serializes")
     }
 
-    /// Write the compiled `robot.yaml` and synthesize a host-architecture binary
+    fn required_kind(required: RequiredRuntimeKind) -> &'static str {
+        match required {
+            RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => "service",
+            RequiredRuntimeKind::OfficialTool | RequiredRuntimeKind::UserTool => "tool",
+            RequiredRuntimeKind::ComponentDriver => "driver",
+            RequiredRuntimeKind::Infrastructure => "tool",
+        }
+    }
+
+    fn no_config_payload(id: &str, kind: RequiredRuntimeKind) -> Vec<u8> {
+        metadata_payload(id, required_kind(kind), serde_json::json!({"type":"null"}))
+    }
+
+    /// Write canonical `robot.json` and synthesize a host-architecture binary
     /// under every canonical `bin/` name the Native profile requires, so the
     /// layout is a complete, runnable-shaped store. `payloads` overrides the
     /// metadata for named binaries; the rest carry the default (no-config)
@@ -455,9 +484,8 @@ services:
     /// `inspect_for`'s identity check passes.
     fn stage_layout(root: &Path, payloads: &[(&str, &[u8])]) -> Result<()> {
         fs::create_dir_all(root)?;
-        fs::write(root.join("robot.yaml"), ROBOT_YAML)?;
+        super::super::write_test_layout(root, ROBOT_YAML)?;
         let bin = root.join("bin");
-        fs::create_dir_all(&bin)?;
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {
             if required.kind == RequiredRuntimeKind::Infrastructure {
@@ -467,7 +495,7 @@ services:
                 .iter()
                 .find(|(name, _)| *name == required.binary_name)
                 .map_or_else(
-                    || no_config_payload(&required.identity),
+                    || no_config_payload(&required.identity, required.kind),
                     |(_, payload)| payload.to_vec(),
                 );
             fs::write(bin.join(&required.binary_name), synthesize_binary(&payload))?;
@@ -482,8 +510,8 @@ services:
     /// The resolved graph the legacy `build_launch_plan` leg consumes, built so
     /// its official set is exactly the CLI catalog the loader derives from - the
     /// only way the two legs can produce the same robot's plan.
-    fn resolved_full_catalog(project_root: &Path, layout_root: &Path) -> Result<ResolvedRobot> {
-        let robot = phoxal::model::source::robot::parse_from_string(ROBOT_YAML)?;
+    fn resolved_full_catalog(project_root: &Path, layout_root: &Path) -> Result<BundlePlan> {
+        let robot = phoxal_manifest::source::robot::parse_from_string(ROBOT_YAML)?;
         let _ = project_root;
         let platform_runtimes = catalog::NATIVE
             .iter()
@@ -495,8 +523,9 @@ services:
             .filter(|official| official.kind == ArtifactKind::Tool)
             .map(|official| official_tool(&format!("tool-{}", catalog_short(official.package))))
             .collect();
-        Ok(ResolvedRobot {
-            robot,
+        Ok(BundlePlan {
+            source_manifest: robot,
+            compiled: Default::default(),
             train: "0.36.0".to_string(),
             target: layout_root
                 .file_name()
@@ -590,7 +619,8 @@ services:
         // The legacy leg: a resolved graph whose officials are the CLI catalog,
         // its checked participants synthesized to match, and the source records
         // the user service and workspace drivers build from.
-        let resolved = resolved_full_catalog(project.path(), &layout_root)?;
+        let mut resolved = resolved_full_catalog(project.path(), &layout_root)?;
+        resolved.compiled.participants = RuntimeLayout::open(&layout_root)?.participants().to_vec();
         let mut checked_participants = catalog::NATIVE
             .iter()
             .filter(|official| official.kind == ArtifactKind::Service)
@@ -686,13 +716,13 @@ services:
         *plan = crate::project::launch_plan::content_only(plan.clone());
         for robot in &mut plan.robots {
             for participant in &mut robot.participants {
-                participant.launch.robot_root = None;
+                participant.launch.bundle_root = None;
             }
         }
     }
 
     /// The acceptance criterion the extracted bundle depends on: the launch graph
-    /// is determined by the staged layout's CONTENT (compiled `robot.yaml` plus
+    /// is determined by the staged layout's CONTENT (canonical model plus
     /// `bin/` metadata), not by where it lives. Staging a layout, then
     /// "extracting" (copying) it to an arbitrary directory and constructing
     /// again, yields the identical plan and content digest once the
@@ -793,7 +823,7 @@ services:
 
         // A layout-built plan names only `bin/` binaries - no absolute or source
         // path ever appears in its serialized form (except the deployment
-        // `robot_root`, which is the layout itself).
+        // `bundle_root`, which is the layout itself).
         let serialized = serde_json::to_string(&constructed.plan)?;
         assert!(
             !serialized.contains("services/mission"),
@@ -832,6 +862,10 @@ services:
         for driver in &drivers {
             assert_eq!(driver.artifact_id, "ddsm115");
             assert_eq!(driver.execution.binary_name(), "phoxal-component-ddsm115");
+            assert_eq!(
+                driver.launch.config, None,
+                "compiler-side driver wiring must not become participant runtime config"
+            );
         }
         let ids = drivers
             .iter()
@@ -846,8 +880,12 @@ services:
         let project = tempfile::tempdir()?;
         let layout_root = runtime_layout_dir(project.path());
         // The `mission` user-service binary carries a real object schema.
-        let mission_meta = br#"{"id":"mission","config_schema":{"type":"object","properties":{"speed":{"type":"integer"}}}}"#;
-        stage_layout(&layout_root, &[("mission", mission_meta)])?;
+        let mission_meta = metadata_payload(
+            "mission",
+            "service",
+            serde_json::json!({"type":"object","properties":{"speed":{"type":"integer"}}}),
+        );
+        stage_layout(&layout_root, &[("mission", &mission_meta)])?;
         let constructed = RuntimeLayout::construct_plan(
             &layout_root,
             &PlanOptions::default(),
@@ -863,9 +901,11 @@ services:
             mission.config_schema,
             serde_json::json!({"type":"object","properties":{"speed":{"type":"integer"}}})
         );
-        // Only user runtimes (here one user service) are paired for config
-        // validation; officials are not.
-        assert_eq!(constructed.user_runtime_configs.len(), 1);
+        assert_eq!(
+            constructed.user_runtime_configs.len(),
+            1,
+            "only runtime config, not compiler-side driver wiring, is schema-paired"
+        );
         Ok(())
     }
 
@@ -882,7 +922,10 @@ services:
         };
         fs::write(
             layout_root.join("bin/mission"),
-            synthesize_binary_for(foreign, &no_config_payload("mission")),
+            synthesize_binary_for(
+                foreign,
+                &no_config_payload("mission", RequiredRuntimeKind::UserService),
+            ),
         )?;
         let error = format!(
             "{:#}",
@@ -937,7 +980,10 @@ services:
         };
         fs::write(
             layout_root.join("bin/phoxal-component-ddsm115"),
-            synthesize_binary_for(foreign, &no_config_payload("ddsm115")),
+            synthesize_binary_for(
+                foreign,
+                &no_config_payload("ddsm115", RequiredRuntimeKind::ComponentDriver),
+            ),
         )?;
 
         // Drivers on: the foreign driver binary is required and inspected, so

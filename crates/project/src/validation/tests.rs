@@ -6,8 +6,7 @@ use super::participants::{
 };
 use super::*;
 use anyhow::{Result, anyhow, bail};
-use graph_check::{ParticipantClass, Problem};
-use phoxal::model::source::robot::v0::Manifest as Robot;
+use graph_check::Problem;
 use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind, ToolParticipant};
 use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
@@ -15,9 +14,10 @@ use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_DEVICE, ROBOT_TOOL_JOYPAD, build_launch_plan,
 };
 use phoxal_cli_core::project::resolver::{
-    ResolveOptions, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-    ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool,
+    BundlePlan, ResolveOptions, ResolvedComponent, ResolvedComponentPackage,
+    ResolvedComponentSource, ResolvedPlatformRuntime, ResolvedTool,
 };
+use phoxal_manifest::source::robot::v0::Manifest as Robot;
 use std::path::{Path, PathBuf};
 
 use crate::paths::host::test_support::ScratchPhoxalHome;
@@ -81,7 +81,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
         temp.path().join("Cargo.lock"),
         "version = 4\n\n[[package]]\nname = \"ddsm115\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"mission\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"robot\"\nversion = \"0.1.0\"\ndependencies = [\"phoxal\"]\n",
     )?;
-    let mut robot = phoxal::model::source::robot::parse_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
+    let mut robot = phoxal_manifest::source::robot::parse_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
     robot
         .services
         .get_mut("mission")
@@ -89,6 +89,19 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
         .config = Some(serde_json::json!({
         "message": "line\nquoted \"value\"",
     }));
+    phoxal_manifest::source::robot::write_to_dir(&robot, temp.path())?;
+    std::fs::write(
+        temp.path().join("structure.urdf"),
+        r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><link name="left_wheel"/><link name="right_wheel"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="left_mount" type="fixed"><parent link="base_link"/><child link="left_wheel"/></joint><joint name="right_mount" type="fixed"><parent link="base_link"/><child link="right_wheel"/></joint></robot>"#,
+    )?;
+    std::fs::write(
+        temp.path().join("components/ddsm115/component.yaml"),
+        "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n  encoder:\n    kind: encoder\n    publish_rate_hz: 50.0\n    gear_ratio: 1.0\n    encoder_type: incremental\n    counts_per_revolution: 4096\n    target:\n      kind: joint\n      id: wheel_joint\n",
+    )?;
+    std::fs::write(
+        temp.path().join("components/ddsm115/structure.urdf"),
+        r#"<robot name="ddsm115"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
+    )?;
     // `ddsm115` resolves from the `components/` workspace crate above -
     // no network, unlike a registry-resolved component.
     let mut resolved = resolve(&robot, temp.path(), ResolveOptions::default())?;
@@ -218,7 +231,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
     assert_eq!(
         encoded
             .variables()
-            .get(phoxal::participant::launch::env::CONFIG)
+            .get(phoxal_runtime_contract::env::CONFIG)
             .map(String::as_str),
         Some(r#"{"message":"line\nquoted \"value\""}"#)
     );
@@ -241,7 +254,7 @@ fn a_user_tool_is_checked_and_its_config_is_validated() -> Result<()> {
     // A declared user tool is an ordinary checked participant (#950): its
     // embedded metadata must be kind `tool`, and its `tools.<id>.config` is
     // validated against the emitted schema exactly like a user service.
-    let robot = phoxal::model::source::robot::parse_from_string(
+    let robot = phoxal_manifest::source::robot::parse_from_string(
         r#"schema: robot/v0
 robot:
   id: bot
@@ -316,7 +329,7 @@ tools:
     Ok(())
 }
 
-fn add_launch_plan_robot_tools(resolved: &mut ResolvedRobot) {
+fn add_launch_plan_robot_tools(resolved: &mut BundlePlan) {
     resolved.tools.push(launch_plan_tool("tool-bus"));
     resolved.tools.push(launch_plan_tool(ROBOT_TOOL_JOYPAD));
     resolved.tools.push(launch_plan_tool("tool-log"));
@@ -367,7 +380,7 @@ services:
 "#;
 
 fn robot_with_service_config(service_id: &str, config: Value) -> Result<Robot> {
-    let mut robot = phoxal::model::source::robot::parse_from_string(
+    let mut robot = phoxal_manifest::source::robot::parse_from_string(
         &LAUNCH_PLAN_FIXTURE_ROBOT.replace("mission", service_id),
     )?;
     robot
@@ -1389,13 +1402,13 @@ fn path_overridden_service_enters_check_through_source_participant_report() -> R
 }
 
 #[test]
-fn raw_participant_report_unknown_participant_class_defaults_to_checked() -> Result<()> {
+fn raw_participant_report_unknown_participant_class_is_rejected() {
     let mut raw = raw("drive");
     raw.participant_class = "future".to_string();
-    let participant = graph_check::ParticipantApis::try_from(raw)?;
-
-    assert_eq!(participant.participant_class, ParticipantClass::Checked);
-    Ok(())
+    let error = graph_check::ParticipantApis::try_from(raw)
+        .expect_err("an unknown participant class must fail closed")
+        .to_string();
+    assert!(error.contains("future"), "{error}");
 }
 
 #[test]
@@ -1663,9 +1676,10 @@ fn raw_kind_class(kind: &str, id: &str, participant_class: &str) -> RawParticipa
     }
 }
 
-fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<ResolvedRobot> {
-    Ok(ResolvedRobot {
-        robot: phoxal::model::source::robot::parse_from_string(MINIMAL_ROBOT)?,
+fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<BundlePlan> {
+    Ok(BundlePlan {
+        source_manifest: phoxal_manifest::source::robot::parse_from_string(MINIMAL_ROBOT)?,
+        compiled: Default::default(),
         train: "0.36.0".to_string(),
         target: crate::resolve::project::host_target_triple(),
         platform_runtimes: Vec::new(),

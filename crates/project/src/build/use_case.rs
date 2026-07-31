@@ -498,7 +498,7 @@ impl Worker {
 /// entirely - that one is staged from its own build output, in the container
 /// or on the host, and never reaches `cargo install` either way.
 fn component_driver_officials(
-    resolved: &phoxal_cli_core::project::resolver::ResolvedRobot,
+    resolved: &phoxal_cli_core::project::resolver::BundlePlan,
 ) -> Vec<ContainerOfficial> {
     let mut seen_packages = std::collections::BTreeSet::new();
     crate::validation::component_driver_runtimes_by_ref(resolved)
@@ -942,11 +942,11 @@ mod tests {
     use super::*;
     use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::resolver::{
-        ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-        ResolvedPlatformRuntime, ResolvedRobot,
+        BundlePlan, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
+        ResolvedPlatformRuntime,
     };
 
-    fn minimal_resolved_robot() -> ResolvedRobot {
+    fn minimal_bundle_plan() -> BundlePlan {
         let yaml = r#"schema: robot/v0
 robot:
   id: testbot
@@ -960,9 +960,10 @@ robot:
     encoders: []
   components: {}
 "#;
-        ResolvedRobot {
-            robot: phoxal::model::source::robot::parse_from_string(yaml)
+        BundlePlan {
+            source_manifest: phoxal_manifest::source::robot::parse_from_string(yaml)
                 .expect("minimal fixture robot.yaml parses"),
+            compiled: Default::default(),
             train: "0.36.0".to_string(),
             target: "aarch64-unknown-linux-gnu".to_string(),
             platform_runtimes: Vec::new(),
@@ -1043,7 +1044,7 @@ robot:
     /// container, `cargo install`, or the network.
     #[test]
     fn component_driver_officials_covers_registry_drivers_and_dedupes_and_skips_path_overrides() {
-        let mut resolved = minimal_resolved_robot();
+        let mut resolved = minimal_bundle_plan();
         resolved.components = vec![
             registry_driver_component("left_wheel", "phoxal/component-ddsm115"),
             // A second instance sharing the SAME driver package must not

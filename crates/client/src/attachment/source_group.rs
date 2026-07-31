@@ -292,7 +292,7 @@ fn participants_for(snapshot: &SupervisorSnapshotV0, robot: &RobotKey) -> Vec<St
 
 fn spawn_device(
     tasks: &mut TaskGroup,
-    bus: phoxal::raw::Bus,
+    bus: phoxal_bus::Bus,
     scope: phoxal_cli_observation::RobotScope,
     telemetry: TelemetryBackend,
     cancellation: CancellationToken,
@@ -325,7 +325,7 @@ fn spawn_device(
 
 fn spawn_bus(
     tasks: &mut TaskGroup,
-    bus: phoxal::raw::Bus,
+    bus: phoxal_bus::Bus,
     scope: phoxal_cli_observation::RobotScope,
     telemetry: TelemetryBackend,
     cancellation: CancellationToken,
@@ -358,7 +358,7 @@ fn spawn_bus(
 
 fn spawn_runtimes(
     tasks: &mut TaskGroup,
-    bus: phoxal::raw::Bus,
+    bus: phoxal_bus::Bus,
     scope: phoxal_cli_observation::RobotScope,
     participants: Vec<String>,
     telemetry: TelemetryBackend,
@@ -393,7 +393,7 @@ fn spawn_runtimes(
 
 fn spawn_motion(
     tasks: &mut TaskGroup,
-    bus: phoxal::raw::Bus,
+    bus: phoxal_bus::Bus,
     telemetry: TelemetryBackend,
     cancellation: CancellationToken,
     reopen: mpsc::Sender<()>,

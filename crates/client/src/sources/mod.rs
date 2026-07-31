@@ -15,13 +15,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use phoxal::bus::{
+use phoxal_api::v0_1 as api;
+use phoxal_api::v0_1 as state_api;
+use phoxal_bus::Bus;
+use phoxal_bus::{
     CommandPublisher, ContractBody, DEFAULT_QUERY_TIMEOUT, Publish, Querier, Subscribe, Subscriber,
     Topic,
 };
-use phoxal::raw::Bus;
-use phoxal_api::v0_1 as api;
-use phoxal_api::v0_1 as state_api;
 use tokio::sync::{Notify, mpsc};
 
 use crate::reconcile::{Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
@@ -538,7 +538,7 @@ pub(crate) async fn control_state_feed_loop(bus: Bus, telemetry: &TelemetryBacke
     }
 }
 
-/// Reconcile one robot root's retained device observation with its live
+/// Reconcile one bundle root's retained device observation with its live
 /// follow feed. Device totals retain both their project/deployment identity
 /// and robot-root attribution and are never attributed to a runtime.
 pub(crate) async fn device_feed_loop(

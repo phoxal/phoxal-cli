@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 
 use anyhow::Result;
-use phoxal::raw::Bus;
+use phoxal_bus::Bus;
 use phoxal_cli_observation::RobotScope;
 
 use super::TelemetryBackend;

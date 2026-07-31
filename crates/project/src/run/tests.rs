@@ -3,17 +3,17 @@
 use super::*;
 use crate::build::cargo::missing_device_path;
 use anyhow::Result;
-use phoxal::model::source::robot::v0::ConnectionConfig;
-use phoxal::participant::launch::env;
-use phoxal::participant::launch::{
-    BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
-};
 use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use phoxal_cli_core::project::launch_plan::{
     LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
 };
 use phoxal_cli_core::runtime::{
     ParticipantKind, ParticipantState, RuntimeFailurePolicy, StartupRequirement,
+};
+use phoxal_manifest::source::robot::v0::ConnectionConfig;
+use phoxal_runtime_contract::env;
+use phoxal_runtime_contract::{
+    BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -38,7 +38,7 @@ fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRe
             },
             clock: ClockMode::Real,
             config: None,
-            robot_root: Some(PathBuf::from("/tmp/robot")),
+            bundle_root: Some(PathBuf::from("/tmp/robot")),
             component_instance: None,
             shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
         },

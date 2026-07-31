@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use object::{Object, ObjectSection};
-pub use phoxal::participant::metadata::ParticipantMeta;
+pub use phoxal_runtime_contract::ParticipantMetadata as ParticipantMeta;
 
 /// The linker section names a participant attribute places its metadata
 /// static under, tried in order. `object`'s generic [`Object::section_by_name`]
@@ -74,7 +74,7 @@ pub fn extract_participant_metadata_from_bytes(
             SECTION_NAMES.join(" or ")
         )
     })?;
-    phoxal::participant::metadata::parse_participant_metadata(&bytes).with_context(|| {
+    phoxal_runtime_contract::parse_participant_metadata(&bytes).with_context(|| {
         format!("phoxal participant metadata section in {describe} is not valid JSON")
     })
 }
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn extracts_metadata_from_foreign_format_and_arch_object_files() -> Result<()> {
-        let payload = br#"{"id":"drive","config_schema":{"type":"null"}}"#;
+        let payload = br#"{"schema":"phoxal/participant-metadata/v0","id":"drive","kind":"service","class":"checked","config_schema":{"type":"null"}}"#;
 
         // aarch64 ELF (Linux robot / release binary shape), `.phoxal_meta`.
         let elf = synthesize_object(

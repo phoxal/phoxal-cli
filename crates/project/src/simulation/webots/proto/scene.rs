@@ -1,26 +1,26 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use phoxal::model::Robot;
-use phoxal::model::component::capability::{Capability as PhysicalCapability, StructuralTarget};
-use phoxal::model::simulation::Simulation;
-use phoxal::model::simulation::capability::Capability as SimulationCapability;
-use phoxal::model::structure::Structure;
+use phoxal_model::Robot;
+use phoxal_model::component::capability::{Capability as PhysicalCapability, StructuralTarget};
+use phoxal_model::simulation::Simulation;
+use phoxal_model::simulation::capability::Capability as SimulationCapability;
+use phoxal_model::structure::{Joint, Link, Structure};
 
-use crate::simulation::webots::proto::support::urdf::convert_joint_type;
+use crate::simulation::webots::proto::support::pose::convert_joint_type;
 use crate::simulation::webots::proto::{metadata, proto_name_for_robot};
 
 #[derive(Debug, Clone)]
 pub struct WebotsSceneDescription {
     pub robot_name: String,
     pub root_link_id: String,
-    pub links: BTreeMap<String, urdf_rs::Link>,
+    pub links: BTreeMap<String, Link>,
     pub contact_materials: BTreeMap<String, String>,
-    pub joints: BTreeMap<String, urdf_rs::Joint>,
+    pub joints: BTreeMap<String, Joint>,
     pub runtime_components_for_joint: BTreeMap<String, Vec<RuntimeComponentBinding>>,
     pub runtime_components_for_link: BTreeMap<String, Vec<RuntimeComponentBinding>>,
     pub mounted_components_for_link: BTreeMap<String, Vec<ComponentProtoInstance>>,
-    pub component_mesh_prefix: Option<String>,
+    pub is_component_proto: bool,
 }
 
 impl WebotsSceneDescription {
@@ -29,34 +29,31 @@ impl WebotsSceneDescription {
         structure: &Structure,
         component_solid_links: &BTreeMap<String, Vec<String>>,
     ) -> Result<Self> {
-        let root_link_id = structure.root_link_name()?.to_string();
+        let root_link_id = structure.root_link().name().to_string();
         let links = structure
-            .links
-            .iter()
+            .links()
             .cloned()
-            .map(|link| (link.name.clone(), link))
+            .map(|link| (link.name().to_string(), link))
             .collect::<BTreeMap<_, _>>();
         let joints = structure
-            .joints
-            .iter()
+            .joints()
             .cloned()
-            .map(|joint| {
-                convert_joint_type(&joint.joint_type)?;
-                Ok((joint.name.clone(), joint))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
+            .map(|joint| (joint.name().to_string(), joint))
+            .collect::<BTreeMap<_, _>>();
+        for joint in joints.values() {
+            convert_joint_type(joint.kind())?;
+        }
 
         let mounted_components_for_link = configuration
             .components()
-            .iter()
-            .map(|(component_id, model_component)| {
+            .map(|model_component| {
+                let component_id = model_component.id();
                 let component = configuration.component_for_instance(component_id)?;
                 let capability_names = component
-                    .capabilities
-                    .iter()
+                    .capabilities()
                     .flat_map(|(capability_id, capability)| {
                         let mut names = vec![(
-                            capability_id.clone(),
+                            capability_id.to_string(),
                             format!("{component_id}.{capability_id}"),
                         )];
                         if matches!(capability, PhysicalCapability::Imu(_)) {
@@ -71,12 +68,12 @@ impl WebotsSceneDescription {
                     })
                     .collect::<BTreeMap<_, _>>();
                 Ok((
-                    model_component.mount_link.clone(),
+                    model_component.mount_link().to_string(),
                     ComponentProtoInstance {
-                        proto_name: proto_name_for_robot(&model_component.component_type)?,
+                        proto_name: proto_name_for_robot(model_component.component_type())?,
                         capability_names,
                         solid_names: component_solid_links
-                            .get(&model_component.component_type)
+                            .get(model_component.component_type())
                             .into_iter()
                             .flat_map(|link_ids| link_ids.iter())
                             .map(|link_id| (link_id.clone(), format!("{component_id}__{link_id}")))
@@ -103,50 +100,46 @@ impl WebotsSceneDescription {
             runtime_components_for_joint: BTreeMap::new(),
             runtime_components_for_link: BTreeMap::new(),
             mounted_components_for_link,
-            component_mesh_prefix: None,
+            is_component_proto: false,
         })
     }
 
     pub fn from_component(
         component_type: &str,
         structure: &Structure,
-        component: &phoxal::model::component::Component,
+        component: &phoxal_model::component::Component,
         simulation: &Simulation,
     ) -> Result<Self> {
-        let root_link_id = structure.root_link_name()?.to_string();
+        let root_link_id = structure.root_link().name().to_string();
         let links = structure
-            .links
-            .iter()
+            .links()
             .cloned()
-            .map(|link| (link.name.clone(), link))
+            .map(|link| (link.name().to_string(), link))
             .collect::<BTreeMap<_, _>>();
         let contact_materials = simulation
-            .links
-            .iter()
+            .links()
             .filter_map(|(link_name, link)| {
-                link.contact_material
-                    .as_ref()
-                    .map(|material| (link_name.clone(), material.clone()))
+                link.contact_material()
+                    .map(|material| (link_name.to_string(), material.to_string()))
             })
             .collect::<BTreeMap<_, _>>();
         let joints = structure
-            .joints
-            .iter()
+            .joints()
             .cloned()
-            .map(|joint| {
-                convert_joint_type(&joint.joint_type)?;
-                Ok((joint.name.clone(), joint))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
+            .map(|joint| (joint.name().to_string(), joint))
+            .collect::<BTreeMap<_, _>>();
+        for joint in joints.values() {
+            convert_joint_type(joint.kind())?;
+        }
 
         let mut runtime_components_for_joint = BTreeMap::new();
         let mut runtime_components_for_link = BTreeMap::new();
 
-        for (capability_id, capability) in &component.capabilities {
+        for (capability_id, capability) in component.capabilities() {
             let binding = RuntimeComponentBinding {
-                capability_id: capability_id.clone(),
+                capability_id: capability_id.to_string(),
                 physical: capability.clone(),
-                simulation: simulation.capabilities.get(capability_id).cloned(),
+                simulation: simulation.capability(capability_id).cloned(),
             };
             match capability.target() {
                 StructuralTarget::Joint { id } => {
@@ -173,7 +166,7 @@ impl WebotsSceneDescription {
             runtime_components_for_joint,
             runtime_components_for_link,
             mounted_components_for_link: BTreeMap::new(),
-            component_mesh_prefix: Some(component_type.to_string()),
+            is_component_proto: true,
         })
     }
 
@@ -212,13 +205,10 @@ impl WebotsSceneDescription {
         format!("solid_name__{link_id}")
     }
 
-    pub fn child_joints<'a>(
-        &'a self,
-        parent_link_id: &'a str,
-    ) -> impl Iterator<Item = &'a urdf_rs::Joint> {
+    pub fn child_joints<'a>(&'a self, parent_link_id: &'a str) -> impl Iterator<Item = &'a Joint> {
         self.joints
             .values()
-            .filter(move |joint| joint.parent.link == parent_link_id)
+            .filter(move |joint| joint.parent() == parent_link_id)
     }
 
     pub fn runtime_components_for_joint<'a>(
@@ -269,7 +259,7 @@ impl WebotsSceneDescription {
 #[derive(Debug, Clone)]
 pub struct RuntimeComponentBinding {
     pub capability_id: String,
-    pub physical: phoxal::model::component::capability::Capability,
+    pub physical: phoxal_model::component::capability::Capability,
     pub simulation: Option<SimulationCapability>,
 }
 

@@ -5,19 +5,16 @@
 //! robot targets one platform at a time):
 //!
 //! ```text
-//! robot.yaml    # fully flattened, resolved robot/v0 with the complete service map
-//! bin/          # flat binary lookup store, populated by `cargo install --root`
-//!               # (officials) and hardlinks/copies (workspace-built binaries)
-//! model/        # structure/URDF assets, when referenced
-//! components/   # compiled runtime component assets
-//! behaviors/    # when referenced
+//! robot.json  # canonical compiler output
+//! assets/     # compiler-owned model assets plus CLI runtime metadata
+//! bin/        # flat binary lookup store
 //! ```
 //!
-//! The compiled `robot.yaml` + assets swap is atomic per refresh (stage into a
+//! The canonical `robot.json` + assets swap is atomic per refresh (stage into a
 //! sibling temp dir, then rename), so a crashed pass never leaves a
 //! half-written layout. `bin/` is (re)populated from official packages and
 //! resolved binaries every refresh so it can never go stale. `cargo install
-//! --root <candidate>` targets the SAME candidate directory the robot.yaml
+//! --root <candidate>` targets the SAME candidate directory the canonical model
 //! and assets are staged into, so its `bin/` entries land directly at their
 //! final path with no separate harvest-then-link step; `cargo install` also
 //! leaves `.crates.toml`/`.crates2.json` dotfiles in the candidate root,
@@ -54,6 +51,8 @@ pub(crate) use participants::{
 pub(crate) use publish::publish_runtime_layout;
 
 #[cfg(test)]
+pub(crate) use candidate::{compile_test_bundle, write_test_layout};
+#[cfg(test)]
 use participants::{canonical_binary_name, copy_binary};
 #[cfg(test)]
 use publish::layout_path;
@@ -62,7 +61,7 @@ use publish::layout_path;
 #[cfg(test)]
 pub(crate) fn stage_runtime_layout(
     project_root: &std::path::Path,
-    resolved: &phoxal_cli_core::project::resolver::ResolvedRobot,
+    resolved: &phoxal_cli_core::project::resolver::BundlePlan,
 ) -> anyhow::Result<std::path::PathBuf> {
     let candidate = begin_runtime_layout(project_root, resolved)?;
     publish_runtime_layout(candidate, resolved)
@@ -78,17 +77,14 @@ mod tests {
     use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::launch_plan::{ParticipantExecution, ParticipantLaunchRecord};
     use phoxal_cli_core::project::resolver::{
-        ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-        ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime,
-        official_binary_name,
+        BundlePlan, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
+        ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, official_binary_name,
     };
     use std::fs;
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
 
-    const BEHAVIORS_DIR: &str = "behaviors";
-
-    fn resolved_robot() -> Result<ResolvedRobot> {
+    fn bundle_plan() -> Result<BundlePlan> {
         let yaml = r#"schema: robot/v0
 robot:
   id: testbot
@@ -103,8 +99,11 @@ robot:
     encoders: []
   components: {}
 "#;
-        Ok(ResolvedRobot {
-            robot: phoxal::model::source::robot::parse_from_string(yaml)?,
+        let source_manifest = phoxal_manifest::source::robot::parse_from_string(yaml)?;
+        let compiled = compile_test_bundle(&source_manifest)?;
+        Ok(BundlePlan {
+            source_manifest,
+            compiled,
             train: "0.36.0".to_string(),
             target: host_target_triple(),
             platform_runtimes: Vec::new(),
@@ -124,7 +123,7 @@ robot:
         execution: ParticipantExecution,
         component_instance: Option<&str>,
     ) -> ParticipantLaunchRecord {
-        use phoxal::participant::launch::{
+        use phoxal_runtime_contract::{
             BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
         };
         ParticipantLaunchRecord {
@@ -142,7 +141,7 @@ robot:
                 },
                 clock: ClockMode::Real,
                 config: None,
-                robot_root: None,
+                bundle_root: None,
                 component_instance: component_instance.map(str::to_string),
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
@@ -156,7 +155,7 @@ robot:
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model/meshes"))?;
-        fs::create_dir_all(project.path().join(BEHAVIORS_DIR))?;
+        fs::create_dir_all(project.path().join("behaviors"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
         fs::write(project.path().join("model/meshes/chassis.dae"), "mesh")?;
         fs::write(
@@ -167,20 +166,21 @@ robot:
         fs::write(project.path().join("Cargo.toml"), "[workspace]\n")?;
         fs::write(project.path().join("lib.rs"), "fn main() {}\n")?;
 
-        let resolved = resolved_robot()?;
+        let resolved = bundle_plan()?;
         let staged = stage_runtime_layout(project.path(), &resolved)?;
         assert_eq!(staged, layout_path(project.path(), &resolved));
         assert!(staged.starts_with(project.path().join(".phoxal/bundle")));
 
-        assert!(staged.join("robot.yaml").is_file());
-        assert_eq!(
-            fs::read_to_string(staged.join("model/structure.urdf"))?,
-            "<robot/>"
-        );
-        assert!(staged.join("model/meshes/chassis.dae").is_file());
-        assert!(staged.join("behaviors/default.yaml").is_file());
+        assert!(staged.join("robot.json").is_file());
+        assert!(staged.join("assets/participants.json").is_file());
+        assert!(staged.join("assets/runtime.json").is_file());
+        assert!(staged.join("bin").is_dir());
 
-        // No source, no Cargo manifests, no nested `.phoxal` in the layout.
+        // No authored manifests, model sources, Cargo inputs, or nested
+        // `.phoxal` enter the runtime bundle.
+        assert!(!staged.join("robot.yaml").exists());
+        assert!(!staged.join("model").exists());
+        assert!(!staged.join("behaviors").exists());
         assert!(!staged.join("Cargo.toml").exists());
         assert!(!staged.join("lib.rs").exists());
         assert!(!staged.join(".phoxal").exists());
@@ -200,20 +200,20 @@ robot:
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
 
-        let mut resolved = resolved_robot()?;
+        let mut resolved = bundle_plan()?;
         // The declaration model (#950): the authored maps are complete - one
         // declared service (selected), one declared tool, and one discovered
         // crate that is NOT declared and therefore never enters the compiled
         // document.
-        resolved.robot.services.insert(
+        resolved.source_manifest.services.insert(
             "mission".to_string(),
-            phoxal::model::source::robot::v0::UserService {
+            phoxal_manifest::source::robot::v0::UserService {
                 config: Some(serde_json::json!({"speed": 1})),
             },
         );
-        resolved.robot.tools.insert(
+        resolved.source_manifest.tools.insert(
             "lidar-viz".to_string(),
-            phoxal::model::source::robot::v0::UserTool {
+            phoxal_manifest::source::robot::v0::UserTool {
                 config: Some(serde_json::json!({"port": 9000})),
             },
         );
@@ -233,32 +233,64 @@ robot:
                 name: "telemetry".to_string(),
                 family: "services",
             });
+        resolved.compiled.participants = vec![
+            phoxal_manifest::Participant {
+                id: "mission".to_string(),
+                kind: phoxal_manifest::ParticipantKind::Service,
+                component_instance: None,
+                config: Some(serde_json::json!({"speed": 1})),
+            },
+            phoxal_manifest::Participant {
+                id: "lidar-viz".to_string(),
+                kind: phoxal_manifest::ParticipantKind::Tool,
+                component_instance: None,
+                config: Some(serde_json::json!({"port": 9000})),
+            },
+        ];
 
         let staged = stage_runtime_layout(project.path(), &resolved)?;
-        let compiled = phoxal::model::source::robot::parse_from_dir(&staged)?;
-        // The compiled document is the authored declarations verbatim: the
-        // undeclared discovered crate is absent, nothing is injected.
+        let compiled = phoxal_cli_core::project::layout::decode_participants(
+            &staged.join("assets/participants.json"),
+        )?;
+        // Compiler-owned declarations preserve authored configuration; the
+        // undeclared discovered crate is absent and nothing is injected.
         assert_eq!(
-            compiled.services.keys().collect::<Vec<_>>(),
-            vec!["mission"]
+            compiled
+                .iter()
+                .map(|participant| participant.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mission", "lidar-viz"]
         );
-        assert_eq!(
-            compiled.services["mission"].config,
-            Some(serde_json::json!({"speed": 1}))
-        );
-        assert_eq!(compiled.tools.keys().collect::<Vec<_>>(), vec!["lidar-viz"]);
-        assert_eq!(
-            compiled.tools["lidar-viz"].config,
-            Some(serde_json::json!({"port": 9000}))
-        );
+        assert_eq!(compiled[0].config, Some(serde_json::json!({"speed": 1})));
+        assert_eq!(compiled[1].config, Some(serde_json::json!({"port": 9000})));
         Ok(())
     }
 
-    /// The router's `router.config` file is staged into the layout under its
-    /// relative path and resolves inside the layout in both a source run and an
-    /// extracted bundle (#936, finding 4): staging copies it, and simulating an
-    /// extraction (moving the layout elsewhere) still resolves it inside the
-    /// moved layout.
+    #[test]
+    fn compiler_assets_cannot_overwrite_cli_owned_bundle_metadata() -> Result<()> {
+        for reserved in [
+            phoxal_cli_core::project::layout::PARTICIPANTS_ASSET,
+            phoxal_cli_core::project::layout::ROUTER_CONFIG_ASSET,
+            phoxal_cli_core::project::layout::RUNTIME_HEADER_ASSET,
+        ] {
+            let project = tempfile::tempdir()?;
+            let mut resolved = bundle_plan()?;
+            resolved.compiled.assets.insert(
+                phoxal_manifest::AssetId::new(reserved.to_string())?,
+                b"compiler-owned collision".to_vec(),
+            );
+            let error = match begin_runtime_layout(project.path(), &resolved) {
+                Ok(_) => panic!("compiler assets must not overwrite CLI metadata"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains(reserved), "{error}");
+            assert!(error.contains("collides"), "{error}");
+        }
+        Ok(())
+    }
+
+    /// The authored router config is copied into its fixed CLI-owned asset path
+    /// and remains available after source-free extraction.
     #[test]
     fn router_config_is_staged_into_the_layout_and_resolves_after_extraction() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
@@ -271,43 +303,43 @@ robot:
             "{ mode: \"router\" }",
         )?;
 
-        let mut resolved = resolved_robot()?;
-        resolved.robot.router.config = Some(PathBuf::from("config/zenoh.json5"));
+        let mut resolved = bundle_plan()?;
+        resolved.source_manifest.router.config = Some(PathBuf::from("config/zenoh.json5"));
         let staged = stage_runtime_layout(project.path(), &resolved)?;
 
-        // The config landed inside the layout under its relative path.
+        let staged_router = crate::run::prepare::resolve_layout_router_config(&staged)?
+            .context("staged router config must resolve")?;
         assert_eq!(
-            fs::read_to_string(staged.join("config/zenoh.json5"))?,
-            "{ mode: \"router\" }"
+            staged_router,
+            staged.join(phoxal_cli_core::project::layout::ROUTER_CONFIG_PATH)
         );
-        // A source run resolves it inside the staged layout.
-        assert_eq!(
-            crate::run::prepare::resolve_router_config(&resolved.robot, &staged)?,
-            Some(staged.join("config/zenoh.json5"))
-        );
+        assert_eq!(fs::read_to_string(staged_router)?, "{ mode: \"router\" }");
 
-        // Simulate extracting a `build.phoxal`: move the layout to a fresh root
-        // (the source tree is gone). Resolution must still succeed inside it.
         let extracted = tempfile::tempdir()?;
         let extracted_root = extracted.path().join("layout");
         copy_tree(&staged, &extracted_root)?;
+        let extracted_router = crate::run::prepare::resolve_layout_router_config(&extracted_root)?
+            .context("extracted router config must resolve")?;
         assert_eq!(
-            crate::run::prepare::resolve_router_config(&resolved.robot, &extracted_root)?,
-            Some(extracted_root.join("config/zenoh.json5"))
+            extracted_router,
+            extracted_root.join(phoxal_cli_core::project::layout::ROUTER_CONFIG_PATH)
+        );
+        assert_eq!(
+            fs::read_to_string(extracted_router)?,
+            "{ mode: \"router\" }"
         );
         Ok(())
     }
 
-    /// A `router.config` that escapes the runtime layout is rejected at staging,
-    /// exactly like an escaping robot structure (#936, finding 4).
+    /// A `router.config` that escapes its source root is rejected at staging.
     #[test]
     fn router_config_cannot_escape_the_runtime_layout() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let mut resolved = resolved_robot()?;
-        resolved.robot.router.config = Some(PathBuf::from("../outside.json5"));
+        let mut resolved = bundle_plan()?;
+        resolved.source_manifest.router.config = Some(PathBuf::from("../outside.json5"));
         let error = stage_runtime_layout(project.path(), &resolved)
             .unwrap_err()
             .to_string();
@@ -331,26 +363,18 @@ robot:
     }
 
     #[test]
-    fn robot_structure_cannot_escape_the_runtime_layout() -> Result<()> {
+    fn authored_robot_structure_path_never_controls_the_runtime_layout() -> Result<()> {
         let project = tempfile::tempdir()?;
         for structure in [
             PathBuf::from("../outside.urdf"),
             PathBuf::from("/tmp/outside.urdf"),
         ] {
-            let mut resolved = resolved_robot()?;
-            resolved.robot.robot.structure = structure.clone();
-            let error = stage_runtime_layout(project.path(), &resolved)
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("robot structure must be a non-empty relative path"));
-            assert!(!layout_path(project.path(), &resolved).exists());
-
-            let build_dir = project.path().join(".phoxal");
-            let candidates = fs::read_dir(&build_dir)?
-                .filter_map(std::result::Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().contains("-candidate-"))
-                .count();
-            assert_eq!(candidates, 0, "failed candidates must clean themselves up");
+            let mut resolved = bundle_plan()?;
+            resolved.source_manifest.robot.structure = structure.clone();
+            let staged = stage_runtime_layout(project.path(), &resolved)?;
+            assert!(staged.join("robot.json").is_file());
+            assert!(!staged.join("outside.urdf").exists());
+            assert!(!staged.join("model").exists());
         }
         Ok(())
     }
@@ -361,15 +385,13 @@ robot:
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "first")?;
-        let resolved = resolved_robot()?;
+        let mut resolved = bundle_plan()?;
         let staged = stage_runtime_layout(project.path(), &resolved)?;
+        let previous_robot = fs::read(staged.join("robot.json"))?;
 
-        fs::remove_file(project.path().join("model/structure.urdf"))?;
+        resolved.compiled.robot = b"invalid canonical model".to_vec();
         assert!(stage_runtime_layout(project.path(), &resolved).is_err());
-        assert_eq!(
-            fs::read_to_string(staged.join("model/structure.urdf"))?,
-            "first"
-        );
+        assert_eq!(fs::read(staged.join("robot.json"))?, previous_robot);
         Ok(())
     }
 
@@ -395,7 +417,7 @@ robot:
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let mut resolved = resolved_robot()?;
+        let mut resolved = bundle_plan()?;
         resolved.platform_runtimes = vec![platform_runtime("mission", ArtifactKind::Service)];
         let binary_name = official_binary_name(ArtifactKind::Service, "mission");
 
@@ -486,7 +508,7 @@ robot:
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let resolved = resolved_robot()?;
+        let resolved = bundle_plan()?;
         let staged = stage_runtime_layout(project.path(), &resolved)?;
 
         // A "built workspace artifact" living in a cargo-style target dir.
@@ -555,7 +577,7 @@ robot:
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let resolved = resolved_robot()?;
+        let resolved = bundle_plan()?;
         let staged = stage_runtime_layout(project.path(), &resolved)?;
 
         // A plain source executable, as a cargo-built binary always is -
@@ -585,7 +607,7 @@ robot:
     fn canonical_binary_names_are_identity_keyed_across_sources() {
         // The source-free plan (#936) names each participant's `bin/` binary on
         // its execution, so `canonical_binary_name` is that name and the loader
-        // resolves the identical one from the compiled `robot.yaml`.
+        // resolves the identical one from compiler-owned declarations.
         assert_eq!(
             canonical_binary_name(&launch_record(
                 "drive",
@@ -645,7 +667,7 @@ robot:
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let resolved = resolved_robot()?;
+        let resolved = bundle_plan()?;
         let staged = stage_runtime_layout(project.path(), &resolved)?;
 
         let target_dir = project.path().join("target/debug");
@@ -723,7 +745,7 @@ robot:
             fs::read(source.join("meshes/wheel.dae"))?,
         ];
 
-        let mut resolved = resolved_robot()?;
+        let mut resolved = bundle_plan()?;
         resolved.components.push(ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
@@ -742,10 +764,10 @@ robot:
 
         let staged = stage_runtime_layout(project.path(), &resolved)?;
 
-        let component = staged.join("components/ddsm115");
-        assert!(component.join("component.yaml").is_file());
-        assert!(component.join("simulation.yaml").is_file());
-        assert!(component.join("meshes/wheel.dae").is_file());
+        assert!(staged.join("robot.json").is_file());
+        assert!(!staged.join("components/ddsm115/component.yaml").exists());
+        assert!(!staged.join("components/ddsm115/simulation.yaml").exists());
+        assert!(!staged.join("components/ddsm115/meshes/wheel.dae").exists());
         assert_eq!(
             source_before,
             [
@@ -806,7 +828,7 @@ robot:
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let mut resolved = resolved_robot()?;
+        let mut resolved = bundle_plan()?;
         let mut drive = platform_runtime("drive", ArtifactKind::Service);
         drive.path_override = Some(PathBuf::from("services/drive"));
         resolved.platform_runtimes = vec![drive];
@@ -843,7 +865,7 @@ robot:
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let mut resolved = resolved_robot()?;
+        let mut resolved = bundle_plan()?;
         resolved.platform_runtimes = vec![platform_runtime("drive", ArtifactKind::Service)];
         let mut router = router_tool();
         router.path_override = Some(PathBuf::from("tools/infrastructure-router"));

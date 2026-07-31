@@ -4,7 +4,7 @@ use super::{RawParticipantReport, raw_participant_report_from_extracted_metadata
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use phoxal::check as graph_check;
+use phoxal_cli_core::check as graph_check;
 use phoxal_cli_core::check::participant_metadata;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
@@ -57,8 +57,8 @@ pub(crate) fn report_source_build_progress(ui: Option<&dyn crate::Reporter>, mes
 }
 
 /// The expected `artifact.kind` label for a [`SourceParticipant`]'s kind -
-/// shared between [`build_participant_report_by_building`] (which now supplies this
-/// identity itself, since extraction never self-reports it) and
+/// shared between [`build_participant_report_by_building`] (which checks the
+/// binary-owned kind against this expectation) and
 /// [`validate_source_artifact_identity`] (which still checks a fake/injected
 /// report against it in tests).
 pub(crate) fn expected_kind_for_source_participant(kind: SourceParticipantKind) -> &'static str {
@@ -87,29 +87,12 @@ pub(crate) fn build_participant_report_by_building(
                 binary_path.display()
             )
         })?;
-    let mut raw = raw_participant_report_from_extracted_metadata(
+    raw_participant_report_from_extracted_metadata(
         expected_kind_for_source_participant(participant.kind),
         &participant.expected_artifact_id,
         &binary_path,
         meta,
-    )?;
-    raw.participant_class = source_participant_class(participant.kind);
-    Ok(raw)
-}
-
-/// The participant class a source participant is checked under. Privilege is an
-/// OFFICIAL-tool property, not a directory property: an official `Tool` (a
-/// source override of an official tool) stays privileged, while a declared user
-/// tool - which shares the `tool` kind - is an ordinary CHECKED participant
-/// (#950), with its config validated. Every non-tool kind is checked by
-/// default.
-pub(crate) fn source_participant_class(kind: SourceParticipantKind) -> String {
-    match kind {
-        SourceParticipantKind::Tool => {
-            crate::validation::metadata::default_participant_class_for_kind("tool")
-        }
-        _ => crate::validation::default_participant_class(),
-    }
+    )
 }
 
 /// Builds `binary_name` in `crate_dir` and locates its resulting executable
@@ -234,8 +217,13 @@ impl TryFrom<RawParticipantReport> for graph_check::ParticipantApis {
     fn try_from(raw: RawParticipantReport) -> Result<Self> {
         let artifact_id = raw.artifact.id;
         let participant_kind = graph_check::ParticipantKind::parse(&raw.artifact.kind);
-        let participant_class =
-            graph_check::ParticipantClass::parse(&raw.participant_class).unwrap_or_default();
+        let participant_class = graph_check::ParticipantClass::parse(&raw.participant_class)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "participant report carries unknown class '{}'",
+                    raw.participant_class
+                )
+            })?;
         Ok(Self {
             // Default the participant id to the artifact id; callers that launch
             // one artifact per instance (component drivers) override it with the

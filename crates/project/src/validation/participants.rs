@@ -6,10 +6,10 @@ use anyhow::Result;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::ToolParticipant;
 use phoxal_cli_core::project::catalog::ArtifactKind;
+use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolvedComponent;
 use phoxal_cli_core::project::resolver::ResolvedComponentSource;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::project::resolver::official_binary_name;
 use phoxal_cli_core::project::resolver::tool_participant_id;
 use phoxal_cli_core::project::tooling::resolve_project_path;
@@ -52,7 +52,7 @@ impl PlatformArtifactRef {
 }
 
 pub(crate) fn tool_participants_from_resolved(
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
 ) -> Result<Vec<ToolParticipant>> {
     resolved
         .tools
@@ -74,7 +74,7 @@ pub(crate) fn tool_participants_from_resolved(
 }
 
 pub(crate) fn platform_artifact_refs_from_resolved(
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
 ) -> Vec<PlatformArtifactRef> {
     resolved
         .platform_runtimes
@@ -100,7 +100,7 @@ pub(crate) fn platform_artifact_refs_from_resolved(
 /// after validating its contracts (drivers are sim-substituted, never
 /// launched).
 pub(crate) fn component_driver_platform_refs_from_resolved(
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
 ) -> Vec<PlatformArtifactRef> {
     struct RegistryDriverRef {
         name: String,
@@ -148,7 +148,7 @@ pub(crate) fn component_driver_platform_refs_from_resolved(
 /// this in so one fetch closure resolves services, simulators, AND registry
 /// component drivers identically.
 pub(crate) fn component_driver_runtimes_by_ref(
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
 ) -> std::collections::BTreeMap<String, &ResolvedPlatformRuntime> {
     resolved
         .components
@@ -160,9 +160,7 @@ pub(crate) fn component_driver_runtimes_by_ref(
         .collect()
 }
 
-pub(crate) fn check_artifact_refs_from_resolved(
-    resolved: &ResolvedRobot,
-) -> Vec<PlatformArtifactRef> {
+pub(crate) fn check_artifact_refs_from_resolved(resolved: &BundlePlan) -> Vec<PlatformArtifactRef> {
     let mut refs = platform_artifact_refs_from_resolved(resolved);
     refs.extend(component_driver_platform_refs_from_resolved(resolved));
     refs.extend(
@@ -184,7 +182,7 @@ pub(crate) fn check_artifact_refs_from_resolved(
 
 pub(crate) fn source_participants_from_resolved(
     project_root: &Path,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
     mut locate_component_crate: impl FnMut(&ResolvedComponent, &Path) -> Result<PathBuf>,
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants = resolved

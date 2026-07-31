@@ -1,7 +1,7 @@
 //! Deterministic `build.phoxal` archiving of a staged runtime layout (#936).
 //!
 //! `build.phoxal` is a gzipped tar of a staged runtime layout - the compiled
-//! `robot.yaml`, the flat `bin/` store, and runtime assets - written so that
+//! canonical `robot.json`, `assets/`, and the flat `bin/` store - written so that
 //! identical staged contents always produce byte-identical archives. That is
 //! what lets a rebuild or a relink of unchanged content re-produce the same
 //! digest, so a bundle is content-addressable and independently attestable.
@@ -13,9 +13,9 @@
 //! otherwise). Paths are stored relative with `/` separators and no `.`/`..`
 //! components, so extraction can never escape its destination.
 //!
-//! The archive is not executable. Its `phoxal.runtime.json` compatibility
-//! declaration is ordinary deterministic runtime content, next to the compiled
-//! manifest and binaries. Plain
+//! The archive is not executable. Its `assets/runtime.json` compatibility
+//! declaration is ordinary deterministic runtime content beside the canonical
+//! model, assets, and binaries. Plain
 //! `tar -xzf build.phoxal` extracts it identically to [`extract_build_archive`];
 //! the helper here only adds the path-escape guard.
 
@@ -489,17 +489,17 @@ mod tests {
         fs::set_permissions(path, perms).unwrap();
     }
 
-    /// Stage a minimal layout: `robot.yaml`, an executable `bin/mission`, and a
+    /// Stage a minimal layout: `robot.json`, an executable `bin/mission`, and a
     /// non-executable asset. Returns the layout root.
     fn stage_layout(root: &Path) {
         fs::create_dir_all(root.join("bin")).unwrap();
-        fs::create_dir_all(root.join("model")).unwrap();
-        fs::write(root.join("robot.yaml"), b"schema: robot/v0\n").unwrap();
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(root.join("robot.json"), br#"{"schema":"phoxal/robot/v0"}"#).unwrap();
         #[cfg(unix)]
         write_executable(&root.join("bin/mission"), b"\x7fELF-ish-binary");
         #[cfg(not(unix))]
         fs::write(root.join("bin/mission"), b"\x7fELF-ish-binary").unwrap();
-        fs::write(root.join("model/robot.urdf"), b"<robot/>").unwrap();
+        fs::write(root.join("assets/fixture.bin"), b"asset").unwrap();
     }
 
     #[test]
@@ -514,9 +514,9 @@ mod tests {
         // Touch every file's mtime to a different time; determinism must ignore
         // it. Re-archive to a second path.
         let later = std::time::SystemTime::now();
-        filetime_touch(&layout.join("robot.yaml"), later);
+        filetime_touch(&layout.join("robot.json"), later);
         filetime_touch(&layout.join("bin/mission"), later);
-        filetime_touch(&layout.join("model/robot.urdf"), later);
+        filetime_touch(&layout.join("assets/fixture.bin"), later);
 
         let out_b = dir.path().join("b.build.phoxal");
         let digest_b = write_build_archive(&layout, &out_b).unwrap();
@@ -566,9 +566,9 @@ mod tests {
 
         let mut names = BTreeSet::new();
         collect_names(&extracted, &extracted, &mut names);
-        assert!(names.contains("robot.yaml"));
+        assert!(names.contains("robot.json"));
         assert!(names.contains("bin/mission"));
-        assert!(names.contains("model/robot.urdf"));
+        assert!(names.contains("assets/fixture.bin"));
         // The archive is pure runtime content: a top-level `.phoxal` (lock/socket
         // runtime state a prior layout run may have left behind) is never folded
         // into the bundle.
@@ -585,7 +585,7 @@ mod tests {
                 .mode()
                 & 0o777;
             assert_eq!(mode, 0o755, "executable bit must be preserved");
-            let asset = fs::metadata(extracted.join("model/robot.urdf"))
+            let asset = fs::metadata(extracted.join("assets/fixture.bin"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -658,8 +658,8 @@ mod tests {
         fs::write(
             &duplicate,
             raw_tar_gz_entries(&[
-                ("robot.yaml", b"first", b'0'),
-                ("robot.yaml", b"second", b'0'),
+                ("robot.json", b"first", b'0'),
+                ("robot.json", b"second", b'0'),
             ]),
         )
         .unwrap();
@@ -704,17 +704,17 @@ mod tests {
         let out = dir.path().join("bundle.build.phoxal");
         write_build_archive(&layout, &out).unwrap();
 
-        // The archive has a `model/` directory entry. Plant `dest/model` as a
+        // The archive has an `assets/` directory entry. Plant `dest/assets` as a
         // symlink pointing outside `dest` before extraction. Because `dest` must
         // be empty, this is only reachable by racing it in - but the empty-dir
         // requirement itself already rejects a non-empty dest, and the
         // per-component check rejects the symlink. Prove both: a dest whose
-        // `model` is a symlink is non-empty AND symlinked.
+        // `assets` is a symlink is non-empty AND symlinked.
         let escape = dir.path().join("escape");
         fs::create_dir_all(&escape).unwrap();
         let dest = dir.path().join("dest");
         fs::create_dir_all(&dest).unwrap();
-        std::os::unix::fs::symlink(&escape, dest.join("model")).unwrap();
+        std::os::unix::fs::symlink(&escape, dest.join("assets")).unwrap();
 
         let error = extract_build_archive(&out, &dest)
             .expect_err("a symlinked parent in the destination must be rejected");
@@ -723,7 +723,7 @@ mod tests {
             "{error}"
         );
         // Nothing was written through the symlink into the outside directory.
-        assert!(!escape.join("robot.urdf").exists());
+        assert!(!escape.join("fixture.bin").exists());
     }
 
     /// Finding E: a symlinked final target is not followed - the file is not
@@ -731,24 +731,28 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlinked_final_target_is_rejected() {
-        // A single-entry archive writing `robot.yaml`.
+        // A single-entry archive writing `robot.json`.
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("one.tar.gz");
-        fs::write(&archive, raw_tar_gz("robot.yaml", b"schema: robot/v0\n")).unwrap();
+        fs::write(
+            &archive,
+            raw_tar_gz("robot.json", br#"{"schema":"phoxal/robot/v0"}"#),
+        )
+        .unwrap();
 
         // Extract once into a fresh dest to establish a normal baseline.
         let good = dir.path().join("good");
         extract_build_archive(&archive, &good).unwrap();
-        assert!(good.join("robot.yaml").is_file());
+        assert!(good.join("robot.json").is_file());
 
-        // Now a dest that is non-empty because `robot.yaml` is a symlink to an
+        // Now a dest that is non-empty because `robot.json` is a symlink to an
         // outside file: extraction refuses the non-empty/symlinked destination
         // and never writes through the link.
         let outside = dir.path().join("outside.txt");
         fs::write(&outside, b"original").unwrap();
         let dest = dir.path().join("evil");
         fs::create_dir_all(&dest).unwrap();
-        std::os::unix::fs::symlink(&outside, dest.join("robot.yaml")).unwrap();
+        std::os::unix::fs::symlink(&outside, dest.join("robot.json")).unwrap();
 
         let error = extract_build_archive(&archive, &dest)
             .expect_err("a symlinked final target must be rejected");
@@ -780,7 +784,7 @@ mod tests {
         // A fresh, never-created destination extracts fine.
         let fresh = dir.path().join("fresh");
         extract_build_archive(&out, &fresh).unwrap();
-        assert!(fresh.join("robot.yaml").is_file());
+        assert!(fresh.join("robot.json").is_file());
     }
 
     #[test]

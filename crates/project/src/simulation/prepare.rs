@@ -19,8 +19,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use phoxal::model::Robot as RobotBundle;
-use phoxal::model::structure::Structure;
+use phoxal_model::Robot as RobotBundle;
 
 use crate::simulation::webots::proto::{
     self, RobotInstance, WebotsController, externproto_for_generated_proto, generate_robot_proto,
@@ -34,7 +33,7 @@ pub const WEBOTS_CONTROLLER_NAME: &str = "phoxal-simulator-webots-controller";
 pub struct ControllerLaunch {
     pub robot_id: String,
     pub namespace: String,
-    pub robot_root: Option<PathBuf>,
+    pub bundle_root: Option<PathBuf>,
     pub connect_endpoints: Vec<String>,
 }
 
@@ -45,21 +44,16 @@ pub struct ControllerLaunch {
 /// live in a `components/` subdirectory of the robot's own PROTO directory).
 const COMPONENT_PROTOS_SUBDIR: &str = "components";
 
-/// One distinct component type mounted on a robot: its on-disk source
-/// directory (siblings `component.yaml` + `structure.urdf` + optionally
-/// `simulation.yaml`, e.g. from `component_driver::component_crate_dir`), used
-/// to generate that type's own PROTO once regardless of how many instances of
-/// it the robot mounts.
+/// One distinct simulated component type compiled into the canonical robot.
 pub struct ComponentTypeToStage<'a> {
     pub component_type: &'a str,
-    pub source_dir: &'a Path,
 }
 
 /// One robot to stage into the simulation world: its bundle (manifest +
 /// component specs + structure), the distinct component types it mounts, and
 /// the stable launch inputs for the controller that substitutes its
 /// component-driver contracts. `component_types` may be empty for a robot
-/// with no mounted components (or none with a `simulation.yaml`).
+/// with no mounted components (or none with compiled simulation semantics).
 pub struct RobotToStage<'a> {
     pub robot_id: String,
     pub bundle: &'a RobotBundle,
@@ -214,8 +208,8 @@ fn controller_args(launch: &ControllerLaunch) -> Result<Vec<String>> {
         "--namespace".to_string(),
         launch.namespace.clone(),
     ];
-    if let Some(root) = &launch.robot_root {
-        args.extend(["--robot-root".to_string(), root.display().to_string()]);
+    if let Some(root) = &launch.bundle_root {
+        args.extend(["--bundle-root".to_string(), root.display().to_string()]);
     }
     anyhow::ensure!(
         !launch.connect_endpoints.is_empty(),
@@ -243,10 +237,9 @@ fn stage_component_protos(
     for component_type in component_types {
         let component_id = bundle
             .components()
-            .iter()
-            .find_map(|(component_id, instance)| {
-                (instance.component_type == component_type.component_type)
-                    .then_some(component_id.as_str())
+            .find_map(|instance| {
+                (instance.component_type() == component_type.component_type)
+                    .then_some(instance.id())
             })
             .ok_or_else(|| {
                 anyhow!(
@@ -255,22 +248,12 @@ fn stage_component_protos(
                 )
             })?;
         let component_model = bundle.component_for_instance(component_id)?;
-
-        let comp_structure =
-            Structure::read_from_dir(component_type.source_dir).with_context(|| {
-                format!(
-                    "failed to read structure.urdf for component type '{}' from {}",
-                    component_type.component_type,
-                    component_type.source_dir.display()
-                )
-            })?;
         let comp_simulation = bundle
             .simulation_for_component_type(component_type.component_type)
             .ok_or_else(|| {
                 anyhow!(
-                    "simulation.yaml for component type '{}' from {} was not loaded into the canonical robot",
-                    component_type.component_type,
-                    component_type.source_dir.display()
+                    "component type '{}' has no compiled simulation semantics",
+                    component_type.component_type
                 )
             })?;
 
@@ -281,7 +264,7 @@ fn stage_component_protos(
         let artifact = proto::generate_component_proto(
             component_type.component_type,
             component_model,
-            &comp_structure,
+            component_model.structure(),
             comp_simulation,
             &comp_mesh_url_prefix,
         )
@@ -315,6 +298,10 @@ mod tests {
     const BASE_WORLD: &str = "#VRML_SIM R2025a utf8\nWorldInfo {}\n";
 
     fn fixture_bundle(component_source_dir: &Path) -> Result<RobotBundle> {
+        let project_root = component_source_dir
+            .parent()
+            .and_then(Path::parent)
+            .context("fixture component path has no project root")?;
         std::fs::create_dir_all(component_source_dir)?;
         std::fs::write(
             component_source_dir.join("structure.urdf"),
@@ -327,7 +314,8 @@ mod tests {
   </joint>
 </robot>"#,
         )?;
-        let manifest = phoxal::model::source::robot::parse_from_string(
+        std::fs::write(
+            project_root.join("robot.yaml"),
             r#"schema: robot/v0
 robot:
   id: testbot
@@ -346,7 +334,8 @@ robot:
       mount_link: base_link
 "#,
         )?;
-        let component = phoxal::model::source::component::read_from_string(
+        std::fs::write(
+            component_source_dir.join("component.yaml"),
             r#"schema: component/v0
 capabilities:
   motor:
@@ -357,10 +346,12 @@ capabilities:
       id: wheel_joint
 "#,
         )?;
-        let simulation = phoxal::model::source::simulation::read_from_string(
+        std::fs::write(
+            component_source_dir.join("simulation.yaml"),
             "schema: simulation/v0\ncapabilities: {}\nlinks: {}\n",
         )?;
-        let structure = Structure::from_urdf_str(
+        std::fs::write(
+            project_root.join("structure.urdf"),
             r#"<robot name="testbot">
   <link name="base_footprint" />
   <link name="base_link" />
@@ -370,12 +361,15 @@ capabilities:
   </joint>
 </robot>"#,
         )?;
-        RobotBundle::try_from_sources(
-            manifest,
-            BTreeMap::from([("drive".to_string(), component)]),
-            BTreeMap::from([("drive".to_string(), simulation)]),
-            structure,
-        )
+        let compiled = phoxal_manifest::compile(phoxal_manifest::SourceSet {
+            project_root: project_root.to_path_buf(),
+            robot_manifest: project_root.join("robot.yaml"),
+            component_roots: BTreeMap::from([(
+                "drive".to_string(),
+                component_source_dir.to_path_buf(),
+            )]),
+        })?;
+        Ok(compiled.into_parts().0)
     }
 
     #[test]
@@ -386,7 +380,7 @@ capabilities:
         let launch = ControllerLaunch {
             namespace: "dev".to_string(),
             robot_id: "testbot".to_string(),
-            robot_root: Some(PathBuf::from("../../runtime")),
+            bundle_root: Some(PathBuf::from("../../runtime")),
             connect_endpoints: vec![
                 "unixsock-stream/a".to_string(),
                 "tcp/localhost:7447".to_string(),
@@ -403,7 +397,6 @@ capabilities:
                 bundle: &bundle,
                 component_types: vec![ComponentTypeToStage {
                     component_type: "drive",
-                    source_dir: &component_source_dir,
                 }],
                 controller_launch: launch,
             }],
@@ -418,7 +411,7 @@ capabilities:
         assert!(!text.contains("--participant-id"));
         assert!(!text.contains("--producer"));
         assert!(!text.contains("--epoch"));
-        assert!(text.contains("--robot-root"));
+        assert!(text.contains("--bundle-root"));
         assert!(text.contains("../../runtime"));
         assert!(text.contains("unixsock-stream/a,tcp/localhost:7447"));
         assert!(temp.path().join("protos/components/Drive.proto").is_file());
@@ -441,7 +434,7 @@ capabilities:
         let launch = ControllerLaunch {
             namespace: "dev".to_string(),
             robot_id: "testbot".to_string(),
-            robot_root: Some(PathBuf::from("../../runtime")),
+            bundle_root: Some(PathBuf::from("../../runtime")),
             connect_endpoints: vec!["tcp/localhost:7447".to_string()],
         };
 
@@ -460,7 +453,6 @@ capabilities:
                     bundle: &bundle,
                     component_types: vec![ComponentTypeToStage {
                         component_type: "drive",
-                        source_dir: &component_source_dir,
                     }],
                     controller_launch: launch.clone(),
                 }],
@@ -488,7 +480,7 @@ capabilities:
         #[arg(long)]
         namespace: String,
         #[arg(long)]
-        robot_root: Option<PathBuf>,
+        bundle_root: Option<PathBuf>,
         #[arg(long)]
         connect: Option<String>,
     }
@@ -498,7 +490,7 @@ capabilities:
         let launch = ControllerLaunch {
             namespace: "dev".to_string(),
             robot_id: "testbot".to_string(),
-            robot_root: Some(PathBuf::from("../../runtime")),
+            bundle_root: Some(PathBuf::from("../../runtime")),
             connect_endpoints: vec![
                 "unixsock-stream/a".to_string(),
                 "tcp/localhost:7447".to_string(),
@@ -510,7 +502,7 @@ capabilities:
         )?;
         assert_eq!(parsed.robot_id, "testbot");
         assert_eq!(parsed.namespace, "dev");
-        assert_eq!(parsed.robot_root, Some(PathBuf::from("../../runtime")));
+        assert_eq!(parsed.bundle_root, Some(PathBuf::from("../../runtime")));
         assert_eq!(
             parsed.connect.as_deref(),
             Some("unixsock-stream/a,tcp/localhost:7447")
@@ -525,68 +517,8 @@ capabilities:
         let protos_dir = temp.path().join("protos");
         let mesh_root = temp.path().join("meshes");
         let world_path = temp.path().join("worlds/default.wbt");
-        let component_source_dir = temp.path().join("components/ddsm115");
-        std::fs::create_dir_all(&component_source_dir)?;
-        std::fs::write(
-            component_source_dir.join("structure.urdf"),
-            r#"<robot name="ddsm115">
-  <link name="axle" />
-  <link name="wheel" />
-  <joint name="wheel_joint" type="continuous">
-    <parent link="axle" />
-    <child link="wheel" />
-  </joint>
-</robot>"#,
-        )?;
-        let manifest = phoxal::model::source::robot::parse_from_string(
-            r#"schema: robot/v0
-robot:
-  id: testbot
-  namespace: dev
-  motion_limits:
-    max_linear_speed_mps: 0.6
-    max_angular_speed_radps: 2.0
-  kinematic:
-    kind: omnidirectional
-    actuators:
-      - left_drive.motor
-    encoders: []
-  components:
-    left_drive:
-      component: ddsm115
-      mount_link: base_link
-"#,
-        )?;
-        let structure = Structure::from_urdf_str(
-            r#"<robot name="testbot">
-  <link name="base_footprint" />
-  <link name="base_link" />
-  <joint name="root" type="fixed">
-    <parent link="base_footprint" />
-    <child link="base_link" />
-  </joint>
-</robot>"#,
-        )?;
-        let component = phoxal::model::source::component::read_from_string(
-            r#"schema: component/v0
-capabilities:
-  motor:
-    kind: motor
-    command: velocity
-    target:
-      kind: joint
-      id: wheel_joint
-"#,
-        )?;
-        let simulation = phoxal::model::source::simulation::read_from_string(
-            "schema: simulation/v0\ncapabilities: {}\nlinks: {}\n",
-        )?;
-        let bundle = RobotBundle::try_from_sources(
-            manifest,
-            BTreeMap::from([("ddsm115".to_string(), component)]),
-            BTreeMap::from([("ddsm115".to_string(), simulation)]),
-            structure,
-        )?;
+        let component_source_dir = temp.path().join("source-components/drive");
+        let bundle = fixture_bundle(&component_source_dir)?;
         let staged = stage_simulation_world(
             BASE_WORLD,
             &protos_dir,
@@ -596,20 +528,19 @@ capabilities:
                 robot_id: "testbot".to_string(),
                 bundle: &bundle,
                 component_types: vec![ComponentTypeToStage {
-                    component_type: "ddsm115",
-                    source_dir: &component_source_dir,
+                    component_type: "drive",
                 }],
                 controller_launch: ControllerLaunch {
                     robot_id: "testbot".to_string(),
                     namespace: "dev".to_string(),
-                    robot_root: Some(PathBuf::from("../../runtime")),
+                    bundle_root: Some(PathBuf::from("../../runtime")),
                     connect_endpoints: vec!["unixsock-stream/router".to_string()],
                 },
             }],
         )?;
-        assert!(protos_dir.join("components/Ddsm115.proto").is_file());
+        assert!(protos_dir.join("components/Drive.proto").is_file());
         let robot_proto = std::fs::read_to_string(protos_dir.join("Testbot.proto"))?;
-        assert!(robot_proto.contains("components/Ddsm115.proto"));
+        assert!(robot_proto.contains("components/Drive.proto"));
         let staged_world = std::fs::read_to_string(staged.staged_world_path)?;
         assert!(staged_world.contains("../protos/Testbot.proto"));
         Ok(())

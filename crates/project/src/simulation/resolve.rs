@@ -23,8 +23,8 @@ use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::launch_plan::build_launch_plan;
+use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolveOptions;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
 use phoxal_cli_core::simulation::world;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -65,7 +65,7 @@ pub(crate) fn resolve_project(
 pub(crate) fn build_checked_sim_launch_plan(
     project_root: &Path,
     world: &Path,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
     offline: bool,
     run: RunIdentity,
     reporter: &dyn crate::Reporter,
@@ -145,7 +145,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         &tool_participants,
         &metadata_source_participants,
         CheckGraphContext {
-            robot: Some(&resolved.robot),
+            robot: Some(&resolved.source_manifest),
         },
         |binary_name| {
             if let Some(runtime) = official_by_name.get(binary_name) {
@@ -169,7 +169,10 @@ pub(crate) fn build_checked_sim_launch_plan(
     )?;
 
     let mut checked_participants = metadata_outcome.checked_participants.clone();
-    remap_simulator_participant_ids(&mut checked_participants, &resolved.robot.robot.id)?;
+    remap_simulator_participant_ids(
+        &mut checked_participants,
+        &resolved.source_manifest.robot.id,
+    )?;
     let official_simulators =
         official_simulator_participants(project_root, resolved, offline, reporter)?;
     checked_participants.extend(official_simulators);
@@ -238,7 +241,7 @@ mod tests {
         )
         .expect("write fixture Cargo.lock");
         let json = format!(
-            r#"{{"id":"{SIMULATOR_CONTROLLER_ARTIFACT_NAME}","config_schema":{{"type":"null"}}}}"#
+            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{SIMULATOR_CONTROLLER_ARTIFACT_NAME}","kind":"simulator","class":"checked","config_schema":{{"type":"null"}}}}"#
         );
         let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
         let len = json.len();
@@ -259,7 +262,7 @@ mod tests {
     /// A minimal single-service robot. Cross-references between `kinematic`
     /// and `components` are never validated by `Robot::parse_from_string`
     /// itself (that happens inside `resolve()`, which this test bypasses by
-    /// constructing `ResolvedRobot` directly), so an empty `components: {}`
+    /// constructing `BundlePlan` directly), so an empty `components: {}`
     /// is fine here.
     const FIXTURE_ROBOT: &str = r#"schema: robot/v0
 robot:
@@ -308,7 +311,9 @@ services:
         .expect("write fixture Cargo.lock");
 
         let schema = r#"{"type":"object","required":["gain"],"properties":{"gain":{"type":"number"}},"additionalProperties":false}"#;
-        let json = format!(r#"{{"id":"avoid","config_schema":{schema}}}"#);
+        let json = format!(
+            r#"{{"schema":"phoxal/participant-metadata/v0","id":"avoid","kind":"service","class":"checked","config_schema":{schema}}}"#
+        );
         let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
         let len = json.len();
         std::fs::write(
@@ -325,18 +330,18 @@ services:
         crate_dir
     }
 
-    /// A `ResolvedRobot` carrying exactly one user service (`avoid`, built
+    /// A `BundlePlan` carrying exactly one user service (`avoid`, built
     /// from `write_invalid_config_service_fixture`) whose robot.yaml config
     /// (`{"gain": "fast"}`) violates that service's own emitted schema
     /// (`gain` must be a number), plus one PATH-overridden simulator (built
     /// from `write_simulator_fixture`) so `ensure_exactly_one_simulator` is
     /// satisfied without ever touching the network (a registry-resolved
     /// simulator would `cargo install` for real).
-    fn resolved_robot_with_invalid_service_config(
+    fn bundle_plan_with_invalid_service_config(
         crate_dir: PathBuf,
         simulator_dir: PathBuf,
-    ) -> Result<ResolvedRobot> {
-        let mut robot = phoxal::model::source::robot::parse_from_string(FIXTURE_ROBOT)?;
+    ) -> Result<BundlePlan> {
+        let mut robot = phoxal_manifest::source::robot::parse_from_string(FIXTURE_ROBOT)?;
         robot
             .services
             .get_mut("avoid")
@@ -344,8 +349,10 @@ services:
             .config = Some(serde_json::json!({ "gain": "fast" }));
 
         let target = crate::resolve::project::host_target_triple();
-        Ok(ResolvedRobot {
-            robot,
+        let compiled = crate::stage::compile_test_bundle(&robot)?;
+        Ok(BundlePlan {
+            source_manifest: robot,
+            compiled,
             train: "0.42.0".to_string(),
             target: target.clone(),
             platform_runtimes: Vec::new(),
@@ -393,7 +400,7 @@ services:
         std::fs::write(temp.path().join("structure.urdf"), "<robot/>")?;
         let crate_dir = write_invalid_config_service_fixture(temp.path());
         let simulator_dir = write_simulator_fixture(temp.path());
-        let resolved = resolved_robot_with_invalid_service_config(crate_dir, simulator_dir)?;
+        let resolved = bundle_plan_with_invalid_service_config(crate_dir, simulator_dir)?;
 
         let result = build_checked_sim_launch_plan(
             temp.path(),

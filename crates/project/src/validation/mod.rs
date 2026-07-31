@@ -1,24 +1,18 @@
-use phoxal::check as graph_check;
-use phoxal::model::source::robot::v0::Manifest as RobotManifest;
+use phoxal_cli_core::check as graph_check;
+use phoxal_manifest::source::robot::v0::Manifest as RobotManifest;
 use serde_json::Value;
 
 /// The CLI's own participant-report shape: `artifact.id` IS self-reported -
 /// a built binary's linker section carries the participant's own declared
-/// `id` alongside its config schema (see
+/// `id`, kind, class, and config schema (see
 /// `phoxal_cli_core::check::participant_metadata`) - and is checked against
-/// the identity that selected the binary before its schema is trusted
-/// (`raw_participant_report_from_extracted_metadata`). `artifact.kind` is still
-/// supplied by the caller: the section carries no kind label. Wire identity
-/// is fixed by the selected framework train and its version-qualified keys.
+/// the expectations that selected the binary before any metadata fact is
+/// trusted (`raw_participant_report_from_extracted_metadata`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawParticipantReport {
     pub artifact: RawArtifact,
     pub participant_class: String,
     pub config_schema: Option<Value>,
-}
-
-pub(crate) fn default_participant_class() -> String {
-    "checked".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

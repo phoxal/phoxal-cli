@@ -3,18 +3,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::check as graph_check;
 use crate::identity::{ExecutionId, ProducerId};
 use anyhow::{Result, bail};
-use phoxal::check as graph_check;
-use phoxal::participant::ExecutionOrigin;
-use phoxal::participant::launch::{
+use phoxal_runtime_contract::ExecutionOrigin;
+use phoxal_runtime_contract::{
     BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::catalog::ArtifactKind;
-use super::resolver::{ResolvedRobot, official_binary_name};
+use super::resolver::{BundlePlan, official_binary_name};
 use crate::check::source::{SourceParticipant, SourceParticipantKind};
 use crate::runtime::{RuntimeFailurePolicy, StartupRequirement};
 
@@ -90,7 +90,7 @@ pub struct PlanContext {
 /// The source-only half of a [`PlanContext`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanSource {
-    pub resolved: ResolvedRobot,
+    pub resolved: BundlePlan,
     pub source_participants: Vec<SourceParticipant>,
 }
 
@@ -269,7 +269,7 @@ pub struct ParticipantLaunchRecord {
 /// bundle has no crate directories at all, so keeping them out of the execution
 /// identity is what makes source and bundle plans identical. The source-staging
 /// path recovers a crate directory from its own resolved graph
-/// (`ResolvedRobot`) and source-participant records when it needs to rebuild;
+/// (`BundlePlan`) and source-participant records when it needs to rebuild;
 /// the plan only ever names the `bin/` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "execution", rename_all = "snake_case")]
@@ -310,7 +310,7 @@ impl ParticipantExecution {
 #[derive(Debug, Clone, Copy)]
 pub struct CheckedRobotLaunchInput<'a> {
     pub project_root: &'a Path,
-    pub resolved: &'a ResolvedRobot,
+    pub resolved: &'a BundlePlan,
     pub checked_participants: &'a [graph_check::ParticipantApis],
     pub source_participants: &'a [SourceParticipant],
 }
@@ -462,18 +462,21 @@ fn build_robot_launch(
                 binary_name: official_binary_name(ArtifactKind::Tool, tool_short_name(&tool.name)),
             },
             launch: ParticipantLaunch {
-                participant_id: format!("{}-{}", tool.name, input.resolved.robot.robot.id),
+                participant_id: format!(
+                    "{}-{}",
+                    tool.name, input.resolved.source_manifest.robot.id
+                ),
                 execution: run.execution(),
                 producer: ProducerId::mint(),
                 execution_origin: Some(run.origin()),
-                namespace: input.resolved.robot.robot.namespace.clone(),
-                robot_id: input.resolved.robot.robot.id.clone(),
+                namespace: input.resolved.source_manifest.robot.namespace.clone(),
+                robot_id: input.resolved.source_manifest.robot.id.clone(),
                 bus: BusProfile {
                     connect_endpoints: vec![DEFAULT_ROUTER_CONNECT.to_string()],
                 },
                 clock: ClockMode::Real,
                 config: None,
-                robot_root: Some(runtime_layout_dir(input.project_root)),
+                bundle_root: Some(runtime_layout_dir(input.project_root)),
                 component_instance: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
@@ -489,8 +492,8 @@ fn build_robot_launch(
     });
 
     Ok(RobotLaunch {
-        id: input.resolved.robot.robot.id.clone(),
-        namespace: input.resolved.robot.robot.namespace.clone(),
+        id: input.resolved.source_manifest.robot.id.clone(),
+        namespace: input.resolved.source_manifest.robot.namespace.clone(),
         participants,
     })
 }
@@ -594,13 +597,29 @@ fn participant_launch(
         graph_check::ParticipantScope::ComponentInstance(instance) => Some(instance.clone()),
         graph_check::ParticipantScope::Graph => None,
     };
+    // Compiled driver declarations carry CLI/compiler-side wiring metadata,
+    // not the participant binary's typed runtime config. Official drivers in
+    // the published framework train use unit config, so never forward the
+    // declaration through PHOXAL_CONFIG.
+    let config = match &checked.scope {
+        graph_check::ParticipantScope::ComponentInstance(_) => None,
+        graph_check::ParticipantScope::Graph => input
+            .resolved
+            .compiled
+            .participants
+            .iter()
+            .find(|participant| {
+                participant.component_instance.is_none() && participant.id == checked.participant_id
+            })
+            .and_then(|participant| participant.config.clone()),
+    };
     ParticipantLaunch {
         participant_id: checked.participant_id.clone(),
         execution: run.execution(),
         producer: ProducerId::mint(),
         execution_origin: Some(run.origin()),
-        namespace: input.resolved.robot.robot.namespace.clone(),
-        robot_id: input.resolved.robot.robot.id.clone(),
+        namespace: input.resolved.source_manifest.robot.namespace.clone(),
+        robot_id: input.resolved.source_manifest.robot.id.clone(),
         bus: BusProfile {
             connect_endpoints: vec![DEFAULT_ROUTER_CONNECT.to_string()],
         },
@@ -612,21 +631,8 @@ fn participant_launch(
             LaunchMode::Run => ClockMode::Real,
             LaunchMode::Webots { .. } => ClockMode::Simulation,
         },
-        config: input
-            .resolved
-            .robot
-            .services
-            .get(&checked.participant_id)
-            .and_then(|service| service.config.clone())
-            .or_else(|| {
-                input
-                    .resolved
-                    .robot
-                    .tools
-                    .get(&checked.participant_id)
-                    .and_then(|tool| tool.config.clone())
-            }),
-        robot_root: Some(runtime_layout_dir(input.project_root)),
+        config,
+        bundle_root: Some(runtime_layout_dir(input.project_root)),
         component_instance,
         shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
     }
@@ -670,10 +676,7 @@ fn ensure_launch_set_parity(mode: &LaunchMode, input: &CheckedRobotLaunchInput<'
     Ok(())
 }
 
-fn expected_checked_participant_ids(
-    mode: &LaunchMode,
-    resolved: &ResolvedRobot,
-) -> BTreeSet<String> {
+fn expected_checked_participant_ids(mode: &LaunchMode, resolved: &BundlePlan) -> BTreeSet<String> {
     let mut expected = BTreeSet::new();
     expected.extend(
         resolved
@@ -742,8 +745,8 @@ mod tests {
 
     use crate::project::catalog::ArtifactKind;
     use crate::project::resolver::{
-        ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-        ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, ResolvedUserRuntime,
+        BundlePlan, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
+        ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime,
     };
 
     use super::*;
@@ -804,7 +807,7 @@ mod tests {
                 },
                 clock: ClockMode::Real,
                 config: None,
-                robot_root: Some(PathBuf::from("/var/phoxal")),
+                bundle_root: Some(PathBuf::from("/var/phoxal")),
                 component_instance: None,
                 shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             },
@@ -831,19 +834,28 @@ mod tests {
 
     #[test]
     fn launch_plan_covers_per_robot_tools_and_user_service_config() -> anyhow::Result<()> {
-        let mut resolved = empty_resolved_robot("testbot")?;
+        let mut resolved = empty_bundle_plan("testbot")?;
         add_robot_tools(&mut resolved);
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),
             path: PathBuf::from("runtimes/mission"),
             source_hash: "hash".to_string(),
         });
-        resolved.robot.services.insert(
+        resolved.source_manifest.services.insert(
             "mission".to_string(),
-            phoxal::model::source::robot::v0::UserService {
+            phoxal_manifest::source::robot::v0::UserService {
                 config: Some(serde_json::json!({"message": "line\nquoted \"value\""})),
             },
         );
+        resolved
+            .compiled
+            .participants
+            .push(phoxal_manifest::Participant {
+                id: "mission".to_string(),
+                kind: phoxal_manifest::ParticipantKind::Service,
+                component_instance: None,
+                config: Some(serde_json::json!({"message": "line\nquoted \"value\""})),
+            });
         let sources = vec![SourceParticipant::user_service(
             "mission",
             PathBuf::from("/tmp/mission"),
@@ -892,7 +904,7 @@ mod tests {
         assert_eq!(
             encoded
                 .variables()
-                .get(phoxal::participant::launch::env::CONFIG)
+                .get(phoxal_runtime_contract::env::CONFIG)
                 .map(String::as_str),
             Some(r#"{"message":"line\nquoted \"value\""}"#)
         );
@@ -901,7 +913,7 @@ mod tests {
 
     #[test]
     fn webots_plan_keeps_declared_user_tools_in_the_resident_graph() -> anyhow::Result<()> {
-        let mut resolved = empty_resolved_robot("testbot")?;
+        let mut resolved = empty_bundle_plan("testbot")?;
         resolved.simulators.push(platform_runtime(
             "webots-controller",
             ArtifactKind::Simulator,
@@ -911,12 +923,21 @@ mod tests {
             path: PathBuf::from("tools/console"),
             source_hash: "hash".to_string(),
         });
-        resolved.robot.tools.insert(
+        resolved.source_manifest.tools.insert(
             "console".to_string(),
-            phoxal::model::source::robot::v0::UserTool {
+            phoxal_manifest::source::robot::v0::UserTool {
                 config: Some(serde_json::json!({"rate": 20})),
             },
         );
+        resolved
+            .compiled
+            .participants
+            .push(phoxal_manifest::Participant {
+                id: "console".to_string(),
+                kind: phoxal_manifest::ParticipantKind::Tool,
+                component_instance: None,
+                config: Some(serde_json::json!({"rate": 20})),
+            });
         let sources = vec![SourceParticipant::user_tool(
             "console",
             PathBuf::from("/tmp/console"),
@@ -968,7 +989,7 @@ mod tests {
 
     #[test]
     fn webots_excludes_physical_drivers_from_expected_and_resident_sets() -> anyhow::Result<()> {
-        let mut resolved = empty_resolved_robot("testbot")?;
+        let mut resolved = empty_bundle_plan("testbot")?;
         let component_package = || ResolvedComponentPackage {
             package: "phoxal/component-ddsm115".to_string(),
             kind: ArtifactKind::ComponentAssets,
@@ -1017,8 +1038,8 @@ mod tests {
 
     #[test]
     fn run_robot_tools_have_unique_participant_ids_per_robot() -> anyhow::Result<()> {
-        let mut robot_a = empty_resolved_robot("robot_a")?;
-        let mut robot_b = empty_resolved_robot("robot_b")?;
+        let mut robot_a = empty_bundle_plan("robot_a")?;
+        let mut robot_b = empty_bundle_plan("robot_b")?;
         add_robot_tools(&mut robot_a);
         add_robot_tools(&mut robot_b);
         let inputs = [
@@ -1079,7 +1100,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn webots_launch_records_need_no_simulator_clock_exception() -> anyhow::Result<()> {
-        let resolved = empty_resolved_robot("testbot")?;
+        let resolved = empty_bundle_plan("testbot")?;
         let input = CheckedRobotLaunchInput {
             project_root: Path::new("/tmp/robot"),
             resolved: &resolved,
@@ -1113,7 +1134,7 @@ mod tests {
 
     #[test]
     fn parity_rejects_missing_and_extra_checked_metadata() -> anyhow::Result<()> {
-        let mut resolved = empty_resolved_robot("testbot")?;
+        let mut resolved = empty_bundle_plan("testbot")?;
         add_robot_tools(&mut resolved);
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),
@@ -1163,7 +1184,7 @@ mod tests {
 
     fn empty_checked_input<'a>(
         project_root: &'a Path,
-        resolved: &'a ResolvedRobot,
+        resolved: &'a BundlePlan,
     ) -> CheckedRobotLaunchInput<'a> {
         CheckedRobotLaunchInput {
             project_root,
@@ -1173,7 +1194,7 @@ mod tests {
         }
     }
 
-    fn empty_resolved_robot(id: &str) -> anyhow::Result<ResolvedRobot> {
+    fn empty_bundle_plan(id: &str) -> anyhow::Result<BundlePlan> {
         let yaml = format!(
             r#"schema: robot/v0
 robot:
@@ -1189,9 +1210,10 @@ robot:
   components: {{}}
 "#
         );
-        let robot = phoxal::model::source::robot::parse_from_string(&yaml)?;
-        Ok(ResolvedRobot {
-            robot,
+        let robot = phoxal_manifest::source::robot::parse_from_string(&yaml)?;
+        Ok(BundlePlan {
+            source_manifest: robot,
+            compiled: Default::default(),
             train: "0.36.0".to_string(),
             target: host_target_triple_for_tests(),
             platform_runtimes: Vec::new(),
@@ -1205,7 +1227,7 @@ robot:
         })
     }
 
-    fn add_robot_tools(resolved: &mut ResolvedRobot) {
+    fn add_robot_tools(resolved: &mut BundlePlan) {
         resolved.tools.push(tool("tool-bus"));
         resolved.tools.push(tool("tool-joypad"));
         resolved.tools.push(tool("tool-log"));

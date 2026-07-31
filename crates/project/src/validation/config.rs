@@ -1,7 +1,7 @@
 //! Config responsibilities for check.
 
-use phoxal::check as graph_check;
-use phoxal::model::source::robot::v0::Manifest as RobotManifest;
+use phoxal_cli_core::check as graph_check;
+use phoxal_manifest::source::robot::v0::Manifest as RobotManifest;
 use serde_json::Value;
 
 pub(crate) fn validate_user_service_config(

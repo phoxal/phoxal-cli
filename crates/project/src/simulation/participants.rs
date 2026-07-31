@@ -7,20 +7,20 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use phoxal::check as graph_check;
+use phoxal_cli_core::check as graph_check;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
 use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
-use phoxal_cli_core::project::resolver::ResolvedRobot;
+use phoxal_cli_core::project::resolver::BundlePlan;
 use std::path::Path;
 
 pub(crate) fn official_simulator_participants(
     project_root: &Path,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
     offline: bool,
     reporter: &dyn crate::Reporter,
 ) -> Result<Vec<graph_check::ParticipantApis>> {
-    let robot_id = resolved.robot.robot.id.as_str();
+    let robot_id = resolved.source_manifest.robot.id.as_str();
     let simulation_root = phoxal_cli_core::project::launch_plan::simulation_root_dir(project_root);
     let target_dir = crate::build::cargo::cargo_target_dir(project_root, offline).ok();
     let simulation_bin_dir = simulation_root.join("bin");
@@ -123,7 +123,7 @@ pub(crate) fn simulator_participant_id_for_resolved_artifact(
 /// sorted for deterministic checking and staging.
 pub(crate) fn sim_source_participants(
     project_root: &Path,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants =
         source_participants_from_resolved(project_root, resolved, component_driver_crate_dir)?;

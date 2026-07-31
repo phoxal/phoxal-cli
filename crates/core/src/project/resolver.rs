@@ -1,9 +1,11 @@
 //! Robot-manifest loading and terminal-independent resolution records.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal::model::source::robot::v0::Manifest as Robot;
+use phoxal_manifest::source::robot::v0::Manifest as Robot;
+use phoxal_manifest::{AssetId, CompiledProject, Participant};
 
 use super::catalog::ArtifactKind;
 
@@ -75,8 +77,12 @@ impl Default for ResolveOptions {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedRobot {
-    pub robot: Robot,
+pub struct BundlePlan {
+    pub source_manifest: Robot,
+    /// The single canonical compiler output consumed by staging, launch
+    /// planning, and simulation. Source documents remain available only for
+    /// package resolution and CLI-owned settings such as router policy.
+    pub compiled: CompiledBundle,
     pub train: String,
     pub target: String,
     pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
@@ -93,6 +99,36 @@ pub struct ResolvedRobot {
     pub components: Vec<ResolvedComponent>,
     pub tools: Vec<ResolvedTool>,
     pub path_overrides: Vec<ResolvedPathOverride>,
+}
+
+/// Owned, comparison-friendly representation of [`CompiledProject`].
+///
+/// The framework keeps canonical model storage private. The CLI therefore
+/// retains its deterministic wire encoding, normalized participant
+/// declarations, and logical assets without inventing a parallel model.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CompiledBundle {
+    pub robot: Vec<u8>,
+    pub participants: Vec<Participant>,
+    pub assets: BTreeMap<AssetId, Vec<u8>>,
+}
+
+impl CompiledBundle {
+    pub fn from_project(project: CompiledProject) -> Result<Self> {
+        let (robot, participants, assets) = project.into_parts();
+        Ok(Self {
+            robot: robot
+                .encode()
+                .context("failed to encode the compiled canonical robot")?,
+            participants: participants.into_vec(),
+            assets: assets.into_map(),
+        })
+    }
+
+    pub fn decode_robot(&self) -> Result<phoxal_model::Robot> {
+        phoxal_model::Robot::decode(&self.robot)
+            .context("failed to decode the compiled canonical robot")
+    }
 }
 
 /// One resolved official platform runtime (a service or a simulator). The
@@ -313,7 +349,7 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 
 pub fn load_robot(path: &Path) -> Result<Robot> {
     crate::schema::ensure_supported_revision(path, crate::schema::DocumentKind::Robot)?;
-    let robot = phoxal::model::source::robot::read_from_path(path)
+    let robot = phoxal_manifest::source::robot::read_from_path(path)
         .with_context(|| format!("failed to read robot file {}", path.display()))?;
     validate_launch_participant_ids(&robot, path)?;
     Ok(robot)

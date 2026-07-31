@@ -6,7 +6,7 @@ use crate::runtime::{
     RuntimeFailurePolicy, StartupRequirement,
 };
 use anyhow::{Context, Result, bail};
-use phoxal::participant::launch::{ParticipantLaunch, env};
+use phoxal_runtime_contract::{ParticipantLaunch, env};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -46,7 +46,7 @@ pub const ENV_TO_FLAG: &[(&str, &str)] = &[
     (env::PARTICIPANT_ID, "--participant-id"),
     (env::ROBOT_ID, "--robot-id"),
     (env::NAMESPACE, "--namespace"),
-    (env::ROBOT_ROOT, "--robot-root"),
+    (env::BUNDLE_ROOT, "--bundle-root"),
     (env::COMPONENT_INSTANCE, "--component-instance"),
     (env::EXECUTION_ID, "--execution-id"),
     (env::PRODUCER_ID, "--producer-id"),
@@ -57,66 +57,46 @@ pub const ENV_TO_FLAG: &[(&str, &str)] = &[
 ];
 
 pub fn encode_participant_env(launch: &ParticipantLaunch) -> Result<EncodedParticipantEnv> {
-    let mut variables = encode_common_participant_variables(launch)?;
-    variables.insert(env::CLOCK.to_string(), launch.clock.to_string());
+    let variables = launch
+        .encode_env()
+        .with_context(|| {
+            format!(
+                "failed to encode launch environment for participant {}",
+                launch.participant_id
+            )
+        })?
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect::<BTreeMap<_, _>>();
+    validate_config_size(launch, &variables)?;
     Ok(EncodedParticipantEnv { variables })
 }
 
 pub fn encode_tool_env(launch: &ParticipantLaunch) -> Result<EncodedParticipantEnv> {
-    let mut variables = encode_common_participant_variables(launch)?;
+    let mut variables = launch
+        .encode_env()
+        .with_context(|| {
+            format!(
+                "failed to encode launch environment for participant {}",
+                launch.participant_id
+            )
+        })?
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect::<BTreeMap<_, _>>();
+    validate_config_size(launch, &variables)?;
     variables.remove(env::EXECUTION_ORIGIN);
+    variables.remove(env::CLOCK);
     Ok(EncodedParticipantEnv { variables })
 }
 
-fn encode_common_participant_variables(
+fn validate_config_size(
     launch: &ParticipantLaunch,
-) -> Result<BTreeMap<String, String>> {
-    let mut variables = BTreeMap::new();
-    variables.insert(
-        env::PARTICIPANT_ID.to_string(),
-        launch.participant_id.clone(),
-    );
-    variables.insert(env::ROBOT_ID.to_string(), launch.robot_id.clone());
-    variables.insert(env::NAMESPACE.to_string(), launch.namespace.clone());
-    if let Some(robot_root) = &launch.robot_root {
-        variables.insert(
-            env::ROBOT_ROOT.to_string(),
-            robot_root.display().to_string(),
-        );
-    }
-    if let Some(component_instance) = &launch.component_instance {
-        variables.insert(
-            env::COMPONENT_INSTANCE.to_string(),
-            component_instance.clone(),
-        );
-    }
-    variables.insert(env::EXECUTION_ID.to_string(), launch.execution.to_string());
-    variables.insert(env::PRODUCER_ID.to_string(), launch.producer.to_string());
-    if let Some(origin) = launch.execution_origin {
-        variables.insert(env::EXECUTION_ORIGIN.to_string(), origin.encode());
-    }
-    if !launch.bus.connect_endpoints.is_empty() {
-        variables.insert(
-            env::CONNECT.to_string(),
-            launch.bus.connect_endpoints.join(","),
-        );
-    }
-    if let Some(config) = compact_config_json(launch)? {
-        variables.insert(env::CONFIG.to_string(), config);
-    }
-    Ok(variables)
-}
-
-fn compact_config_json(launch: &ParticipantLaunch) -> Result<Option<String>> {
-    let Some(config) = launch.config.clone() else {
-        return Ok(None);
+    variables: &BTreeMap<String, String>,
+) -> Result<()> {
+    let Some(encoded) = variables.get(env::CONFIG) else {
+        return Ok(());
     };
-    let encoded = serde_json::to_string(&config).with_context(|| {
-        format!(
-            "failed to encode PHOXAL_CONFIG for participant {}",
-            launch.participant_id
-        )
-    })?;
     let size = encoded.len();
     if size > MAX_CONFIG_ENV_BYTES {
         bail!(
@@ -124,7 +104,7 @@ fn compact_config_json(launch: &ParticipantLaunch) -> Result<Option<String>> {
             launch.participant_id
         );
     }
-    Ok(Some(encoded))
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -221,7 +201,7 @@ impl Default for RestartPolicy {
 mod tests {
     use std::path::PathBuf;
 
-    use phoxal::participant::launch::{BusProfile, ClockMode};
+    use phoxal_runtime_contract::{BusProfile, ClockMode};
 
     use super::*;
 
@@ -238,9 +218,9 @@ mod tests {
             },
             clock: ClockMode::Real,
             config: None,
-            robot_root: Some(PathBuf::from("/tmp/phoxal/robot")),
+            bundle_root: Some(PathBuf::from("/tmp/phoxal/robot")),
             component_instance: None,
-            shutdown_grace_ms: phoxal::participant::launch::DEFAULT_SHUTDOWN_GRACE_MS,
+            shutdown_grace_ms: phoxal_runtime_contract::DEFAULT_SHUTDOWN_GRACE_MS,
         }
     }
 
@@ -264,7 +244,7 @@ mod tests {
     #[test]
     fn tool_environment_is_clockless() -> anyhow::Result<()> {
         let mut launch = launch("tool-log");
-        launch.execution_origin = Some(phoxal::participant::ExecutionOrigin::mint());
+        launch.execution_origin = Some(phoxal_runtime_contract::ExecutionOrigin::mint());
         let encoded = encode_tool_env(&launch)?;
         assert!(!encoded.variables().contains_key(env::CLOCK));
         assert_eq!(

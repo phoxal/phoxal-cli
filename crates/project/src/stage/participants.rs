@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
 use phoxal_cli_core::project::resolver::{
-    ResolvedPlatformRuntime, ResolvedRobot, ResolvedTool, official_binary_name, tool_participant_id,
+    BundlePlan, ResolvedPlatformRuntime, ResolvedTool, official_binary_name, tool_participant_id,
 };
 
 use super::publish::remove_if_present;
@@ -58,7 +58,7 @@ impl MaterializeSettings {
 /// The canonical identity name one launched participant is stored under in
 /// `bin/`. The source-free plan (#936) names each participant's `bin/` binary
 /// on its `execution` directly - the loader resolves the identical name from
-/// the compiled `robot.yaml` - so this is just that name.
+/// the compiler-owned participant declarations - so this is just that name.
 pub(super) fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> String {
     participant.execution.binary_name().to_string()
 }
@@ -142,7 +142,7 @@ pub(crate) fn staged_router_binary(staged_root: &Path) -> PathBuf {
 /// target.
 pub(crate) fn materialize_official_store(
     staged_root: &Path,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
     offline: bool,
     officials_source: Option<&Path>,
     settings: &MaterializeSettings,
@@ -174,7 +174,7 @@ pub(crate) fn materialize_official_store(
 /// router itself is CLI-supervised identically to a native run.
 pub(crate) fn stage_router_binary(
     staged_root: &Path,
-    resolved: &ResolvedRobot,
+    resolved: &BundlePlan,
     offline: bool,
     settings: &MaterializeSettings,
     reporter: &dyn crate::Reporter,

@@ -70,7 +70,7 @@ fn scrub_std_environment(command: &mut std::process::Command) {
     // process real-clock authority over a run it is not part of (#952 section
     // B). An ambient producer id is the same story for identity - a
     // replacement controller would inherit the producer of the one it replaced.
-    for key in phoxal::participant::launch::env::ALL {
+    for key in phoxal_runtime_contract::env::ALL {
         command.env_remove(key);
     }
 }
@@ -682,7 +682,7 @@ mod tests {
         let mut command = std::process::Command::new("/usr/bin/true");
         scrub_std_environment(&mut command);
         let explicit = [(
-            phoxal::participant::launch::env::EXECUTION_ID.to_string(),
+            phoxal_runtime_contract::env::EXECUTION_ID.to_string(),
             "x0123456789abcdef0123456789abcdef".to_string(),
         )];
         command.envs(explicit.iter().map(|(key, value)| (key, value)));
@@ -693,8 +693,8 @@ mod tests {
                 .find(|(candidate, _)| *candidate == std::ffi::OsStr::new(key))
                 .map(|(_, value)| value)
         };
-        for key in phoxal::participant::launch::env::ALL {
-            if *key == phoxal::participant::launch::env::EXECUTION_ID {
+        for key in phoxal_runtime_contract::env::ALL {
+            if *key == phoxal_runtime_contract::env::EXECUTION_ID {
                 continue;
             }
             assert_eq!(
@@ -704,7 +704,7 @@ mod tests {
             );
         }
         assert_eq!(
-            effective(phoxal::participant::launch::env::EXECUTION_ID)
+            effective(phoxal_runtime_contract::env::EXECUTION_ID)
                 .flatten()
                 .map(std::ffi::OsStr::to_string_lossy),
             Some("x0123456789abcdef0123456789abcdef".into()),

@@ -2,8 +2,8 @@
 //!
 //! The core [`RuntimeLayout::construct_plan`] derives the immutable launch plan
 //! from a staged runtime layout, plus the validation input this project crate
-//! owns: a config-schema pairing per declared user runtime
-//! (checked with the jsonschema validator). This module is the thin glue that
+//! owns: a config-schema pairing per compiler-owned runtime config, including
+//! behavior policy (checked with the jsonschema validator). This module is the thin glue that
 //! runs that validator over the constructor's output and returns the plan.
 //!
 //! It performs no supervisor, board, or socket construction: it is exactly the
@@ -13,7 +13,7 @@
 //! ran; this only reads the compiled layout.
 
 use anyhow::{Result, bail};
-use phoxal::check::Problem;
+use phoxal_cli_core::check::Problem;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::layout::{LayoutInspection, PlanOptions, RuntimeLayout};
@@ -25,10 +25,9 @@ use std::path::Path;
 /// driven robot runs on a host whose driver binaries it cannot inspect once
 /// `--drivers off` is passed. `inspection` selects the architecture the selected
 /// binaries are checked against - the host for an in-place run/start, or a
-/// declared `--target` for a `phoxal build` cross bundle. Fails when a declared
-/// user runtime's (service or tool) compiled config does not match the schema
-/// embedded in its binary. Returns the immutable plan the supervisor would
-/// launch from.
+/// declared `--target` for a `phoxal build` cross bundle. Fails when compiled
+/// runtime config does not match the schema embedded in its binary. Returns
+/// the immutable plan the supervisor would launch from.
 pub fn validate_layout_plan(
     root: &Path,
     options: &PlanOptions,
@@ -37,9 +36,8 @@ pub fn validate_layout_plan(
 ) -> Result<LaunchPlan> {
     let constructed =
         RuntimeLayout::construct_plan_with_inspection(root, options, inspection, run)?;
-    // The constructor pairs each declared user runtime's authored config with
-    // the schema from its binary; validate the carried value directly, so
-    // services and tools each validate their own declaration (#950).
+    // The constructor pairs each compiler-owned config with the schema from
+    // its selected binary; validate the carried value directly.
     let mut config_problems = Vec::new();
     for pairing in &constructed.user_runtime_configs {
         if let Some(problem) = crate::validation::validate_user_runtime_config(
@@ -53,7 +51,7 @@ pub fn validate_layout_plan(
     }
     if !config_problems.is_empty() {
         bail!(
-            "compiled robot.yaml has invalid user runtime config:{}",
+            "compiled participant declarations have invalid runtime config:{}",
             format_config_problems(&config_problems)
         );
     }
@@ -78,9 +76,10 @@ fn format_config_problems(problems: &[Problem]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
     use phoxal_cli_core::project::layout::{DriverSelection, PlanOptions, RequiredRuntimeKind};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::Path;
 
     const ROBOT_YAML: &str = r#"schema: robot/v0
 robot:
@@ -120,10 +119,31 @@ services:
         obj.write().expect("synthesize object file")
     }
 
-    /// Stage a complete Native layout: `robot.yaml` plus a host-architecture
+    fn metadata(id: &str, kind: &str, schema: &str) -> anyhow::Result<Vec<u8>> {
+        let schema: serde_json::Value = serde_json::from_str(schema)?;
+        Ok(serde_json::to_vec(&serde_json::json!({
+            "schema": phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA,
+            "id": id,
+            "kind": kind,
+            "class": "checked",
+            "config_schema": schema,
+        }))?)
+    }
+
+    fn required_kind(kind: RequiredRuntimeKind) -> &'static str {
+        match kind {
+            RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => "service",
+            RequiredRuntimeKind::OfficialTool
+            | RequiredRuntimeKind::UserTool
+            | RequiredRuntimeKind::Infrastructure => "tool",
+            RequiredRuntimeKind::ComponentDriver => "driver",
+        }
+    }
+
+    /// Stage a complete Native layout: canonical `robot.json` plus a host-architecture
     /// binary under every required `bin/` name, with `mission` carrying the
     /// given config schema.
-    fn stage_layout(root: &PathBuf, mission_schema: &str) -> anyhow::Result<()> {
+    fn stage_layout(root: &Path, mission_schema: &str) -> anyhow::Result<()> {
         stage_layout_for(
             root,
             mission_schema,
@@ -136,31 +156,30 @@ services:
     /// host layout and a declared-cross-target (ELF) bundle can be staged and
     /// inspected on any host.
     fn stage_layout_for(
-        root: &PathBuf,
+        root: &Path,
         mission_schema: &str,
         format: object::BinaryFormat,
         arch: object::Architecture,
     ) -> anyhow::Result<()> {
-        fs::create_dir_all(root)?;
-        fs::write(root.join("robot.yaml"), ROBOT_YAML)?;
+        crate::stage::write_test_layout(root, ROBOT_YAML)?;
         let bin = root.join("bin");
-        fs::create_dir_all(&bin)?;
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {
             if required.kind == RequiredRuntimeKind::Infrastructure {
                 continue;
             }
             let payload = if required.binary_name == "mission" {
-                format!(r#"{{"id":"mission","config_schema":{mission_schema}}}"#)
+                metadata("mission", "service", mission_schema)?
             } else {
-                format!(
-                    r#"{{"id":"{}","config_schema":{{"type":"null"}}}}"#,
-                    required.identity
-                )
+                metadata(
+                    &required.identity,
+                    required_kind(required.kind),
+                    r#"{"type":"null"}"#,
+                )?
             };
             fs::write(
                 bin.join(&required.binary_name),
-                synthesize_binary_as(format, arch, payload.as_bytes()),
+                synthesize_binary_as(format, arch, &payload),
             )?;
         }
         Ok(())
@@ -209,7 +228,7 @@ services:
         .expect_err("an invalid config must fail validation")
         .to_string();
         assert!(error.contains("mission"), "{error}");
-        assert!(error.contains("invalid user runtime config"), "{error}");
+        assert!(error.contains("invalid runtime config"), "{error}");
         Ok(())
     }
 
@@ -260,15 +279,42 @@ services:
         Ok(())
     }
 
-    /// Stage a layout whose robot.yaml also declares the `lidar-viz` user tool
+    #[test]
+    fn compiler_driver_wiring_is_not_forwarded_as_runtime_config() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("build");
+        stage_layout_with_driver(&root, r#"{"type":"null"}"#)?;
+        let plan = validate_layout_plan(
+            &root,
+            &PlanOptions::default(),
+            LayoutInspection::Host,
+            RunIdentity::default(),
+        )?;
+        let driver = plan.robots[0]
+            .participants
+            .iter()
+            .find(|participant| {
+                participant.launch.participant_id == "wheel"
+                    && matches!(
+                        participant.execution,
+                        phoxal_cli_core::project::launch_plan::ParticipantExecution::ComponentDriver { .. }
+                    )
+            })
+            .context("wheel driver must be planned")?;
+        assert_eq!(
+            driver.launch.config, None,
+            "compiler-side connection metadata must not be sent to a unit-config driver"
+        );
+        Ok(())
+    }
+
+    /// Stage a layout whose compiled declarations include the `lidar-viz` user tool
     /// with `config: {port: 9000}` and whose bin/ carries a binary for it
     /// emitting `tool_schema` as its config schema.
-    fn stage_layout_with_tool(root: &PathBuf, tool_schema: &str) -> anyhow::Result<()> {
-        fs::create_dir_all(root)?;
+    fn stage_layout_with_tool(root: &Path, tool_schema: &str) -> anyhow::Result<()> {
         let yaml = format!("{ROBOT_YAML}tools:\n  lidar-viz:\n    config:\n      port: 9000\n");
-        fs::write(root.join("robot.yaml"), yaml)?;
+        crate::stage::write_test_layout(root, &yaml)?;
         let bin = root.join("bin");
-        fs::create_dir_all(&bin)?;
         let layout = RuntimeLayout::open(root)?;
         let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
         let arch = phoxal_cli_core::check::participant_metadata::host_architecture();
@@ -277,16 +323,70 @@ services:
                 continue;
             }
             let payload = match required.binary_name.as_str() {
-                "lidar-viz" => format!(r#"{{"id":"lidar-viz","config_schema":{tool_schema}}}"#),
-                "mission" => r#"{"id":"mission","config_schema":{"type":"object"}}"#.to_string(),
-                _ => format!(
-                    r#"{{"id":"{}","config_schema":{{"type":"null"}}}}"#,
-                    required.identity
-                ),
+                "lidar-viz" => metadata("lidar-viz", "tool", tool_schema)?,
+                "mission" => metadata("mission", "service", r#"{"type":"object"}"#)?,
+                _ => metadata(
+                    &required.identity,
+                    required_kind(required.kind),
+                    r#"{"type":"null"}"#,
+                )?,
             };
             fs::write(
                 bin.join(&required.binary_name),
-                synthesize_binary_as(format, arch, payload.as_bytes()),
+                synthesize_binary_as(format, arch, &payload),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn stage_layout_with_driver(root: &Path, driver_schema: &str) -> anyhow::Result<()> {
+        crate::stage::write_test_layout(root, ROBOT_YAML)?;
+        let participants_path = root
+            .join(phoxal_cli_core::project::layout::ASSETS_DIR)
+            .join(phoxal_cli_core::project::layout::PARTICIPANTS_ASSET);
+        let mut participants =
+            phoxal_cli_core::project::layout::decode_participants(&participants_path)?;
+        participants.push(phoxal_manifest::Participant {
+            id: "wheel".to_string(),
+            kind: phoxal_manifest::ParticipantKind::Driver,
+            component_instance: Some("wheel".to_string()),
+            config: Some(serde_json::json!({
+                "connection": {
+                    "type": "serial",
+                    "port": "/dev/ttyUSB0",
+                    "baud": 115200
+                }
+            })),
+        });
+        fs::write(
+            &participants_path,
+            phoxal_cli_core::project::layout::encode_participants(&participants)?,
+        )?;
+
+        let bin = root.join("bin");
+        let layout = RuntimeLayout::open(root)?;
+        let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
+        let arch = phoxal_cli_core::check::participant_metadata::host_architecture();
+        for required in layout.required_runtimes(&DriverSelection::All) {
+            if required.kind == RequiredRuntimeKind::Infrastructure {
+                continue;
+            }
+            let payload = match required.kind {
+                RequiredRuntimeKind::ComponentDriver => {
+                    metadata(&required.identity, "driver", driver_schema)?
+                }
+                RequiredRuntimeKind::UserService => {
+                    metadata(&required.identity, "service", r#"{"type":"object"}"#)?
+                }
+                _ => metadata(
+                    &required.identity,
+                    required_kind(required.kind),
+                    r#"{"type":"null"}"#,
+                )?,
+            };
+            fs::write(
+                bin.join(&required.binary_name),
+                synthesize_binary_as(format, arch, &payload),
             )?;
         }
         Ok(())

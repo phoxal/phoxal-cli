@@ -9,9 +9,10 @@ fn locked_project_root() -> anyhow::Result<tempfile::TempDir> {
     let root = tempfile::tempdir()?;
     std::fs::create_dir_all(root.path().join("src"))?;
     std::fs::create_dir_all(root.path().join("train/phoxal/src"))?;
+    std::fs::create_dir_all(root.path().join("components/fixture/src"))?;
     std::fs::write(
         root.path().join("Cargo.toml"),
-        "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
+        "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\nmembers = [\".\", \"components/fixture\"]\nresolver = \"2\"\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
     )?;
     std::fs::write(root.path().join("src/lib.rs"), "")?;
     std::fs::write(
@@ -19,6 +20,19 @@ fn locked_project_root() -> anyhow::Result<tempfile::TempDir> {
         "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
     )?;
     std::fs::write(root.path().join("train/phoxal/src/lib.rs"), "")?;
+    std::fs::write(
+        root.path().join("components/fixture/Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+    )?;
+    std::fs::write(root.path().join("components/fixture/src/lib.rs"), "")?;
+    std::fs::write(
+        root.path().join("components/fixture/component.yaml"),
+        "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+    )?;
+    std::fs::write(
+        root.path().join("components/fixture/structure.urdf"),
+        r#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
+    )?;
     write_lock(root.path(), &[])?;
     Ok(root)
 }
@@ -30,8 +44,9 @@ fn locked_project_root() -> anyhow::Result<tempfile::TempDir> {
 /// (and, for a workspace member, after [`declare_workspace_member`]) and
 /// before `resolve()`.
 fn write_lock(root: &std::path::Path, extra_packages: &[&str]) -> anyhow::Result<()> {
-    let mut lock =
-        String::from("version = 4\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.1.0\"\n\n");
+    let mut lock = String::from(
+        "version = 4\n\n[[package]]\nname = \"fixture\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.1.0\"\n\n",
+    );
     for name in extra_packages {
         lock.push_str(&format!(
             "[[package]]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n"
@@ -54,7 +69,7 @@ fn declare_workspace_member(root: &std::path::Path, member: &str) -> anyhow::Res
     std::fs::write(
         root.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\nmembers = [\".\", \"{member}\"]\nresolver = \"2\"\n\n[dependencies]\nphoxal = {{ path = \"train/phoxal\" }}\n"
+            "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\nmembers = [\".\", \"components/fixture\", \"{member}\"]\nresolver = \"2\"\n\n[dependencies]\nphoxal = {{ path = \"train/phoxal\" }}\n"
         ),
     )?;
     Ok(())
@@ -65,7 +80,15 @@ fn minimal_robot(extra: &str) -> anyhow::Result<Robot> {
 }
 
 fn minimal_robot_with_components(components: &str, extra: &str) -> anyhow::Result<Robot> {
-    phoxal::model::source::robot::parse_from_string(&format!(
+    let (components, actuators) = if components.trim() == "{}" {
+        (
+            "\n    drive:\n      component: fixture\n      mount_link: base",
+            "[drive.motor]",
+        )
+    } else {
+        (components, "[left_drive.motor]")
+    };
+    phoxal_manifest::source::robot::parse_from_string(&format!(
         r#"schema: robot/v0
 robot:
   id: testbot
@@ -75,11 +98,50 @@ robot:
     max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
-    actuators: [drive.motor]
+    actuators: {actuators}
     encoders: []
   components: {components}
 {extra}"#
     ))
+}
+
+/// Persist the real compiler inputs that production resolution consumes.
+///
+/// These tests used to pass only an already-parsed manifest into a test-only
+/// resolution fork. Keeping the source tree explicit exercises the same
+/// single compiler path as `check`, `run`, `simulate`, and `build`.
+fn write_compiler_sources(root: &std::path::Path, robot: &Robot) -> anyhow::Result<()> {
+    phoxal_manifest::source::robot::write_to_dir(robot, root)?;
+    let structure = root.join(&robot.robot.structure);
+    if let Some(parent) = structure.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        structure,
+        r#"<robot name="fixture"><link name="base_footprint"/><link name="base_link"/><link name="base"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="base_mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
+    )?;
+    for component_type in robot.used_component_types() {
+        let component_root = root.join("components").join(component_type);
+        std::fs::create_dir_all(&component_root)?;
+        std::fs::write(
+            component_root.join("component.yaml"),
+            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+        )?;
+        std::fs::write(
+            component_root.join("structure.urdf"),
+            r#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
+        )?;
+    }
+    Ok(())
+}
+
+fn resolve_fixture(
+    robot: &Robot,
+    root: &std::path::Path,
+    options: ResolveOptions,
+) -> anyhow::Result<BundlePlan> {
+    write_compiler_sources(root, robot)?;
+    resolve(robot, root, options)
 }
 
 #[test]
@@ -107,7 +169,7 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
 
-    let resolved = resolve(&robot, project.path(), ResolveOptions::default())?;
+    let resolved = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
 
     assert_eq!(resolved.train, "0.1.0");
     let drive = resolved
@@ -151,7 +213,7 @@ fn include_simulators_toggles_the_webots_controller_only() -> anyhow::Result<()>
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
 
-    let with_simulators = resolve(&robot, project.path(), ResolveOptions::default())?;
+    let with_simulators = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
     assert!(
         with_simulators
             .simulators
@@ -159,7 +221,7 @@ fn include_simulators_toggles_the_webots_controller_only() -> anyhow::Result<()>
             .any(|runtime| runtime.package == "phoxal/simulator-webots-controller")
     );
 
-    let without_simulators = resolve(
+    let without_simulators = resolve_fixture(
         &robot,
         project.path(),
         ResolveOptions {
@@ -191,7 +253,7 @@ fn a_matching_workspace_service_crate_overrides_the_official_binary_without_decl
     write_lock(project.path(), &["drive"])?;
     let crate_dir = crate_dir.canonicalize()?;
 
-    let resolved = resolve(&robot, project.path(), ResolveOptions::default())?;
+    let resolved = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
 
     let drive = resolved
         .platform_runtimes
@@ -210,6 +272,7 @@ fn a_declared_user_service_with_no_workspace_crate_fails_resolution() -> anyhow:
     let robot = minimal_robot("services:\n  mission: {}\n")?;
     let project = locked_project_root()?;
 
+    write_compiler_sources(project.path(), &robot)?;
     let error = resolve(&robot, project.path(), ResolveOptions::default())
         .expect_err("a declared service with no matching crate must fail");
     assert!(
@@ -234,7 +297,7 @@ fn an_undiscovered_workspace_service_is_a_drift_diagnostic_not_an_error() -> any
     declare_workspace_member(project.path(), "services/mission")?;
     write_lock(project.path(), &["mission"])?;
 
-    let resolved = resolve(&robot, project.path(), ResolveOptions::default())?;
+    let resolved = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
     assert_eq!(resolved.undeclared_runtimes.len(), 1);
     assert_eq!(resolved.undeclared_runtimes[0].name, "mission");
     assert_eq!(resolved.undeclared_runtimes[0].family, "services");
@@ -274,7 +337,7 @@ fn a_workspace_component_resolves_its_assets_and_driver_without_the_registry() -
     write_lock(project.path(), &["ddsm115"])?;
     let crate_dir = crate_dir.canonicalize()?;
 
-    let resolved = resolve(&robot, project.path(), ResolveOptions::default())?;
+    let resolved = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
     assert_eq!(resolved.components.len(), 1);
     let component = &resolved.components[0];
     assert_eq!(
@@ -324,7 +387,7 @@ fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
     declare_workspace_member(project.path(), "components/ddsm115")?;
     write_lock(project.path(), &["ddsm115"])?;
 
-    let resolved = resolve(
+    let resolved = resolve_fixture(
         &robot,
         project.path(),
         ResolveOptions {

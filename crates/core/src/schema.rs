@@ -1,7 +1,7 @@
 //! Per-document schema-revision gating.
 //!
 //! Every typed Phoxal document self-describes with a `schema:` tag
-//! (`schema: robot/v0`, `schema: component/v0`, ...), and those tags are the
+//! (`schema: robot/v0`, ...), and those tags are the
 //! whole compatibility contract (#936). Before the strict typed parser runs,
 //! the CLI probes the declared revision: a supported revision proceeds to
 //! strict parsing (where an unknown field remains an authoring error), while an
@@ -24,16 +24,14 @@ use anyhow::{Context, Result, bail};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentKind {
     Robot,
-    Component,
 }
 
 impl DocumentKind {
-    /// The `schema:` family prefix this document uses (`robot`, `component`).
+    /// The `schema:` family prefix this document uses.
     #[must_use]
     pub const fn family(self) -> &'static str {
         match self {
             Self::Robot => "robot",
-            Self::Component => "component",
         }
     }
 
@@ -44,7 +42,6 @@ impl DocumentKind {
     pub const fn supported(self) -> &'static [&'static str] {
         match self {
             Self::Robot => &["robot/v0"],
-            Self::Component => &["component/v0"],
         }
     }
 }
@@ -120,20 +117,6 @@ mod tests {
         assert!(message.contains("Update phoxal-cli"), "{message}");
         // The precise gate, not serde's stock unknown-variant diagnostic.
         assert!(!message.contains("unknown variant"), "{message}");
-    }
-
-    #[test]
-    fn unsupported_component_revision_is_gated_too() {
-        let text = "schema: component/v3\n";
-        let error = ensure_supported_revision_str(
-            text,
-            Path::new("components/ddsm115/component.yaml"),
-            DocumentKind::Component,
-        )
-        .expect_err("component/v3 is not supported");
-        let message = format!("{error:#}");
-        assert!(message.contains("component/v3"), "{message}");
-        assert!(message.contains("component.yaml"), "{message}");
     }
 
     #[test]
