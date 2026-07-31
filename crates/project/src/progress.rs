@@ -20,6 +20,9 @@ pub enum PreparationEvent {
         outcome: PhaseOutcome,
         elapsed: Duration,
     },
+    ProjectResolved {
+        train: String,
+    },
 }
 
 pub trait Reporter: Send + Sync {

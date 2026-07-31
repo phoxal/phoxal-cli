@@ -62,10 +62,35 @@ impl ParticipantState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartupStatus {
-    pub completed_phases: Vec<String>,
-    pub active_phase: Option<String>,
+    pub steps: Vec<StartupStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupStep {
+    pub kind: StartupStepKind,
+    pub state: StartupStepState,
+    pub detail: Option<String>,
+    pub elapsed_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupStepKind {
+    Project,
+    PrepareRuntime,
+    Infrastructure,
+    Graph,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupStepState {
+    Pending,
+    Active,
+    Done,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

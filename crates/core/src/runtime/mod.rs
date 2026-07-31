@@ -15,7 +15,8 @@ pub use launch::{
 };
 pub use lifecycle::{
     ParticipantState, ProjectLifecycle, ReadinessPolicy, RuntimeFailurePolicy,
-    SimulationSessionInfo, StartupRequirement, StartupStatus,
+    SimulationSessionInfo, StartupRequirement, StartupStatus, StartupStep, StartupStepKind,
+    StartupStepState,
 };
 pub use mode::SessionMode;
 pub use participant::ParticipantKind;

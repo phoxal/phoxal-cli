@@ -4,7 +4,7 @@ pub use model::OverviewModel;
 
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::{Constraint, Direction, Layout, Rect};
-use tuirealm::ratatui::widgets::{Block, Borders, Paragraph};
+use tuirealm::ratatui::widgets::Paragraph;
 
 use crate::Theme;
 use crate::app::AppModel;
@@ -33,11 +33,33 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             );
             let startup = snapshot
                 .startup
-                .active_phase
-                .as_deref()
+                .steps
+                .iter()
+                .find(|step| {
+                    step.state == phoxal_cli_core::runtime::StartupStepState::Active
+                })
                 .map_or_else(
-                    || format!("{} phases complete", snapshot.startup.completed_phases.len()),
-                    |phase| format!("active: {}", sanitize(phase)),
+                    || {
+                        format!(
+                            "{} steps complete",
+                            snapshot
+                                .startup
+                                .steps
+                                .iter()
+                                .filter(|step| {
+                                    step.state
+                                        == phoxal_cli_core::runtime::StartupStepState::Done
+                                })
+                                .count()
+                        )
+                    },
+                    |step| {
+                        let label = startup_step_label(step.kind);
+                        step.detail.as_deref().map_or_else(
+                            || format!("active: {label}"),
+                            |detail| format!("active: {label} · {}", sanitize(detail)),
+                        )
+                    },
                 );
             format!(
                 "Project: {}\nMode: {mode}\nConnection: {}\nLifecycle: {:?}\nStartup: {startup}\nFramework: {}\nRouter: {}\nProcesses: {}",
@@ -51,8 +73,10 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         },
     );
     frame.render_widget(
-        Paragraph::new(status_text)
-            .block(Block::default().title(" Project ").borders(Borders::ALL)),
+        Paragraph::new(status_text).block(crate::components::shared::outer_panel_block(
+            " Project ",
+            theme,
+        )),
         status,
     );
     let stale = model
@@ -94,7 +118,9 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     frame.render_widget(
         Paragraph::new(health_text)
             .style(crate::theme::role::fg(theme, crate::Role::Steel))
-            .block(Block::default().title(" Health ").borders(Borders::ALL)),
+            .block(crate::components::shared::outer_panel_block(
+                " Health ", theme,
+            )),
         health,
     );
     let diagnostic_text = model
@@ -113,13 +139,22 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         } else {
             diagnostic_text
         })
-        .block(
-            Block::default()
-                .title(" Diagnostics ")
-                .borders(Borders::ALL),
-        ),
+        .block(crate::components::shared::outer_panel_block(
+            " Diagnostics ",
+            theme,
+        )),
         diagnostics,
     );
+}
+
+fn startup_step_label(kind: phoxal_cli_core::runtime::StartupStepKind) -> &'static str {
+    use phoxal_cli_core::runtime::StartupStepKind;
+    match kind {
+        StartupStepKind::Project => "Project",
+        StartupStepKind::PrepareRuntime => "Prepare runtime",
+        StartupStepKind::Infrastructure => "Infrastructure",
+        StartupStepKind::Graph => "Robot graph",
+    }
 }
 
 fn connection_label(connection: Option<&phoxal_cli_observation::ConnectionObservation>) -> String {

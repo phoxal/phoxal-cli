@@ -22,13 +22,20 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
         options,
         request.reporter.as_ref(),
     )?;
-    let mut plan = super::resolve::build_checked_sim_launch_plan(
-        &resolved.project_root,
-        &resolved.world_path,
-        &resolved.resolved,
-        request.offline,
-        request.run,
+    let mut plan = crate::progress::run_phase(
         request.reporter.as_ref(),
+        crate::PhaseId::new("check"),
+        "Checking simulation graph",
+        || {
+            super::resolve::build_checked_sim_launch_plan(
+                &resolved.project_root,
+                &resolved.world_path,
+                &resolved.resolved,
+                request.offline,
+                request.run,
+                request.reporter.as_ref(),
+            )
+        },
     )?;
     phoxal_cli_core::project::launch_plan::validate_runtime_bounds(&plan)?;
     crate::progress::ensure_active(request.reporter.as_ref())?;
@@ -71,7 +78,12 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
     )?;
     let candidate_path = candidate.path().to_path_buf();
     crate::progress::ensure_active(request.reporter.as_ref())?;
-    let staged_root = crate::stage::publish_runtime_layout(candidate, &resolved.resolved)?;
+    let staged_root = crate::progress::run_phase(
+        request.reporter.as_ref(),
+        crate::PhaseId::new("publish"),
+        "Publishing simulation runtime layout",
+        || crate::stage::publish_runtime_layout(candidate, &resolved.resolved),
+    )?;
     for participant in &mut participants {
         if let Some(spec) = participant.launch.as_mut() {
             crate::run::prepare::repoint_after_publish(

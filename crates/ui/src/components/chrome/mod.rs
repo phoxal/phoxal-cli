@@ -148,4 +148,28 @@ mod tests {
         assert!(contents.contains("*1 Overview"));
         assert!(contents.contains(">2 Runtimes"));
     }
+
+    #[test]
+    fn header_and_footer_separators_remain_straight() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
+        let model = AppModel::default();
+        let theme = Theme::new(ColorCapability::None);
+        terminal
+            .draw(|frame| {
+                render_header(frame, Rect::new(0, 0, 40, 2), &model, theme);
+                render_footer(frame, Rect::new(0, 2, 40, 2), &model, theme);
+            })
+            .unwrap();
+        let contents = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(contents.contains('─'));
+        for corner in ['╭', '╮', '╰', '╯'] {
+            assert!(!contents.contains(corner));
+        }
+    }
 }

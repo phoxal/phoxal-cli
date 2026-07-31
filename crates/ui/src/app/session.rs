@@ -1,5 +1,7 @@
 //! One tui-realm terminal loop for an attached Phoxal resident.
 
+#![deny(clippy::print_stdout)]
+
 use std::cell::RefCell;
 use std::io::{self, Stderr};
 use std::rc::Rc;
@@ -82,6 +84,7 @@ pub async fn run(
     ingress: mpsc::Receiver<SessionInput>,
     effects: EffectSenders,
     options: UiOptions,
+    initial_inputs: Vec<SessionInput>,
 ) -> Result<AttachmentOutcome> {
     install_panic_hook();
     if !TerminalGuard::should_use_terminal(&io::stderr()) {
@@ -90,9 +93,11 @@ pub async fn run(
         );
     }
     let handle = Handle::current();
-    tokio::task::spawn_blocking(move || run_blocking(handle, ingress, effects, options))
-        .await
-        .context("attachment UI worker panicked")?
+    tokio::task::spawn_blocking(move || {
+        run_blocking(handle, ingress, effects, options, initial_inputs)
+    })
+    .await
+    .context("attachment UI worker panicked")?
 }
 
 /// Force a full clear and repaint without any DSR (cursor-position)
@@ -123,6 +128,7 @@ fn run_blocking(
     ingress: mpsc::Receiver<SessionInput>,
     effects: EffectSenders,
     options: UiOptions,
+    initial_inputs: Vec<SessionInput>,
 ) -> Result<AttachmentOutcome> {
     let title = crate::format::sanitize_terminal_text(&options.title);
     let _guard = TerminalGuard::enter(&title)?;
@@ -132,6 +138,7 @@ fn run_blocking(
     TerminalGuard::set_title(&title)?;
 
     let model = Rc::new(RefCell::new(AppModel::default()));
+    apply_initial_inputs(&model, &effects, initial_inputs)?;
     let pending = Arc::new(PendingInputs::default());
     let listener = EventListenerCfg::default()
         .with_handle(handle)
@@ -161,6 +168,17 @@ fn run_blocking(
             }
         }
     }
+}
+
+fn apply_initial_inputs(
+    model: &Rc<RefCell<AppModel>>,
+    effects: &EffectSenders,
+    inputs: Vec<SessionInput>,
+) -> Result<()> {
+    for input in inputs {
+        dispatch(model, effects, input.into())?;
+    }
+    Ok(())
 }
 
 fn render_requested(
@@ -339,5 +357,30 @@ mod tests {
         .expect("route confirmed stop");
         assert!(matches!(guaranteed_rx.try_recv(), Ok(Effect::StopProject)));
         assert!(matches!(command_rx.try_recv(), Ok(Effect::InputRescan)));
+    }
+
+    #[test]
+    fn initial_attachment_inputs_update_the_model_before_the_first_render() {
+        let (commands, _command_rx) = mpsc::channel(1);
+        let (guaranteed, _guaranteed_rx) = mpsc::unbounded_channel();
+        let effects = EffectSenders {
+            guaranteed,
+            commands,
+        };
+        let model = Rc::new(RefCell::new(AppModel::default()));
+        apply_initial_inputs(
+            &model,
+            &effects,
+            vec![SessionInput::Client(
+                phoxal_cli_observation::AttachmentEvent::ConnectionChanged(
+                    phoxal_cli_observation::ConnectionObservation::Connected,
+                ),
+            )],
+        )
+        .expect("seed initial input");
+        assert_eq!(
+            model.borrow().overview.connection,
+            Some(phoxal_cli_observation::ConnectionObservation::Connected)
+        );
     }
 }

@@ -1,6 +1,6 @@
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use tuirealm::ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
 use crate::Theme;
 use crate::app::{AppModel, FocusRoute, ModalId};
@@ -51,6 +51,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(crate::theme::role::fg(theme, crate::Role::Accent)),
             ),
         popup,
@@ -59,4 +60,46 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
 
 fn sanitize(value: &str) -> String {
     crate::format::sanitize_terminal_text(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ColorCapability;
+    use crate::app::{FocusRoute, ModalId, PageId};
+    use tuirealm::ratatui::Terminal;
+    use tuirealm::ratatui::backend::TestBackend;
+
+    #[test]
+    fn modal_outer_box_has_rounded_corners() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let model = AppModel {
+            route: FocusRoute::Tabs {
+                page: PageId::Overview,
+                candidate: PageId::Overview,
+            }
+            .open_modal(ModalId::Help),
+            ..AppModel::default()
+        };
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &model,
+                    Theme::new(ColorCapability::None),
+                );
+            })
+            .unwrap();
+        let contents = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for corner in ["╭", "╮", "╰", "╯"] {
+            assert!(contents.contains(corner), "missing {corner}");
+        }
+    }
 }

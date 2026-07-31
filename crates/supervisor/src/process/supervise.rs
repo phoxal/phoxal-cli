@@ -89,7 +89,13 @@ pub async fn supervise_until_shutdown(
                 match result {
                     Ok(()) => {
                         tracing::info!(stage = %stage.label, "supervisor startup phase ready");
-                        board.complete_phase(&stage.label);
+                        if stage.step == phoxal_cli_core::runtime::StartupStepKind::Graph {
+                            board.step_detail(
+                                stage.step,
+                                format!("{} participants ready", stage.ready_ids.len()),
+                            );
+                        }
+                        board.step_done(stage.step);
                         pending_stage = spawn_until_pending(
                             &mut running,
                             &board,
@@ -100,6 +106,7 @@ pub async fn supervise_until_shutdown(
                     Err(error) => {
                         let reason = format!("stage '{}' stalled: {error:#}", stage.label);
                         tracing::error!(stage = %stage.label, error = %error, "required startup phase failed");
+                        board.step_failed(stage.step, &reason);
                         board.fail(&reason);
                         supervisor_error = Some(anyhow::anyhow!(reason));
                         token.cancel();

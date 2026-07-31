@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use phoxal_cli_core::runtime::{
     BoundedString, ExitDescription, ParticipantInstanceKey, ParticipantKind, ProcessDescriptor,
     ProcessEntry, ProcessFailure, ProcessFailureKind, ProcessKey, ProcessState, ProjectLifecycle,
-    StartupRequirement,
+    StartupRequirement, StartupStatus, StartupStep, StartupStepKind, StartupStepState,
 };
 use phoxal_cli_protocol::SupervisorSnapshotV0;
 use tokio::sync::watch;
@@ -23,6 +23,7 @@ pub struct SupervisorState {
     publisher: watch::Sender<SupervisorSnapshotV0>,
     exact_instances: Arc<Mutex<ExactReadiness>>,
     captured_stderr: Arc<Mutex<HashMap<ProcessKey, VecDeque<String>>>>,
+    startup_started: Arc<Mutex<HashMap<StartupStepKind, Instant>>>,
 }
 
 #[derive(Debug, Default)]
@@ -43,6 +44,7 @@ impl Default for SupervisorState {
                 instances: HashSet::new(),
             })),
             captured_stderr: Arc::default(),
+            startup_started: Arc::default(),
         }
     }
 }
@@ -137,13 +139,25 @@ impl SupervisorState {
             }
             snapshot.graph_generation = snapshot.graph_generation.saturating_add(1);
             snapshot.lifecycle = ProjectLifecycle::Starting;
-            snapshot.startup.active_phase = None;
-            snapshot.startup.completed_phases.clear();
+            if let Some(graph) = snapshot
+                .startup
+                .steps
+                .iter_mut()
+                .find(|step| step.kind == StartupStepKind::Graph)
+            {
+                graph.state = StartupStepState::Active;
+                graph.detail = Some("recovering".to_string());
+                graph.elapsed_ms = None;
+            }
             snapshot.revision = snapshot.revision.saturating_add(1);
             let generation = snapshot.graph_generation;
             self.publisher.send_replace(snapshot.clone());
             generation
         };
+        self.startup_started
+            .lock()
+            .expect("startup timing mutex poisoned")
+            .insert(StartupStepKind::Graph, Instant::now());
         let mut stderr = self
             .captured_stderr
             .lock()
@@ -395,19 +409,122 @@ impl SupervisorState {
         });
     }
 
-    pub fn begin_phase(&self, phase: &str) {
-        self.modify(|snapshot| snapshot.startup.active_phase = Some(bounded_text(phase)));
+    pub fn plan_startup_steps(&self) {
+        let mut started = self
+            .startup_started
+            .lock()
+            .expect("startup timing mutex poisoned");
+        started.clear();
+        started.insert(StartupStepKind::Project, Instant::now());
+        drop(started);
+        self.modify(|snapshot| {
+            snapshot.startup = StartupStatus {
+                steps: [
+                    StartupStepKind::Project,
+                    StartupStepKind::PrepareRuntime,
+                    StartupStepKind::Infrastructure,
+                    StartupStepKind::Graph,
+                ]
+                .into_iter()
+                .map(|kind| StartupStep {
+                    kind,
+                    state: if kind == StartupStepKind::Project {
+                        StartupStepState::Active
+                    } else {
+                        StartupStepState::Pending
+                    },
+                    detail: None,
+                    elapsed_ms: None,
+                })
+                .collect(),
+            };
+        });
     }
 
-    pub fn complete_phase(&self, phase: &str) {
+    pub fn step_active(&self, kind: StartupStepKind) {
+        let mut started = self
+            .startup_started
+            .lock()
+            .expect("startup timing mutex poisoned");
         self.modify(|snapshot| {
-            snapshot.startup.active_phase = None;
-            snapshot.startup.completed_phases.push(bounded_text(phase));
-            let maximum = phoxal_cli_protocol::limits::MAX_STARTUP_PHASES;
-            if snapshot.startup.completed_phases.len() > maximum {
-                let remove = snapshot.startup.completed_phases.len() - maximum;
-                snapshot.startup.completed_phases.drain(..remove);
+            if let Some(step) = startup_step_mut(snapshot, kind) {
+                if step.state == StartupStepState::Active {
+                    return;
+                }
+                started.insert(kind, Instant::now());
+                step.state = StartupStepState::Active;
+                step.elapsed_ms = None;
             }
+        });
+    }
+
+    pub fn step_detail(&self, kind: StartupStepKind, detail: impl AsRef<str>) {
+        let detail = bounded_step_detail(detail.as_ref());
+        self.modify(|snapshot| {
+            if let Some(step) = startup_step_mut(snapshot, kind) {
+                step.detail = Some(detail);
+            }
+        });
+    }
+
+    pub fn step_done(&self, kind: StartupStepKind) {
+        let mut started = self
+            .startup_started
+            .lock()
+            .expect("startup timing mutex poisoned");
+        self.modify(|snapshot| {
+            if let Some(step) = startup_step_mut(snapshot, kind) {
+                if step.state == StartupStepState::Done {
+                    return;
+                }
+                step.state = StartupStepState::Done;
+                step.elapsed_ms = started.remove(&kind).map(|started| {
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+                });
+            }
+        });
+    }
+
+    pub fn step_failed(&self, kind: StartupStepKind, error: impl AsRef<str>) {
+        let mut started = self
+            .startup_started
+            .lock()
+            .expect("startup timing mutex poisoned");
+        let detail = bounded_step_detail(error.as_ref());
+        self.modify(|snapshot| {
+            if let Some(step) = startup_step_mut(snapshot, kind) {
+                if step.state == StartupStepState::Failed {
+                    return;
+                }
+                step.state = StartupStepState::Failed;
+                step.detail = Some(detail);
+                step.elapsed_ms = started.remove(&kind).map(|started| {
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+                });
+            }
+        });
+    }
+
+    pub fn fail_active_step(&self, error: impl AsRef<str>) {
+        let mut started = self
+            .startup_started
+            .lock()
+            .expect("startup timing mutex poisoned");
+        let detail = bounded_step_detail(error.as_ref());
+        self.modify(|snapshot| {
+            let Some(step) = snapshot
+                .startup
+                .steps
+                .iter_mut()
+                .find(|step| step.state == StartupStepState::Active)
+            else {
+                return;
+            };
+            step.state = StartupStepState::Failed;
+            step.detail = Some(detail);
+            step.elapsed_ms = started
+                .remove(&step.kind)
+                .map(|started| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
         });
     }
 
@@ -457,6 +574,35 @@ impl SupervisorState {
                 )
             })
     }
+}
+
+fn startup_step_mut(
+    snapshot: &mut SupervisorSnapshotV0,
+    kind: StartupStepKind,
+) -> Option<&mut StartupStep> {
+    snapshot
+        .startup
+        .steps
+        .iter_mut()
+        .find(|step| step.kind == kind)
+}
+
+#[cfg(test)]
+fn startup_step(snapshot: &SupervisorSnapshotV0, kind: StartupStepKind) -> Option<&StartupStep> {
+    snapshot.startup.steps.iter().find(|step| step.kind == kind)
+}
+
+fn bounded_step_detail(value: &str) -> String {
+    let maximum = phoxal_cli_protocol::limits::MAX_STEP_DETAIL_BYTES;
+    if value.len() <= maximum {
+        return value.to_string();
+    }
+    let suffix = "…";
+    let mut end = maximum.saturating_sub(suffix.len());
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{}{}", &value[..end], suffix)
 }
 
 fn failure_kind(detail: Option<&str>) -> ProcessFailureKind {
@@ -567,6 +713,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn startup_steps_publish_typed_state_detail_and_elapsed_time() {
+        let state = SupervisorState::new();
+        state.plan_startup_steps();
+        let planned = state.supervisor_snapshot();
+        assert_eq!(planned.startup.steps.len(), 4);
+        assert_eq!(planned.startup.steps[0].kind, StartupStepKind::Project);
+        assert_eq!(planned.startup.steps[0].state, StartupStepState::Active);
+        assert!(
+            planned.startup.steps[1..]
+                .iter()
+                .all(|step| step.state == StartupStepState::Pending)
+        );
+
+        state.step_detail(StartupStepKind::Project, "robot.yaml · framework 0.45.1");
+        state.step_done(StartupStepKind::Project);
+        state.step_active(StartupStepKind::PrepareRuntime);
+        state.step_failed(
+            StartupStepKind::PrepareRuntime,
+            "x".repeat(phoxal_cli_protocol::limits::MAX_STEP_DETAIL_BYTES * 2),
+        );
+
+        let snapshot = state.supervisor_snapshot();
+        let project = startup_step(&snapshot, StartupStepKind::Project).unwrap();
+        assert_eq!(project.state, StartupStepState::Done);
+        assert!(project.elapsed_ms.is_some());
+        let prepare = startup_step(&snapshot, StartupStepKind::PrepareRuntime).unwrap();
+        assert_eq!(prepare.state, StartupStepState::Failed);
+        assert!(prepare.elapsed_ms.is_some());
+        assert!(
+            prepare.detail.as_ref().unwrap().len()
+                <= phoxal_cli_protocol::limits::MAX_STEP_DETAIL_BYTES
+        );
+    }
+
+    #[test]
+    fn completed_startup_step_accepts_late_detail_and_may_be_reactivated() {
+        let state = SupervisorState::new();
+        state.plan_startup_steps();
+        state.step_detail(StartupStepKind::Project, "initial");
+        state.step_done(StartupStepKind::Project);
+        state.step_detail(StartupStepKind::Project, "late");
+        let snapshot = state.supervisor_snapshot();
+        assert_eq!(
+            startup_step(&snapshot, StartupStepKind::Project)
+                .unwrap()
+                .detail
+                .as_deref(),
+            Some("late")
+        );
+
+        state.step_active(StartupStepKind::Project);
+        let snapshot = state.supervisor_snapshot();
+        let project = startup_step(&snapshot, StartupStepKind::Project).unwrap();
+        assert_eq!(project.state, StartupStepState::Active);
+        assert_eq!(project.elapsed_ms, None);
+
+        state.step_active(StartupStepKind::Project);
+        state.step_done(StartupStepKind::Project);
+        let first_elapsed = startup_step(&state.supervisor_snapshot(), StartupStepKind::Project)
+            .unwrap()
+            .elapsed_ms;
+        state.step_done(StartupStepKind::Project);
+        assert_eq!(
+            startup_step(&state.supervisor_snapshot(), StartupStepKind::Project)
+                .unwrap()
+                .elapsed_ms,
+            first_elapsed,
+            "repeated terminal updates must not erase the original timing"
+        );
+    }
+
     #[tokio::test]
     async fn fail_sets_lifecycle_and_reason_in_one_atomic_update() {
         let state = SupervisorState::new();
@@ -638,6 +856,8 @@ mod tests {
     #[test]
     fn graph_recovery_fences_old_readiness_and_publishes_a_new_generation() {
         let state = SupervisorState::new();
+        state.plan_startup_steps();
+        state.step_done(StartupStepKind::Graph);
         let robot = RobotKey::new("lab", "rover");
         let key = ProcessKey::robot(robot.clone(), "mission");
         state.upsert_process(
@@ -655,6 +875,10 @@ mod tests {
         assert!(recovered.revision > revision);
         assert_eq!(recovered.graph_generation, 1);
         assert_eq!(recovered.lifecycle, ProjectLifecycle::Starting);
+        let graph = startup_step(&recovered, StartupStepKind::Graph).unwrap();
+        assert_eq!(graph.state, StartupStepState::Active);
+        assert_eq!(graph.detail.as_deref(), Some("recovering"));
+        assert_eq!(graph.elapsed_ms, None);
         assert_eq!(
             recovered.processes[&key].status.actual,
             ProcessState::Starting

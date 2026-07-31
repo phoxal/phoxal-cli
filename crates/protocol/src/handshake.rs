@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::CommandSessionId;
 
-pub const SUPERVISOR_PROTOCOL_VERSION: u16 = 1;
+pub const SUPERVISOR_PROTOCOL_VERSION: u16 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

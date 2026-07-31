@@ -20,8 +20,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+pub(crate) use crate::application::readiness::{Readiness, required_readiness};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RobotFeedTarget {
@@ -190,7 +193,14 @@ pub(crate) async fn start_command(app: &AppContext, requested_target: Option<&Pa
     }
     let (mut launched, feed, _) =
         connect_to_detached_resident_feed(&target.project, app.offline).await?;
-    wait_for_required_readiness(&target.project, &feed, &mut launched.child).await?;
+    wait_for_startup(
+        app,
+        &target,
+        &feed,
+        &mut launched.child,
+        StartupWaitMode::Detached,
+    )
+    .await?;
     let display = target.project.display();
     app.ui.info(format!(
         "robot instance ready; attach with `phoxal attach {display}` or stop with `phoxal stop {display}`"
@@ -253,10 +263,35 @@ async fn launch_client(
     if detach {
         let (mut launched, feed, _) =
             connect_to_detached_resident_feed(&target.project, app.offline).await?;
-        return wait_for_required_readiness(&target.project, &feed, &mut launched.child).await;
+        return wait_for_startup(
+            app,
+            &target,
+            &feed,
+            &mut launched.child,
+            StartupWaitMode::Detached,
+        )
+        .await;
     }
-    let (mut launched, feed, commands) =
-        connect_to_detached_resident(&target.project, app.offline).await?;
+    launch_foreground_client(app, target).await
+}
+
+pub(crate) async fn launch_foreground_client(
+    app: &AppContext,
+    target: crate::application::attachment::ProjectTarget,
+) -> Result<()> {
+    let (mut launched, feed, socket) =
+        connect_to_detached_resident_feed(&target.project, app.offline).await?;
+    wait_for_startup(
+        app,
+        &target,
+        &feed,
+        &mut launched.child,
+        StartupWaitMode::ForegroundOwned,
+    )
+    .await?;
+    let commands = phoxal_cli_client::SupervisorCommands::connect(socket)
+        .await
+        .map_err(|error| resident_connect_failure(&target.project, &feed.current(), error))?;
     let result = crate::application::attachment::run(app, &target, feed, commands, true).await;
     match result? {
         phoxal_cli_ui::AttachmentOutcome::ResidentFailed { reason } => {
@@ -273,25 +308,6 @@ async fn launch_client(
         }
         phoxal_cli_ui::AttachmentOutcome::Detached => Ok(()),
     }
-}
-
-/// Spawn a detached resident supervisor, connect a client to it, and confirm the
-/// running generation matches the one this launcher just bootstrapped. Shared by
-/// `run` (interactive and `-d`) and `phoxal start` (interactive), which then
-/// either drive the TUI or wait for required readiness and return.
-pub(crate) async fn connect_to_detached_resident(
-    project: &Path,
-    offline: bool,
-) -> Result<(
-    phoxal_cli_supervisor::resident::LaunchedResident,
-    phoxal_cli_client::SupervisorFeed,
-    phoxal_cli_client::SupervisorCommands,
-)> {
-    let (launched, feed, socket) = connect_to_detached_resident_feed(project, offline).await?;
-    let commands = phoxal_cli_client::SupervisorCommands::connect(socket)
-        .await
-        .map_err(|error| resident_connect_failure(project, &feed.current(), error))?;
-    Ok((launched, feed, commands))
 }
 
 /// Prefer the resident's own terminal-failure reason (if the feed - which
@@ -427,7 +443,17 @@ async fn resident_supervision_inner(
         run.execution(),
         runtime_target.zenoh_endpoint.clone(),
     );
-    board.begin_phase("prepare");
+    board.plan_startup_steps();
+    board.step_detail(
+        phoxal_cli_core::runtime::StartupStepKind::Project,
+        "robot.yaml",
+    );
+    let mut console_task =
+        if bootstrap_execution.is_none() && notify.is_none() && !app.output.interactive {
+            Some(spawn_board_console(app, &project_root, board.clone()))
+        } else {
+            None
+        };
     let token = tokio_util::sync::CancellationToken::new();
     let (action_tx, action_rx) = mpsc::channel(16);
     let socket = phoxal_cli_supervisor::resident::ResidentSocket::bind(
@@ -462,7 +488,7 @@ async fn resident_supervision_inner(
                     prepare_token.clone(),
                 )
                 .await?;
-                prepare_board.complete_phase("prepare");
+                prepare_board.step_done(phoxal_cli_core::runtime::StartupStepKind::PrepareRuntime);
                 live_run_setup(
                     prepared,
                     prepare_ui,
@@ -481,15 +507,39 @@ async fn resident_supervision_inner(
                 })
             }
             ResidentMode::Webots(options) => {
-                phoxal_cli_project::host::doctor::preflight()
-                    .map_err(|error| anyhow::anyhow!("{error}"))
-                    .context(
-                        "Webots preflight failed; live simulate cannot launch the simulator",
-                    )?;
-                let executable = phoxal_cli_project::host::doctor::webots_executable_path()
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
-                let home = phoxal_cli_project::host::doctor::webots_home_path()
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                prepare_board.step_detail(
+                    phoxal_cli_core::runtime::StartupStepKind::Project,
+                    format!("robot.yaml · framework {}", options.train),
+                );
+                prepare_board.step_done(phoxal_cli_core::runtime::StartupStepKind::Project);
+                prepare_board
+                    .step_active(phoxal_cli_core::runtime::StartupStepKind::PrepareRuntime);
+                prepare_board.step_detail(
+                    phoxal_cli_core::runtime::StartupStepKind::PrepareRuntime,
+                    "checking Webots installation",
+                );
+                let webots_host = (|| -> Result<_> {
+                    phoxal_cli_project::host::doctor::preflight()
+                        .map_err(|error| anyhow::anyhow!("{error}"))
+                        .context(
+                            "Webots preflight failed; live simulate cannot launch the simulator",
+                        )?;
+                    let executable = phoxal_cli_project::host::doctor::webots_executable_path()
+                        .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    let home = phoxal_cli_project::host::doctor::webots_home_path()
+                        .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    Ok((executable, home))
+                })();
+                let (executable, home) = match webots_host {
+                    Ok(host) => host,
+                    Err(error) => {
+                        prepare_board.step_failed(
+                            phoxal_cli_core::runtime::StartupStepKind::PrepareRuntime,
+                            format!("{error:#}"),
+                        );
+                        return Err(error);
+                    }
+                };
                 let offline = options.offline;
                 let sim = phoxal_cli_project::prepare_simulation(
                     phoxal_cli_project::PrepareSimulationRequest {
@@ -501,14 +551,15 @@ async fn resident_supervision_inner(
                             executable,
                             home: Some(home),
                         },
-                        reporter: Arc::new(crate::cli::output::progress::PreparationReporter::new(
+                        reporter: Arc::new(crate::cli::output::progress::BoardReporter::new(
                             prepare_ui,
                             prepare_token.clone(),
+                            prepare_board.clone(),
                         )),
                     },
                 )
                 .await?;
-                prepare_board.complete_phase("prepare");
+                prepare_board.step_done(phoxal_cli_core::runtime::StartupStepKind::PrepareRuntime);
                 crate::application::live_simulate_setup(
                     prepare_ui,
                     sim,
@@ -544,6 +595,7 @@ async fn resident_supervision_inner(
     let Some(prepared_result) = prepared_result else {
         finish_cancelled_preparation(&board, &mut preparation).await;
         socket.close().await;
+        let _ = join_board_console(&mut console_task).await;
         return Ok(());
     };
     let prepared = match prepared_result {
@@ -552,10 +604,16 @@ async fn resident_supervision_inner(
             if token.is_cancelled() {
                 board.set_lifecycle(phoxal_cli_core::runtime::ProjectLifecycle::Stopped);
                 socket.close().await;
+                let _ = join_board_console(&mut console_task).await;
                 return Ok(());
             }
+            board.fail_active_step(format!("{error:#}"));
             board.fail(&format!("{error:#}"));
             socket.close().await;
+            let console_reported_failure = join_board_console(&mut console_task).await;
+            if console_reported_failure {
+                return Err(crate::cli::ReportedExit(1).into());
+            }
             return Err(error);
         }
     };
@@ -591,7 +649,73 @@ async fn resident_supervision_inner(
     }
     drop(background_tasks);
     socket.close().await;
-    outcome
+    let console_reported_failure = join_board_console(&mut console_task).await;
+    match outcome {
+        Err(_) if console_reported_failure => Err(crate::cli::ReportedExit(1).into()),
+        outcome => outcome,
+    }
+}
+
+struct BoardConsole {
+    task: tokio::task::JoinHandle<()>,
+    reported_failure: Arc<AtomicBool>,
+}
+
+fn spawn_board_console(app: &AppContext, project: &Path, board: SupervisorState) -> BoardConsole {
+    let mut presenter =
+        crate::cli::output::welcome::presenter(false, app.output.theme, app.ui, project);
+    let project = project.to_path_buf();
+    let reported_failure = Arc::new(AtomicBool::new(false));
+    let task_reported_failure = Arc::clone(&reported_failure);
+    let task = tokio::spawn(async move {
+        let mut snapshots = board.subscribe();
+        loop {
+            let snapshot = snapshots.borrow_and_update().clone();
+            presenter.snapshot(&snapshot);
+            match required_readiness(&snapshot) {
+                Readiness::Ready => {
+                    presenter.ready();
+                    return;
+                }
+                Readiness::Failed(_) => {
+                    let log = phoxal_cli_core::runtime::paths::RuntimePaths::for_root(&project)
+                        .supervisor_log();
+                    let reason = crate::application::readiness::failure_reason(&snapshot);
+                    presenter.failed(reason.as_deref(), &log);
+                    task_reported_failure.store(true, Ordering::Release);
+                    return;
+                }
+                Readiness::Pending
+                    if snapshot.lifecycle
+                        == phoxal_cli_core::runtime::ProjectLifecycle::Stopped =>
+                {
+                    return;
+                }
+                Readiness::Pending => {}
+            }
+            if snapshots.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+    BoardConsole {
+        task,
+        reported_failure,
+    }
+}
+
+async fn join_board_console(console: &mut Option<BoardConsole>) -> bool {
+    let Some(mut console) = console.take() else {
+        return false;
+    };
+    if tokio::time::timeout(Duration::from_secs(1), &mut console.task)
+        .await
+        .is_err()
+    {
+        console.task.abort();
+        let _ = console.task.await;
+    }
+    console.reported_failure.load(Ordering::Acquire)
 }
 
 async fn finish_cancelled_preparation<T>(
@@ -677,9 +801,10 @@ async fn prepare_run(
             subset: options.drivers_subset,
         },
         offline: options.offline,
-        reporter: Arc::new(crate::cli::output::progress::PreparationReporter::new(
+        reporter: Arc::new(crate::cli::output::progress::BoardReporter::new(
             ui,
             cancellation,
+            board.clone(),
         )),
     })
     .await?;
@@ -845,118 +970,141 @@ async fn resident_shutdown_signal() -> Result<()> {
     }
 }
 
-/// Whether the supervised graph has reached required readiness, from a board or
-/// client snapshot. Shared by the detached-launcher wait (`run -d`, interactive
-/// `start`) and the systemd readiness-notify task, so both apply the identical
-/// rule: `Ready` is ready; `Degraded` is ready unless a startup-required process
-/// has actually failed; `Failed` names the failed processes; everything else is
-/// still pending.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Readiness {
-    Ready,
-    Pending,
-    Failed(Vec<String>),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupWaitMode {
+    ForegroundOwned,
+    Detached,
 }
 
-pub(crate) fn required_readiness(
-    snapshot: &phoxal_cli_protocol::SupervisorSnapshotV0,
-) -> Readiness {
-    use phoxal_cli_core::runtime::{ProcessState, ProjectLifecycle, StartupRequirement};
-    match snapshot.lifecycle {
-        ProjectLifecycle::Ready => Readiness::Ready,
-        ProjectLifecycle::Degraded => {
-            let required_failed = snapshot.processes.values().any(|entry| {
-                entry.descriptor.startup_requirement == StartupRequirement::Required
-                    && entry.status.actual == ProcessState::Failed
-            });
-            if required_failed {
-                Readiness::Pending
-            } else {
-                Readiness::Ready
-            }
-        }
-        ProjectLifecycle::Failed => Readiness::Failed(
-            snapshot
-                .processes
-                .iter()
-                .filter(|(_, entry)| entry.status.actual == ProcessState::Failed)
-                .map(|(key, _)| key.to_string())
-                .collect(),
-        ),
-        _ => Readiness::Pending,
+impl StartupWaitMode {
+    const fn interactive(self, stderr_is_terminal: bool) -> bool {
+        matches!(self, Self::ForegroundOwned) && stderr_is_terminal
+    }
+
+    fn deadline(self, now: tokio::time::Instant) -> Option<tokio::time::Instant> {
+        matches!(self, Self::Detached).then(|| now + Duration::from_secs(5 * 60))
+    }
+
+    const fn leaves_resident_on_cancel(self) -> bool {
+        matches!(self, Self::Detached)
     }
 }
 
-pub(crate) async fn wait_for_required_readiness(
-    project: &Path,
+pub(crate) async fn wait_for_startup(
+    app: &AppContext,
+    target: &crate::application::attachment::ProjectTarget,
     feed: &phoxal_cli_client::SupervisorFeed,
     child: &mut std::process::Child,
+    mode: StartupWaitMode,
 ) -> Result<()> {
-    let mut snapshots = feed.subscribe();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5 * 60);
-    loop {
-        let snapshot = snapshots.borrow_and_update().clone();
-        match required_readiness(&snapshot) {
-            Readiness::Ready => return Ok(()),
-            Readiness::Failed(failures) => {
-                // A resident-level failure (e.g. the catalog train-floor
-                // check rejecting the project before any participant
-                // launched) carries its own reason on the snapshot and wins
-                // over the per-process failure list, which is empty in that
-                // case.
-                if let Some(reason) = &snapshot.failure {
-                    bail!(crate::application::attachment::resident_failure_message(
-                        project,
-                        Some(reason)
-                    ))
+    use crate::application::readiness::StartupWait;
+
+    let interactive = mode.interactive(app.output.interactive);
+    let mut presenter = crate::cli::output::welcome::presenter(
+        interactive,
+        app.output.theme,
+        app.ui,
+        &target.project,
+    );
+    let deadline = mode.deadline(tokio::time::Instant::now());
+    let outcome =
+        crate::application::readiness::wait(feed, Some(child), deadline, presenter.as_mut())
+            .await?;
+    let log =
+        phoxal_cli_core::runtime::paths::RuntimePaths::for_root(&target.project).supervisor_log();
+    match outcome {
+        StartupWait::Ready => {
+            let final_snapshot = feed.current();
+            match required_readiness(&final_snapshot) {
+                Readiness::Ready => presenter.ready(),
+                Readiness::Failed(_) => {
+                    let reason = crate::application::readiness::failure_reason(&final_snapshot);
+                    presenter.failed(reason.as_deref(), &log);
+                    return Err(crate::cli::ReportedExit(1).into());
                 }
-                if failures.is_empty() {
-                    bail!(
-                        "resident startup failed before any participant launched; see the \
-                         selected runtime state directory's supervisor.log for the exact error"
-                    )
+                Readiness::Pending => {
+                    presenter.failed(
+                        Some("resident left readiness before dashboard handoff"),
+                        &log,
+                    );
+                    return Err(crate::cli::ReportedExit(1).into());
                 }
-                bail!("resident startup failed: {}", failures.join(", "))
             }
-            Readiness::Pending => {}
         }
-        if let Some(status) = child.try_wait()? {
-            let log =
-                phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project).supervisor_log();
-            bail!(
-                "resident exited before readiness with {status}; see {} for the exact error",
-                log.display()
+        StartupWait::Failed { reason } => {
+            presenter.failed(reason.as_deref(), &log);
+            return Err(crate::cli::ReportedExit(1).into());
+        }
+        StartupWait::ChildExited { status } => {
+            presenter.failed(
+                Some(&format!("resident exited before readiness with {status}")),
+                &log,
             );
+            return Err(crate::cli::ReportedExit(1).into());
         }
-        tokio::select! {
-            result = snapshots.changed() => {
-                if result.is_err() {
-                    // The feed's background task only drops its sender (the
-                    // condition `changed()` reports here) after giving up
-                    // for good - e.g. the permanent-ENOENT classification in
-                    // `SupervisorFeed`'s reconnect loop, which can fire
-                    // before a terminal snapshot ever arrives. `snapshot` is
-                    // the last one this loop actually observed, so surface
-                    // its reason (if the resident got that far) alongside
-                    // the log pointer, matching the child-exit branch above.
-                    let log = phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project)
-                        .supervisor_log();
-                    match &snapshot.failure {
-                        Some(reason) => bail!(
-                            "resident disconnected before readiness: {reason}; see {} for the exact error",
-                            log.display()
-                        ),
-                        None => bail!(
-                            "resident disconnected before readiness; see {} for the exact error",
-                            log.display()
-                        ),
-                    }
-                }
+        StartupWait::FeedLost => {
+            presenter.failed(Some("resident disconnected before readiness"), &log);
+            return Err(crate::cli::ReportedExit(1).into());
+        }
+        StartupWait::DeadlineExceeded => {
+            presenter.failed(
+                Some("timed out waiting for resident startup readiness"),
+                &log,
+            );
+            return Err(crate::cli::ReportedExit(1).into());
+        }
+        StartupWait::Cancelled => {
+            if !mode.leaves_resident_on_cancel() {
+                presenter.cancelled();
             }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {},
-            _ = tokio::time::sleep_until(deadline) => bail!("timed out waiting for resident startup readiness"),
+            drop(presenter);
+            return cancel_startup_wait(app, target, child, mode).await;
         }
     }
+    drop(presenter);
+    Ok(())
+}
+
+async fn cancel_startup_wait(
+    app: &AppContext,
+    target: &crate::application::attachment::ProjectTarget,
+    child: &mut std::process::Child,
+    mode: StartupWaitMode,
+) -> Result<()> {
+    if mode.leaves_resident_on_cancel() {
+        app.ui.info(format!(
+            "resident continues; attach with 'phoxal attach {}', stop with 'phoxal stop {}'",
+            target.project.display(),
+            target.project.display()
+        ));
+        return Err(crate::cli::ReportedExit(130).into());
+    }
+
+    let socket = phoxal_cli_supervisor::resident::supervisor_socket_path(&target.project)?;
+    if let Ok(commands) = phoxal_cli_client::SupervisorCommands::connect(socket).await {
+        let _ = commands
+            .command(phoxal_cli_protocol::CommandAction::Shutdown)
+            .await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if child.try_wait()?.is_some() {
+            return Err(crate::cli::ReportedExit(130).into());
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = tokio::time::sleep_until(deadline) => break,
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+    }
+    if let Err(error) = phoxal_cli_supervisor::resident::force_stop(&target.runtime_target()).await
+    {
+        app.ui.warn(format!(
+            "forced shutdown could not be confirmed: {error:#}; check with `phoxal status {}`",
+            target.project.display()
+        ));
+    }
+    Err(crate::cli::ReportedExit(130).into())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -972,12 +1120,33 @@ pub(crate) async fn live_run_setup(
     run: RunIdentity,
 ) -> Result<LiveRunSetup> {
     let connect = prepared.router.endpoint.clone();
-    let router = start_infrastructure_router(
+    prepared
+        .board
+        .step_active(phoxal_cli_core::runtime::StartupStepKind::Infrastructure);
+    prepared.board.step_detail(
+        phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
+        "starting router",
+    );
+    let router = match start_infrastructure_router(
         prepared.router.binary.clone(),
         prepared.router.config.clone(),
         prepared.router.endpoint.clone(),
     )
-    .await?;
+    .await
+    {
+        Ok(router) => router,
+        Err(error) => {
+            prepared.board.step_failed(
+                phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
+                format!("{error:#}"),
+            );
+            return Err(error);
+        }
+    };
+    prepared.board.step_detail(
+        phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
+        format!("router {connect}"),
+    );
     let revision =
         phoxal_cli_core::project::launch_plan::PlanRevision::compile(1, prepared.plan.clone())?;
     phoxal_cli_supervisor::materialize_plan_binaries(
@@ -1095,7 +1264,7 @@ mod resident_role_tests {
 /// after a detached launch and when the foreground resident sends `READY=1`.
 #[cfg(test)]
 mod readiness_tests {
-    use super::{Readiness, required_readiness};
+    use super::{Readiness, StartupWaitMode, required_readiness};
     use phoxal_cli_core::runtime::{
         ParticipantKind, ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement,
     };
@@ -1155,6 +1324,21 @@ mod readiness_tests {
             Readiness::Failed(failures) if failures.iter().any(|failure| failure.contains("drive"))
         ));
     }
+
+    #[test]
+    fn startup_wait_modes_pin_presentation_deadline_and_cancellation_policy() {
+        let now = tokio::time::Instant::now();
+        assert!(StartupWaitMode::ForegroundOwned.interactive(true));
+        assert!(!StartupWaitMode::ForegroundOwned.interactive(false));
+        assert!(!StartupWaitMode::Detached.interactive(true));
+        assert_eq!(StartupWaitMode::ForegroundOwned.deadline(now), None);
+        assert_eq!(
+            StartupWaitMode::Detached.deadline(now),
+            Some(now + std::time::Duration::from_secs(5 * 60))
+        );
+        assert!(!StartupWaitMode::ForegroundOwned.leaves_resident_on_cancel());
+        assert!(StartupWaitMode::Detached.leaves_resident_on_cancel());
+    }
 }
 
 #[cfg(test)]
@@ -1180,7 +1364,7 @@ mod preparation_cancellation_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::AbortTasks;
+    use super::{AbortTasks, BoardConsole, join_board_console};
     use anyhow::Result;
     use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan};
     use phoxal_cli_core::runtime::ParticipantSpec;
@@ -1188,6 +1372,8 @@ mod tests {
         ParticipantKind, ProcessKey, ReadinessPolicy, RuntimeFailurePolicy, StartupRequirement,
     };
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     #[test]
@@ -1244,6 +1430,20 @@ mod tests {
         drop(tasks);
         tokio::task::yield_now().await;
         assert!(abort.is_finished());
+    }
+
+    #[tokio::test]
+    async fn console_error_suppression_requires_observed_report_evidence() {
+        for expected in [false, true] {
+            let reported_failure = Arc::new(AtomicBool::new(expected));
+            let mut console = Some(BoardConsole {
+                task: tokio::spawn(async {}),
+                reported_failure: Arc::clone(&reported_failure),
+            });
+            assert_eq!(join_board_console(&mut console).await, expected);
+            assert!(console.is_none());
+            assert_eq!(reported_failure.load(Ordering::Acquire), expected);
+        }
     }
 }
 

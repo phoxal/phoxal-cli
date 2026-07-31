@@ -18,6 +18,9 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            if let Some(exit) = error.downcast_ref::<phoxal_cli::cli::ReportedExit>() {
+                return ExitCode::from(exit.0);
+            }
             Ui::from_env().error(format!("{error:#}"));
             ExitCode::from(1)
         }
