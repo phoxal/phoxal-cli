@@ -4,6 +4,15 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.29.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.29.0) - 2026-07-31
+
+
+### Refactored
+
+- *(cli)* Remove the `service suite` subcommand ([#256](https://github.com/phoxal/phoxal-cli/pull/256)) [**breaking**]
+- Consume compiled framework project output ([#258](https://github.com/phoxal/phoxal-cli/pull/258))
+
+
 ## [0.28.12](https://github.com/phoxal/phoxal-cli/releases/tag/v0.28.12) - 2026-07-30
 
 
