@@ -19,14 +19,17 @@
 //! Every backend produces the identical deterministic `build.phoxal`.
 
 use phoxal_cli_core::project::launch_plan::RunIdentity;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::build::builder_image::{prepare_builder_image, reference_for};
 use crate::build::container::{
     ContainerBuildSpec, ContainerEngine, ContainerOfficial, default_builder_image,
     host_cargo_caches, platform_for_triple, require_platform_for_triple,
 };
 use crate::build::profile::StagingBuild;
+use crate::build::registry_manifest::{HttpClient, ManifestCache, fetch_runtime_manifest};
 use crate::run::RunOptions;
 use crate::{BuildBackend, BuildBundleRequest, BuiltBundle};
 use anyhow::{Context, Result, bail};
@@ -333,15 +336,6 @@ impl Worker {
             .prefix("phoxal-build-officials-")
             .tempdir()
             .context("failed to create an officials materialization directory")?;
-        let cargo_target =
-            crate::build::cargo::cargo_target_dir(project_root, self.request.offline)?;
-        std::fs::create_dir_all(&cargo_target).with_context(|| {
-            format!(
-                "failed to create persistent Cargo target directory {}",
-                cargo_target.display()
-            )
-        })?;
-
         // The default image is the pinned official rust image with the container
         // platform derived from the target arch; a custom `--builder-image` owns
         // its own toolchain, so we only pass `--platform` when the arch is one we
@@ -370,18 +364,117 @@ impl Worker {
         // #945) - is known from the catalog alone. Its train comes from the
         // same frozen resolution as robot-specific drivers, so a live-tree edit
         // cannot split one container install batch across two trains.
-        let train = resolved.resolved().train.clone();
-        let mut officials = phoxal_cli_core::project::catalog::for_webots(false)
-            .map(|official| ContainerOfficial {
-                package: phoxal_cli_core::project::catalog::cargo_package_name(official.package),
-                train: train.clone(),
-            })
-            .collect::<Vec<_>>();
+        let officials = selected_registry_officials(resolved.resolved());
 
-        officials.extend(component_driver_officials(resolved.resolved()));
+        let source_participants = crate::validation::source_participants_from_resolved(
+            snapshot.path(),
+            resolved.resolved(),
+            crate::resolve::component_driver::component_driver_crate_dir,
+        )?;
+        let mut workspace_manifests = BTreeMap::<String, PathBuf>::new();
+        for participant in source_participants {
+            anyhow::ensure!(
+                canonical_path_is_within(snapshot.path(), &participant.crate_dir)?,
+                "selected {} {} resolves outside the frozen source snapshot at {}; move it under the project before a container build",
+                participant.kind_label(),
+                participant.name,
+                participant.crate_dir.display()
+            );
+            let package =
+                phoxal_cli_core::project::tooling::cargo_package_name(&participant.crate_dir)?;
+            workspace_manifests
+                .entry(package)
+                .or_insert_with(|| participant.crate_dir.join("Cargo.toml"));
+        }
+
+        let mut attributed = BTreeMap::<String, BTreeSet<String>>::new();
+        for (package, manifest_path) in &workspace_manifests {
+            let source = std::fs::read_to_string(manifest_path).with_context(|| {
+                format!(
+                    "failed to read selected runtime manifest {}",
+                    manifest_path.display()
+                )
+            })?;
+            let requirements = phoxal_manifest::build_requirements::requirements_from_manifest(
+                &source,
+                &manifest_path.display().to_string(),
+            )?;
+            attributed.insert(package.clone(), requirements.apt);
+        }
+
+        let http = HttpClient::new()?;
+        let manifest_cache = ManifestCache::new(project_root.join(".phoxal/cache/build-metadata"));
+        ui.info(format!(
+            "reading build requirements for {} registry runtimes",
+            officials.len()
+        ));
+        for official in &officials {
+            let source = fetch_runtime_manifest(
+                &http,
+                &manifest_cache,
+                &official.package,
+                &official.train,
+                self.request.offline,
+            )?;
+            let requirements = phoxal_manifest::build_requirements::requirements_from_manifest(
+                &source,
+                &format!("{}@{}", official.package, official.train),
+            )?;
+            attributed.insert(official.package.clone(), requirements.apt);
+        }
+        let merged = merge_requirements(&attributed);
+
+        let planned_reference = reference_for(&image, &merged);
+        ui.info(format!("builder image: {image}"));
+        ui.info(format!(
+            "platform: {}",
+            platform.as_deref().unwrap_or("engine default")
+        ));
+        if attributed.values().all(BTreeSet::is_empty) {
+            ui.info("requirements: (none)".to_string());
+        } else {
+            ui.info("requirements:".to_string());
+            for (package, requirements) in &attributed {
+                if !requirements.is_empty() {
+                    ui.info(format!(
+                        "  {package}: {}",
+                        requirements.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ));
+                }
+            }
+        }
+        ui.info(format!(
+            "merged packages: {}",
+            if merged.is_empty() {
+                "(none)".to_string()
+            } else {
+                merged.iter().cloned().collect::<Vec<_>>().join(", ")
+            }
+        ));
+        ui.info(format!("image: {planned_reference}"));
+
+        let prepared = prepare_builder_image(
+            self.engine,
+            &image,
+            platform.as_deref(),
+            &merged,
+            self.request.offline,
+            ui,
+        )?;
+
+        let cargo_target_root =
+            crate::build::cargo::cargo_target_dir(project_root, self.request.offline)?;
+        let cargo_target = container_target_dir(&cargo_target_root, &image, target);
+        std::fs::create_dir_all(&cargo_target).with_context(|| {
+            format!(
+                "failed to create persistent Cargo target directory {}",
+                cargo_target.display()
+            )
+        })?;
+
         let spec = ContainerBuildSpec {
             engine: self.engine,
-            image,
+            image: prepared.reference,
             platform,
             target: target.to_string(),
             snapshot: snapshot.path().to_path_buf(),
@@ -390,10 +483,11 @@ impl Worker {
             cargo_git,
             officials_root: officials_root.path().to_path_buf(),
             officials,
+            workspace_packages: workspace_manifests.into_keys().collect(),
             offline: self.request.offline,
         };
         ui.info(format!(
-            "compiling workspace and materializing officials for {target} inside {} ({}{})",
+            "compiling selected workspace packages and materializing officials for {target} inside {} ({}{})",
             spec.image,
             self.engine.program(),
             spec.platform
@@ -514,6 +608,81 @@ fn component_driver_officials(
             train: runtime.train.clone(),
         })
         .collect()
+}
+
+/// Select only registry-backed runtime packages from the frozen resolved plan.
+/// A path override is compiled from the snapshot and must never also be fetched
+/// from the registry, even when its package identity matches the catalog.
+fn selected_registry_officials(
+    resolved: &phoxal_cli_core::project::resolver::BundlePlan,
+) -> Vec<ContainerOfficial> {
+    let overridden = resolved
+        .platform_runtimes
+        .iter()
+        .filter(|runtime| runtime.path_override.is_some())
+        .map(|runtime| runtime.package.clone())
+        .chain(
+            resolved
+                .tools
+                .iter()
+                .filter(|runtime| runtime.path_override.is_some())
+                .map(|runtime| runtime.package.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    let mut officials = phoxal_cli_core::project::catalog::for_webots(false)
+        .filter(|official| !overridden.contains(official.package))
+        .map(|official| ContainerOfficial {
+            package: phoxal_cli_core::project::catalog::cargo_package_name(official.package),
+            train: resolved.train.clone(),
+        })
+        .collect::<Vec<_>>();
+    officials.extend(component_driver_officials(resolved));
+    officials.sort_by(|left, right| {
+        left.package
+            .cmp(&right.package)
+            .then_with(|| left.train.cmp(&right.train))
+    });
+    officials.dedup();
+    officials
+}
+
+fn merge_requirements(attributed: &BTreeMap<String, BTreeSet<String>>) -> BTreeSet<String> {
+    attributed
+        .values()
+        .flat_map(|requirements| requirements.iter().cloned())
+        .collect()
+}
+
+fn sanitize_cache_segment(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"._-".contains(&byte) {
+                char::from(byte)
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn container_target_dir(root: &Path, image: &str, target: &str) -> PathBuf {
+    root.join("phoxal-container")
+        .join(sanitize_cache_segment(image))
+        .join(sanitize_cache_segment(target))
+}
+
+/// Compare filesystem identities rather than lexical spellings. On macOS the
+/// temp directory may be reported below `/var` while Cargo canonicalizes the
+/// same workspace below `/private/var`.
+fn canonical_path_is_within(root: &Path, candidate: &Path) -> Result<bool> {
+    let canonical_root = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+    let canonical_candidate = candidate
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", candidate.display()))?;
+    Ok(canonical_candidate.starts_with(canonical_root))
 }
 
 fn validate_ssh_target(target: &str) -> Result<()> {
@@ -948,7 +1117,7 @@ mod tests {
     use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::resolver::{
         BundlePlan, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-        ResolvedPlatformRuntime,
+        ResolvedPlatformRuntime, ResolvedTool,
     };
 
     fn minimal_bundle_plan() -> BundlePlan {
@@ -1071,6 +1240,93 @@ robot:
             "exactly one entry for the shared registry driver, deduped across both instances, \
              and no entry at all for the path-overridden driver"
         );
+    }
+
+    #[test]
+    fn registry_selection_excludes_path_overrides_and_includes_selected_registry_drivers() {
+        let mut resolved = minimal_bundle_plan();
+        resolved.platform_runtimes.push(ResolvedPlatformRuntime {
+            name: "service-behavior".to_string(),
+            package: "phoxal/service-behavior".to_string(),
+            kind: ArtifactKind::Service,
+            path_override: Some(PathBuf::from("services/behavior")),
+            train: resolved.train.clone(),
+            target: Some(resolved.target.clone()),
+        });
+        resolved.tools.push(ResolvedTool {
+            kind: ArtifactKind::Tool,
+            name: "tool-joypad".to_string(),
+            package: "phoxal/tool-joypad".to_string(),
+            binary_name: "tool-joypad".to_string(),
+            path_override: Some(PathBuf::from("tools/joypad")),
+            train: resolved.train.clone(),
+            target: resolved.target.clone(),
+        });
+        resolved.components = vec![registry_driver_component(
+            "left_wheel",
+            "phoxal/component-ddsm115",
+        )];
+
+        let officials = selected_registry_officials(&resolved);
+        let packages = officials
+            .iter()
+            .map(|official| official.package.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(!packages.contains("phoxal-service-behavior"));
+        assert!(!packages.contains("phoxal-tool-joypad"));
+        assert!(packages.contains("phoxal-service-drive"));
+        assert!(packages.contains("phoxal-tool-log"));
+        assert!(packages.contains("phoxal-component-ddsm115"));
+    }
+
+    #[test]
+    fn requirement_union_merges_attributed_package_sets() {
+        let attributed = BTreeMap::from([
+            (
+                "selected-a".to_string(),
+                BTreeSet::from(["libudev-dev".to_string()]),
+            ),
+            (
+                "selected-b".to_string(),
+                BTreeSet::from(["pkg-config".to_string()]),
+            ),
+        ]);
+        assert_eq!(
+            merge_requirements(&attributed),
+            BTreeSet::from(["libudev-dev".to_string(), "pkg-config".to_string()])
+        );
+    }
+
+    #[test]
+    fn container_target_cache_is_namespaced_by_image_and_target() {
+        let root = Path::new("/cache");
+        let first = container_target_dir(root, "rust:1.88-bookworm", "aarch64-unknown-linux-gnu");
+        assert_eq!(
+            first,
+            Path::new("/cache/phoxal-container/rust-1.88-bookworm/aarch64-unknown-linux-gnu")
+        );
+        assert_ne!(
+            first,
+            container_target_dir(root, "rust:1.89-bookworm", "aarch64-unknown-linux-gnu")
+        );
+        assert_ne!(
+            first,
+            container_target_dir(root, "rust:1.88-bookworm", "x86_64-unknown-linux-gnu")
+        );
+    }
+
+    #[test]
+    fn snapshot_containment_compares_canonical_filesystem_paths() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let selected = root.path().join("services/behavior");
+        std::fs::create_dir_all(&selected)?;
+        let canonical_selected = selected.canonicalize()?;
+        assert!(canonical_path_is_within(root.path(), &canonical_selected)?);
+
+        let sibling = tempfile::tempdir()?;
+        assert!(!canonical_path_is_within(root.path(), sibling.path())?);
+        Ok(())
     }
 
     #[test]

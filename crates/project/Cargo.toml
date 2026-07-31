@@ -23,12 +23,14 @@ phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
 phoxal-cli-core = { workspace = true }
 reqwest = { workspace = true }
+semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
+toml = { workspace = true }
 webots-proto = { workspace = true }
 
 [dev-dependencies]
