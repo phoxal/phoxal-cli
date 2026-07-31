@@ -5,7 +5,7 @@
 //! back to the same host-side staging + validation + deterministic archiving
 //! every other builder uses. The container is only a compilation environment: it
 //! mounts a deterministic source snapshot plus Cargo's persistent target,
-//! registry, and git caches, builds the workspace, and installs every official
+//! registry, and git caches, builds the selected packages, and installs every official
 //! package in one Cargo invocation. It never produces a Docker/OCI image.
 //!
 //! ## Officials materialize inside the container too (organization#951 WS4)
@@ -198,6 +198,9 @@ pub struct ContainerBuildSpec {
     /// `officials_source` to hand to host-side staging, which materializes
     /// the whole set itself instead.
     pub officials: Vec<ContainerOfficial>,
+    /// Sorted, deduplicated package names selected from the frozen workspace.
+    /// An unselected crate never enters the build command.
+    pub workspace_packages: Vec<String>,
     pub offline: bool,
 }
 
@@ -213,7 +216,7 @@ const CONTAINER_OFFICIALS: &str = "/phoxal/officials";
 /// (organization#951 WS4 review, medium 4) - both the upper- and lower-case
 /// spellings different tools read, so whichever one a host's proxy setup
 /// actually exports is carried through.
-const PROXY_ENV_VARS: &[&str] = &[
+pub(super) const PROXY_ENV_VARS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -228,15 +231,22 @@ const PROXY_ENV_VARS: &[&str] = &[
 /// present in `env`. Takes an injectable iterator (rather than reading
 /// `std::env::vars()` itself) so it is unit-testable without mutating the
 /// real, test-shared process environment.
-fn proxy_engine_args(env: impl IntoIterator<Item = (String, String)>) -> Vec<String> {
+pub(super) fn proxy_args(
+    flag: &str,
+    env: impl IntoIterator<Item = (String, String)>,
+) -> Vec<String> {
     let present = env
         .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>();
     PROXY_ENV_VARS
         .iter()
         .filter_map(|name| present.get(*name).map(|value| (*name, value.as_str())))
-        .flat_map(|(name, value)| vec!["-e".to_string(), format!("{name}={value}")])
+        .flat_map(|(name, value)| vec![flag.to_string(), format!("{name}={value}")])
         .collect()
+}
+
+fn proxy_engine_args(env: impl IntoIterator<Item = (String, String)>) -> Vec<String> {
+    proxy_args("-e", env)
 }
 
 /// A fully rendered engine command: the program (`docker`/`podman`) and its
@@ -248,17 +258,20 @@ pub struct EngineInvocation {
 }
 
 impl ContainerBuildSpec {
-    /// Render the engine invocation that compiles the workspace AND
+    /// Render the engine invocation that compiles selected workspace packages and
     /// materializes the deterministic official set inside the image. The
     /// container runs, as a compilation environment only,
-    /// `cargo build --workspace --locked --release --target <triple>` against the
-    /// mounted snapshot, then one `cargo install` carrying every exact
+    /// `cargo build --package <selected> ... --locked --release --target <triple>`
+    /// against the mounted snapshot, then one `cargo install` carrying every exact
     /// `<package>@<train>` operand. Shared Cargo flags are emitted once and the
     /// whole build runs on [`Self::platform`], so it is native rather than
     /// cross-compiled.
     #[must_use]
     pub fn invocation(&self) -> EngineInvocation {
         let mut args = vec!["run".to_string(), "--rm".to_string()];
+        if self.offline {
+            args.push("--network=none".to_string());
+        }
         // Select the container CPU architecture so the toolchain builds natively
         // for the target; the emitted `--target` triple matches this platform.
         if let Some(platform) = &self.platform {
@@ -309,57 +322,31 @@ impl ContainerBuildSpec {
         }
     }
 
-    /// The Debian packages the official set needs to *build* from source, on
-    /// top of what the stock `rust:` image ships.
-    ///
-    /// This became necessary when officials stopped arriving as prebuilt
-    /// archives (organization#951 WS4): the container used to mount binaries
-    /// somebody else had already compiled, so it never needed their native
-    /// build dependencies. Now it compiles every official itself, and a
-    /// missing system library is a hard failure part-way through the set.
-    ///
-    /// Kept deliberately small and justified rather than a broad "build
-    /// essentials" sweep, so an addition here is a visible decision:
-    ///
-    /// - `libudev-dev` - `phoxal-tool-joypad` depends on `gilrs`, whose
-    ///   `libudev-sys` build script shells out to `pkg-config` for `libudev`.
-    /// - `pkg-config` - how that build script (and any future `*-sys` crate)
-    ///   locates system libraries at all.
-    const SYSTEM_BUILD_PACKAGES: [&'static str; 2] = ["libudev-dev", "pkg-config"];
-
-    /// Installs [`Self::SYSTEM_BUILD_PACKAGES`] before any compilation.
-    ///
-    /// Skipped entirely when offline: `apt-get` would fail without a network,
-    /// and an offline build is by definition running against a warm cache on
-    /// an image that already satisfied these once.
-    fn system_dependency_command(&self) -> Option<String> {
-        if self.offline {
-            return None;
-        }
-        Some(format!(
-            "apt-get update -qq && apt-get install -y --no-install-recommends {}",
-            Self::SYSTEM_BUILD_PACKAGES.join(" ")
-        ))
-    }
-
-    /// The shell script run inside the container: system build dependencies,
-    /// the workspace build, then one `cargo install` for all officials.
+    /// The shell script run inside the prepared image: selected workspace
+    /// packages, then one `cargo install` for all registry runtimes.
     fn container_script(&self) -> String {
-        let mut workspace_build = format!(
-            "cargo build --workspace --locked --release --target {} --target-dir {CONTAINER_WORKDIR}/target",
-            phoxal_cli_core::runtime::launch::shell_quote(&self.target),
-        );
-        // The officials' `cargo install` already threads `self.offline`
-        // through (below); the workspace build must too (organization#951
-        // WS4 review, medium 4) - without it, a warm-cache offline build
-        // could still reach the network here even though every other Cargo
-        // invocation in this same container run is genuinely offline.
-        if self.offline {
-            workspace_build.push_str(" --offline");
-        }
         let mut commands = Vec::new();
-        commands.extend(self.system_dependency_command());
-        commands.push(workspace_build);
+        if !self.workspace_packages.is_empty() {
+            let operands = self
+                .workspace_packages
+                .iter()
+                .map(|package| {
+                    format!(
+                        "--package {}",
+                        phoxal_cli_core::runtime::launch::shell_quote(package)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut workspace_build = format!(
+                "cargo build {operands} --locked --release --target {} --target-dir {CONTAINER_WORKDIR}/target",
+                phoxal_cli_core::runtime::launch::shell_quote(&self.target),
+            );
+            if self.offline {
+                workspace_build.push_str(" --offline");
+            }
+            commands.push(workspace_build);
+        }
         if !self.officials.is_empty() {
             let install_args = crate::build::materialise::build_install_args(
                 self.officials
@@ -385,7 +372,11 @@ impl ContainerBuildSpec {
                     .join(" "),
             );
         }
-        format!("set -e; {}", commands.join("; "))
+        if commands.is_empty() {
+            "set -e".to_string()
+        } else {
+            format!("set -e; {}", commands.join("; "))
+        }
     }
 }
 
@@ -410,6 +401,28 @@ pub fn run_engine(ui: &dyn crate::Reporter, invocation: &EngineInvocation) -> Re
         );
     }
     Ok(())
+}
+
+/// Execute an engine query without replaying its machine-readable stdout.
+/// Process-group isolation and missing-engine diagnostics match [`run_engine`].
+pub fn run_engine_output(invocation: &EngineInvocation) -> Result<std::process::Output> {
+    let output = crate::build::shell::run_output(&invocation.program, &invocation.args, None, None)
+        .with_context(|| {
+            format!(
+                "failed to start `{}` for the container build; is the engine installed?",
+                invocation.program
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "container query failed: `{} {}` exited with {}: {}",
+            invocation.program,
+            invocation.args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output)
 }
 
 /// The host Cargo registry and git cache directories, from `$CARGO_HOME` (or the
@@ -456,43 +469,22 @@ mod tests {
                     train: "0.41.7".to_string(),
                 },
             ],
+            workspace_packages: vec!["robot-service".to_string(), "robot-tool".to_string()],
             offline: false,
         }
     }
 
     #[test]
-    fn the_script_installs_system_build_dependencies_before_compiling() {
-        // Officials are compiled from source now, not mounted as prebuilt
-        // archives, so the image must be able to BUILD them. joypad's gilrs
-        // dependency needs libudev via pkg-config; without this the set fails
-        // part-way through with a pkg-config error that says nothing about
-        // Phoxal (organization#951 WS5, found by the first real cold build).
+    fn the_script_contains_no_apt_get() {
         let script = spec().container_script();
-        let apt = script
-            .find("apt-get install")
-            .expect("system build dependencies must be installed");
-        let build = script
-            .find("cargo build --workspace")
-            .expect("the workspace build must be in the script");
-        assert!(
-            apt < build,
-            "dependencies must be installed before any compilation: {script}"
-        );
-        assert!(script.contains("libudev-dev"), "{script}");
-        assert!(script.contains("pkg-config"), "{script}");
+        assert!(!script.contains("apt-get"), "{script}");
     }
 
     #[test]
-    fn an_offline_script_skips_the_apt_step() {
-        // apt-get cannot work without a network, and an offline build is by
-        // definition running on an image that already satisfied these.
-        let mut offline = spec();
-        offline.offline = true;
-        let script = offline.container_script();
-        assert!(
-            !script.contains("apt-get"),
-            "offline must not shell out to apt: {script}"
-        );
+    fn an_empty_workspace_set_omits_the_build_command() {
+        let mut empty = spec();
+        empty.workspace_packages.clear();
+        assert!(!empty.container_script().contains("cargo build"));
     }
 
     #[test]
@@ -572,9 +564,7 @@ mod tests {
         assert!(joined.contains("rust:1.88-bookworm"), "{joined}");
         // Native compilation for the target, with the locked lockfile enforced.
         assert!(
-            joined.contains(
-                "cargo build --workspace --locked --release --target aarch64-unknown-linux-gnu --target-dir /phoxal/src/target"
-            ),
+            joined.contains("cargo build --package robot-service --package robot-tool --locked --release --target aarch64-unknown-linux-gnu --target-dir /phoxal/src/target"),
             "{joined}"
         );
         // Every official installs, pinned to its exact train, into the
@@ -610,6 +600,19 @@ mod tests {
     }
 
     #[test]
+    fn offline_runs_the_container_with_no_network() {
+        let mut offline = spec();
+        offline.offline = true;
+        let invocation = offline.invocation();
+        assert!(invocation.args.starts_with(&[
+            "run".to_string(),
+            "--rm".to_string(),
+            "--network=none".to_string()
+        ]));
+        assert!(offline.container_script().contains("--offline"));
+    }
+
+    #[test]
     fn missing_caches_are_not_mounted() {
         let mut spec = spec();
         spec.cargo_registry = None;
@@ -622,7 +625,7 @@ mod tests {
         // The snapshot mount and cargo build survive.
         assert!(joined.contains(CONTAINER_WORKDIR), "{joined}");
         assert!(
-            joined.contains("cargo build --workspace --locked"),
+            joined.contains("cargo build --package robot-service --package robot-tool --locked"),
             "{joined}"
         );
     }
@@ -659,7 +662,7 @@ mod tests {
         let build_line = script
             .split("; ")
             .find(|line| line.starts_with("cargo build"))
-            .expect("the workspace build is the script's first command");
+            .expect("the selected workspace build is the script's first command");
         assert!(
             build_line.contains("--offline"),
             "workspace build line must itself carry --offline: {build_line}"
@@ -673,7 +676,7 @@ mod tests {
         let build_line = script
             .split("; ")
             .find(|line| line.starts_with("cargo build"))
-            .expect("the workspace build is the script's first command");
+            .expect("the selected workspace build is the script's first command");
         assert!(!build_line.contains("--offline"), "{build_line}");
     }
 
@@ -716,7 +719,7 @@ mod tests {
             "{joined}"
         );
         assert!(
-            joined.contains("cargo build --workspace --locked"),
+            joined.contains("cargo build --package robot-service --package robot-tool --locked"),
             "{joined}"
         );
     }

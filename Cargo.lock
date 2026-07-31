@@ -646,15 +646,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "concurrent-queue"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "console"
 version = "0.15.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1170,11 +1161,10 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -3032,9 +3022,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-api"
-version = "0.45.1"
+version = "0.45.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b02117acaf52a12b82e9afc145625b322069514cda02ee72ce73d5334fa644f"
+checksum = "1fc8ab9f63a3083391209b4d1e8482e4ca7bfdec4b5d9f19aec17dfb782d393f"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -3044,9 +3034,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bus"
-version = "0.45.1"
+version = "0.45.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d4fd70813b1a5245be122769afa42c6c6f0ad862ce3c1879d8734abfe3e0f1d"
+checksum = "5f938589eecb16e8a53797088fafb53f13fcd03a235b95eaee2d859573dabbc2"
 dependencies = [
  "libc",
  "phoxal-runtime-contract",
@@ -3124,7 +3114,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.11.0",
  "tempfile",
- "toml",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
@@ -3155,12 +3145,14 @@ dependencies = [
  "phoxal-model",
  "phoxal-runtime-contract",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tar",
  "tempfile",
  "tokio",
+ "toml 0.9.12+spec-1.1.0",
  "webots-proto",
 ]
 
@@ -3211,9 +3203,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.45.1"
+version = "0.45.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47c6cf74673c356001740ae23a903b11edc9bd1445284696885f0a57eef5fbaf"
+checksum = "e89c2f357fbd726a4ba41a08a5f1234526ddfa5cf68153a65e3138ef9943b704"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3224,9 +3216,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-manifest"
-version = "0.45.1"
+version = "0.45.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e26238ba25ab3c29d736dbcdc546befee56780aed1b4ecef00851305d09acde"
+checksum = "503e95720da9e764087798a4f9ad256d0494a68f993c4b6fcfdb92500b8cc17f"
 dependencies = [
  "anyhow",
  "phoxal-model",
@@ -3235,14 +3227,15 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "thiserror 2.0.19",
+ "toml 1.1.3+spec-1.1.0",
  "urdf-rs",
 ]
 
 [[package]]
 name = "phoxal-model"
-version = "0.45.1"
+version = "0.45.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8b9d9ddf50427009587f45a4741b0ac309e3b040f03592cb6ecddd65f1e2fe6"
+checksum = "ceaa08bf6c3a7e3399bc8f296f379536acb5fabd6e74f1f01e849c2b2b7f6e51"
 dependencies = [
  "serde",
  "serde_json",
@@ -3251,9 +3244,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-runtime-contract"
-version = "0.45.1"
+version = "0.45.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7108a9357742c53cd1a8f5d398db4775b34889ba055ddebcf189d21399d7c6d5"
+checksum = "45deea22024e279c5152550173d7a012a70cab427a88bbce39e29b6fc47f6954"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -4836,6 +4829,21 @@ dependencies = [
  "toml_parser",
  "toml_writer",
  "winnow 0.7.15",
+]
+
+[[package]]
+name = "toml"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c96ecdfa941c8fc4fcaed14f99ada8ebed502eef533015095a07e3301d4c3c"
+dependencies = [
+ "indexmap 2.14.0",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.4",
 ]
 
 [[package]]
