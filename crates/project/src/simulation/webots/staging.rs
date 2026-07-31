@@ -83,6 +83,14 @@ fn stage_compiled_geometry_assets(
     assets: &std::collections::BTreeMap<phoxal_manifest::AssetId, Vec<u8>>,
     mesh_root: &Path,
 ) -> Result<()> {
+    // Geometry staging runs before `stage_simulation_world`, while the fresh
+    // Webots tree contains only the parent `protos` directory.
+    std::fs::create_dir_all(mesh_root).with_context(|| {
+        format!(
+            "failed to create staged Webots mesh root {}",
+            mesh_root.display()
+        )
+    })?;
     let canonical_root = mesh_root
         .canonicalize()
         .context("failed to resolve staged Webots mesh root")?;
@@ -165,7 +173,68 @@ fn validate_unique_geometry_destinations<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::host::test_support::ScratchPhoxalHome;
     use phoxal_cli_core::project::resolver::CompiledBundle;
+
+    #[test]
+    fn creates_empty_mesh_root_after_webots_tree_recreation() -> Result<()> {
+        let _home = ScratchPhoxalHome::new()?;
+        root::wipe_and_recreate()?;
+        let mesh_root = root::meshes_dir()?;
+        assert!(!mesh_root.exists());
+
+        let source = tempfile::tempdir()?;
+        let component = source.path().join("components/wheel");
+        std::fs::create_dir_all(&component)?;
+        std::fs::write(
+            source.path().join("robot.yaml"),
+            r#"schema: robot/v0
+robot:
+  id: asset-free
+  namespace: dev
+  structure: structure.urdf
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: [wheel.motor]
+    encoders: []
+  components:
+    wheel:
+      component: wheel
+      mount_link: base_link
+"#,
+        )?;
+        std::fs::write(
+            source.path().join("structure.urdf"),
+            r#"<robot name="asset-free"><link name="base_footprint"/><link name="base_link"><visual><geometry><box size="0.3 0.2 0.08"/></geometry></visual></link><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
+        )?;
+        std::fs::write(
+            component.join("component.yaml"),
+            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+        )?;
+        std::fs::write(
+            component.join("structure.urdf"),
+            r#"<robot name="wheel"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
+        )?;
+        let compiled =
+            CompiledBundle::from_project(phoxal_manifest::compile(phoxal_manifest::SourceSet {
+                project_root: source.path().to_path_buf(),
+                robot_manifest: source.path().join("robot.yaml"),
+                component_roots: std::collections::BTreeMap::from([(
+                    "wheel".to_string(),
+                    component,
+                )]),
+            })?)?;
+        let robot = compiled.decode_robot()?;
+
+        stage_compiled_geometry_assets(&robot, &compiled.assets, &mesh_root)?;
+
+        assert!(mesh_root.is_dir());
+        assert_eq!(std::fs::read_dir(&mesh_root)?.count(), 0);
+        Ok(())
+    }
 
     #[test]
     fn stages_referenced_geometry_outside_the_legacy_mesh_prefix() -> Result<()> {
@@ -235,10 +304,12 @@ robot:
             .replace("meshes/robot/geometry/body.stl", "geometry/body.stl");
         compiled.robot = canonical.into_bytes();
         let robot = compiled.decode_robot()?;
-        let mesh_root = tempfile::tempdir()?;
-        stage_compiled_geometry_assets(&robot, &compiled.assets, mesh_root.path())?;
+        let destination = tempfile::tempdir()?;
+        let mesh_root = destination.path().join("protos/meshes");
+        assert!(!mesh_root.exists());
+        stage_compiled_geometry_assets(&robot, &compiled.assets, &mesh_root)?;
         assert_eq!(
-            std::fs::read(mesh_root.path().join("geometry/body.stl"))?,
+            std::fs::read(mesh_root.join("geometry/body.stl"))?,
             b"solid body\nendsolid body\n"
         );
         Ok(())
