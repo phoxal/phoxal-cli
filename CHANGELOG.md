@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.29.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.29.2) - 2026-07-31
+
+
+### Fixed
+
+- *(simulation)* Create the staged mesh root ([#261](https://github.com/phoxal/phoxal-cli/pull/261))
+
+
 ## [0.29.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.29.1) - 2026-07-31
 
 
