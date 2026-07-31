@@ -4,7 +4,7 @@ pub use model::OverviewModel;
 
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::{Constraint, Direction, Layout, Rect};
-use tuirealm::ratatui::widgets::{Block, Borders, Paragraph};
+use tuirealm::ratatui::widgets::Paragraph;
 
 use crate::Theme;
 use crate::app::AppModel;
@@ -73,8 +73,10 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         },
     );
     frame.render_widget(
-        Paragraph::new(status_text)
-            .block(Block::default().title(" Project ").borders(Borders::ALL)),
+        Paragraph::new(status_text).block(crate::components::shared::outer_panel_block(
+            " Project ",
+            theme,
+        )),
         status,
     );
     let stale = model
@@ -116,7 +118,9 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     frame.render_widget(
         Paragraph::new(health_text)
             .style(crate::theme::role::fg(theme, crate::Role::Steel))
-            .block(Block::default().title(" Health ").borders(Borders::ALL)),
+            .block(crate::components::shared::outer_panel_block(
+                " Health ", theme,
+            )),
         health,
     );
     let diagnostic_text = model
@@ -135,11 +139,10 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         } else {
             diagnostic_text
         })
-        .block(
-            Block::default()
-                .title(" Diagnostics ")
-                .borders(Borders::ALL),
-        ),
+        .block(crate::components::shared::outer_panel_block(
+            " Diagnostics ",
+            theme,
+        )),
         diagnostics,
     );
 }

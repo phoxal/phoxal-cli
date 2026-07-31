@@ -106,16 +106,50 @@ pub fn panel_block<'a>(
     title: &'a str,
     theme: Theme,
 ) -> tuirealm::ratatui::widgets::Block<'a> {
-    use tuirealm::ratatui::widgets::{Block, Borders};
-
     let marker = panel_marker(model, panel);
     let focused = marker != " ";
+    outer_panel_block(format!("{marker} {title}"), theme).border_style(if focused {
+        crate::theme::role::fg(theme, crate::Role::Accent)
+    } else {
+        crate::theme::role::muted(theme)
+    })
+}
+
+#[must_use]
+pub fn outer_panel_block<'a>(
+    title: impl Into<tuirealm::ratatui::text::Line<'a>>,
+    theme: Theme,
+) -> tuirealm::ratatui::widgets::Block<'a> {
+    use tuirealm::ratatui::widgets::{Block, BorderType, Borders};
+
     Block::default()
         .borders(Borders::ALL)
-        .title(format!("{marker} {title}"))
-        .border_style(if focused {
-            crate::theme::role::fg(theme, crate::Role::Accent)
-        } else {
-            crate::theme::role::muted(theme)
-        })
+        .border_type(BorderType::Rounded)
+        .title(title)
+        .border_style(crate::theme::role::muted(theme))
+}
+
+#[cfg(test)]
+mod border_tests {
+    use super::*;
+    use tuirealm::ratatui::Terminal;
+    use tuirealm::ratatui::backend::TestBackend;
+
+    #[test]
+    fn centralized_outer_panel_uses_all_rounded_corners() {
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    outer_panel_block(" Panel ", Theme::new(crate::ColorCapability::None)),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "╭");
+        assert_eq!(buffer[(19, 0)].symbol(), "╮");
+        assert_eq!(buffer[(0, 4)].symbol(), "╰");
+        assert_eq!(buffer[(19, 4)].symbol(), "╯");
+    }
 }
