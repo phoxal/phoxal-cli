@@ -6,3 +6,5 @@ pub(crate) mod shell;
 mod use_case;
 
 pub(crate) use use_case::build_bundle;
+#[cfg(test)]
+pub(crate) use use_case::resolve_container_staging;
