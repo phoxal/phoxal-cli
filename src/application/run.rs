@@ -223,6 +223,7 @@ pub(crate) async fn build_command(
         ProjectOperation::Build,
     ))
     .context("failed to acquire the project lock for build")?;
+    remove_obsolete_component_state(&target.logical_root)?;
     let (reporter, signal_task) =
         crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
     let built = phoxal_cli_project::build_bundle(phoxal_cli_project::BuildBundleRequest {
@@ -242,6 +243,7 @@ pub(crate) async fn validate_command(
     app: &AppContext,
 ) -> Result<phoxal_cli_project::ValidationReport> {
     let target = phoxal_cli_project::resolve_target(None, app.project.root())?;
+    clean_obsolete_component_state_for_validation(&target.logical_root)?;
     let (reporter, signal_task) =
         crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
     let report = phoxal_cli_project::validate(phoxal_cli_project::ValidateRequest {
@@ -252,6 +254,98 @@ pub(crate) async fn validate_command(
     .await;
     signal_task.abort();
     report
+}
+
+/// Remove retired generated state after the caller holds a project-operation
+/// lock. Resolution may populate the verified registry cache, so command
+/// adapters own this migration rather than library resolution.
+fn remove_obsolete_component_state(project_root: &std::path::Path) -> Result<()> {
+    for obsolete in [
+        project_root.join(".phoxal/resolve"),
+        project_root.join(".phoxal/cache/build-metadata"),
+    ] {
+        if !obsolete.exists() {
+            continue;
+        }
+        std::fs::remove_dir_all(&obsolete).with_context(|| {
+            format!(
+                "failed to remove obsolete generated state {}",
+                obsolete.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn obsolete_component_state_exists(project_root: &std::path::Path) -> bool {
+    [".phoxal/resolve", ".phoxal/cache/build-metadata"]
+        .iter()
+        .any(|relative| project_root.join(relative).exists())
+}
+
+/// Validation is read-only after the one-time migration. Only the migration
+/// needs exclusive ownership, so a live robot may still be validated once its
+/// retired generated directories are gone.
+fn clean_obsolete_component_state_for_validation(project_root: &std::path::Path) -> Result<()> {
+    if !obsolete_component_state_exists(project_root) {
+        return Ok(());
+    }
+    let _lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
+        project_root,
+        ProjectOperation::Validate,
+    ))
+    .context("validation can run during a robot execution, but legacy generated state must be cleaned first; stop the active operation or remove only the retired .phoxal/resolve and .phoxal/cache/build-metadata directories")?;
+    remove_obsolete_component_state(project_root)
+}
+
+#[cfg(test)]
+mod obsolete_component_state_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_removes_all_obsolete_component_state() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let obsolete = project.path().join(".phoxal/resolve");
+        let obsolete_metadata = project.path().join(".phoxal/cache/build-metadata");
+        let neighbor = project.path().join(".phoxal/cache/registry");
+        std::fs::create_dir_all(&obsolete)?;
+        std::fs::create_dir_all(&obsolete_metadata)?;
+        std::fs::create_dir_all(&neighbor)?;
+        std::fs::write(obsolete.join("old"), "obsolete")?;
+        std::fs::write(obsolete_metadata.join("old"), "obsolete")?;
+        std::fs::write(neighbor.join("keep"), "cached")?;
+
+        remove_obsolete_component_state(project.path())?;
+
+        assert!(!obsolete.exists());
+        assert!(!obsolete_metadata.exists());
+        assert!(!obsolete_component_state_exists(project.path()));
+        assert_eq!(std::fs::read_to_string(neighbor.join("keep"))?, "cached");
+        Ok(())
+    }
+
+    #[test]
+    fn validation_migration_does_not_lock_a_running_project_without_obsolete_state() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let _run = ProjectLock::acquire(ProjectLockIdentity::resolve(
+            project.path(),
+            ProjectOperation::Run,
+        ))?;
+        clean_obsolete_component_state_for_validation(project.path())?;
+
+        std::fs::create_dir_all(project.path().join(".phoxal/resolve"))?;
+        let error = clean_obsolete_component_state_for_validation(project.path())
+            .expect_err("the one-time cleanup must not race a live run");
+        assert!(
+            error.to_string().contains("legacy generated state"),
+            "{error:#}"
+        );
+        assert!(
+            error.to_string().contains("stop the active operation"),
+            "{error:#}"
+        );
+        Ok(())
+    }
 }
 
 async fn launch_client(
@@ -434,6 +528,7 @@ async fn resident_supervision_inner(
     let identity = ProjectLockIdentity::resolve(&project_root, ProjectOperation::Run)
         .in_execution(run.execution());
     let _lock = ProjectLock::acquire(identity)?;
+    remove_obsolete_component_state(&project_root)?;
     let runtime_target = phoxal_cli_project::resolve_target(Some(&project_root), &project_root)?;
     let board = SupervisorState::new();
     board.configure(
@@ -2225,6 +2320,7 @@ mod deployment {
                 ),
             )
             .context("failed to acquire the project lock for deploy")?;
+            super::remove_obsolete_component_state(&target.logical_root)?;
             let (reporter, signal_task) =
                 crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
             let built = phoxal_cli_project::build_bundle(phoxal_cli_project::BuildBundleRequest {

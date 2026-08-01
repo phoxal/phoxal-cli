@@ -13,6 +13,7 @@ mod load;
 mod paths;
 mod progress;
 pub mod registry;
+mod registry_package;
 mod resolve;
 mod run;
 mod simulation;

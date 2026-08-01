@@ -22,9 +22,12 @@ fn locked_project_root() -> anyhow::Result<tempfile::TempDir> {
     std::fs::write(root.path().join("train/phoxal/src/lib.rs"), "")?;
     std::fs::write(
         root.path().join("components/fixture/Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"fixture\"\npath = \"src/main.rs\"\n",
     )?;
-    std::fs::write(root.path().join("components/fixture/src/lib.rs"), "")?;
+    std::fs::write(
+        root.path().join("components/fixture/src/main.rs"),
+        "fn main() {}",
+    )?;
     std::fs::write(
         root.path().join("components/fixture/component.yaml"),
         "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
@@ -166,6 +169,7 @@ fn container_resolution_compiles_once_and_rejects_profile_drift() -> anyhow::Res
 
     let mut resolved = crate::build::resolve_container_staging(
         project.path(),
+        &project.path().join(".phoxal/cache/registry"),
         "aarch64-unknown-linux-gnu",
         false,
         &reporter,
@@ -205,6 +209,113 @@ fn container_resolution_compiles_once_and_rejects_profile_drift() -> anyhow::Res
     assert_eq!(
         compile_phases, 1,
         "container package selection must produce one manifest compilation"
+    );
+    Ok(())
+}
+
+#[test]
+fn container_snapshot_uses_the_live_registry_cache_for_components_and_metadata()
+-> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use sha2::{Digest, Sha256};
+
+    struct NoHttp(AtomicUsize);
+    impl crate::registry_package::RegistryHttp for NoHttp {
+        fn get(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("offline cache unexpectedly requested {url}")
+        }
+    }
+
+    let _phoxal_home = ScratchPhoxalHome::new()?;
+    let robot = minimal_robot_with_components(
+        r#"
+    left_drive:
+      component: wheel
+      mount_link: base
+"#,
+        "",
+    )?;
+    let snapshot = locked_project_root()?;
+    phoxal_manifest::source::robot::write_to_dir(&robot, snapshot.path())?;
+    std::fs::write(
+        snapshot.path().join("structure.urdf"),
+        r#"<robot name="fixture"><link name="base_footprint"/><link name="base_link"/><link name="base"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="base_mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
+    )?;
+
+    let live = tempfile::tempdir()?;
+    let cache_root = live.path().join(".phoxal/cache/registry");
+    let package = phoxal_cli_core::project::catalog::cargo_package_name("phoxal/component-wheel");
+    let version = "0.1.0";
+    let manifest = format!(
+        "[package]\nname = {package:?}\nversion = {version:?}\n\n[[bin]]\nname = {package:?}\npath = \"src/main.rs\"\n"
+    );
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    for (path, bytes) in [
+        ("Cargo.toml", manifest.as_bytes()),
+        ("src/main.rs", b"fn main() {}" as &[u8]),
+        ("component.yaml", b"schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n" as &[u8]),
+        ("structure.urdf", br#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"# as &[u8]),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive.append_data(
+            &mut header,
+            format!("{package}-{version}/{path}"),
+            bytes,
+        )?;
+    }
+    let bytes = archive.into_inner()?.finish()?;
+    let checksum = hex::encode(Sha256::digest(&bytes));
+    let cache_dir = cache_root.join(&package).join(version);
+    std::fs::create_dir_all(&cache_dir)?;
+    std::fs::write(cache_dir.join(format!("{checksum}.crate")), bytes)?;
+
+    let reporter = RecordingReporter::default();
+    let resolved = crate::build::resolve_container_staging(
+        snapshot.path(),
+        &cache_root,
+        "aarch64-unknown-linux-gnu",
+        true,
+        &reporter,
+    )?;
+    assert_eq!(resolved.resolved().components.len(), 1);
+    assert!(
+        resolved.resolved().components[0]
+            .assets_root
+            .starts_with(&cache_root)
+    );
+    assert!(!snapshot.path().join(".phoxal/cache/registry").exists());
+
+    let no_http = NoHttp(AtomicUsize::new(0));
+    let metadata_cache = crate::registry_package::PackageCache::new(cache_root.clone());
+    assert!(
+        crate::registry_package::fetch_registry_package(
+            &no_http,
+            &metadata_cache,
+            &package,
+            version,
+            true,
+        )?
+        .manifest()?
+        .contains(&package)
+    );
+    assert_eq!(no_http.0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read_dir(&cache_dir)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "crate"))
+            .count(),
+        1
     );
     Ok(())
 }
@@ -405,25 +516,361 @@ fn a_workspace_component_resolves_its_assets_and_driver_without_the_registry() -
     let resolved = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
     assert_eq!(resolved.components.len(), 1);
     let component = &resolved.components[0];
-    assert_eq!(
-        component.assets.resolved_dir.as_deref(),
-        Some(crate_dir.as_path())
-    );
-    assert_eq!(
-        component.assets.source,
-        ResolvedComponentSource::Path {
-            path: crate_dir.clone()
-        }
-    );
+    assert_eq!(component.assets_root, crate_dir);
     let driver = component.driver.as_ref().expect("driver resolved");
-    assert_eq!(driver.resolved_dir.as_deref(), Some(crate_dir.as_path()));
+    assert_eq!(driver.source_path(), Some(crate_dir.as_path()));
+    Ok(())
+}
+
+#[test]
+fn local_component_roots_are_independent_of_driver_intent() -> anyhow::Result<()> {
+    let _phoxal_home = ScratchPhoxalHome::new()?;
+    let driverless_robot = minimal_robot_with_components(
+        r#"
+    left_drive:
+      component: fixture
+      mount_link: base
+"#,
+        "",
+    )?;
+    let driver_project = locked_project_root()?;
+    let resolved = resolve_fixture(
+        &driverless_robot,
+        driver_project.path(),
+        ResolveOptions::default(),
+    )?;
+    assert_eq!(resolved.components.len(), 1);
+    assert!(resolved.components[0].driver.is_none());
+    assert_eq!(
+        resolved.components[0].assets_root,
+        driver_project
+            .path()
+            .join("components/fixture")
+            .canonicalize()?
+    );
+
+    let asset_only_project = locked_project_root()?;
+    let fixture = asset_only_project.path().join("components/fixture");
+    std::fs::remove_file(fixture.join("Cargo.toml"))?;
+    std::fs::remove_dir_all(fixture.join("src"))?;
+    std::fs::write(
+        asset_only_project.path().join("Cargo.toml"),
+        "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\nmembers = [\".\"]\nresolver = \"2\"\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
+    )?;
+    let declared_driver_robot = minimal_robot_with_components(
+        r#"
+    left_drive:
+      component: fixture
+      mount_link: base
+      driver:
+        connection:
+          type: serial
+          port: /dev/ttyUSB0
+          baud: 115200
+"#,
+        "",
+    )?;
+    let error = resolve_fixture(
+        &declared_driver_robot,
+        asset_only_project.path(),
+        ResolveOptions::default(),
+    )
+    .expect_err("a local asset-only override must not fall through to the registry");
+    assert!(error.to_string().contains("asset-only"), "{error:#}");
+    Ok(())
+}
+
+#[test]
+fn direct_component_scan_distinguishes_asset_only_and_invalid_driver_shapes() -> anyhow::Result<()>
+{
+    let project = locked_project_root()?;
+    let fixture = project.path().join("components/fixture");
+    let package =
+        |bins: &[&str], has_library| phoxal_cli_core::project::train::WorkspaceComponentCrate {
+            manifest_path: fixture.join("Cargo.toml").canonicalize().unwrap(),
+            crate_dir: fixture.canonicalize().unwrap(),
+            binary_names: bins.iter().map(|name| (*name).to_string()).collect(),
+            has_library,
+        };
+    std::fs::remove_file(fixture.join("Cargo.toml"))?;
+    std::fs::remove_dir_all(fixture.join("src"))?;
+    let discovered = discover_local_components_from_locked(project.path(), &[])?;
+    assert!(discovered["fixture"].driver_crate.is_none());
+
+    std::fs::create_dir_all(fixture.join("src"))?;
+    std::fs::write(fixture.join("src/lib.rs"), "")?;
+    let error = discover_local_components_from_locked(project.path(), &[])
+        .expect_err("assets with source but no Cargo.toml are invalid");
+    assert!(error.to_string().contains("asset-only"), "{error:#}");
+
+    std::fs::write(
+        fixture.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+    )?;
+    let error = discover_local_components_from_locked(project.path(), &[])
+        .expect_err("lib-only component driver is invalid");
+    assert!(
+        error.to_string().contains("obsolete anchor/assets crate"),
+        "{error:#}"
+    );
+
+    std::fs::write(fixture.join("src/main.rs"), "fn main() {}")?;
+    std::fs::create_dir_all(fixture.join("src/bin"))?;
+    std::fs::write(fixture.join("src/bin/extra.rs"), "fn main() {}")?;
+    let error = discover_local_components_from_locked(
+        project.path(),
+        &[package(&["fixture", "extra"], false)],
+    )
+    .expect_err("a driver must have exactly one binary and no library");
+    assert!(
+        error.to_string().contains("exactly one binary"),
+        "{error:#}"
+    );
+
+    std::fs::remove_file(fixture.join("src/bin/extra.rs"))?;
+
+    std::fs::write(
+        fixture.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\ncrate-type = [\"cdylib\"]\n\n[[bin]]\nname = \"fixture\"\npath = \"src/main.rs\"\n",
+    )?;
+    let error =
+        discover_local_components_from_locked(project.path(), &[package(&["fixture"], true)])
+            .expect_err("mixed library and driver targets are invalid");
+    assert!(
+        error.to_string().contains("must not define a library"),
+        "{error:#}"
+    );
+
+    std::fs::remove_file(fixture.join("src/lib.rs"))?;
+    std::fs::write(
+        fixture.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"fixture\"\npath = \"src/main.rs\"\n",
+    )?;
+    let missing = project.path().join("components/missing");
+    std::fs::create_dir_all(&missing)?;
+    let error =
+        discover_local_components_from_locked(project.path(), &[package(&["fixture"], false)])
+            .expect_err("every direct component needs component.yaml");
+    assert!(
+        error.to_string().contains("missing component.yaml"),
+        "{error:#}"
+    );
+    std::fs::remove_dir_all(&missing)?;
+
+    let nonmember = project.path().join("components/nonmember");
+    std::fs::create_dir_all(nonmember.join("src"))?;
+    std::fs::write(nonmember.join("component.yaml"), "schema: component/v0\n")?;
+    std::fs::write(
+        nonmember.join("Cargo.toml"),
+        "[package]\nname = \"nonmember\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"nonmember\"\npath = \"src/main.rs\"\n",
+    )?;
+    std::fs::write(nonmember.join("src/main.rs"), "fn main() {}")?;
+    let error =
+        discover_local_components_from_locked(project.path(), &[package(&["fixture"], false)])
+            .expect_err("a local driver must join a locked workspace");
+    assert!(error.to_string().contains("workspace.members"), "{error:#}");
+    Ok(())
+}
+
+#[test]
+fn direct_component_driver_requires_the_root_locked_workspace() -> anyhow::Result<()> {
+    let project = locked_project_root()?;
+    std::fs::remove_file(project.path().join("Cargo.lock"))?;
+    let error = discover_local_components(project.path(), false)
+        .expect_err("member driver needs the root lock");
+    assert!(
+        error.to_string().contains("missing committed Cargo.lock"),
+        "{error:#}"
+    );
+
+    let standalone = tempfile::tempdir()?;
+    let component = standalone.path().join("components/standalone");
+    std::fs::create_dir_all(component.join("src"))?;
+    std::fs::write(component.join("component.yaml"), "schema: component/v0\n")?;
+    std::fs::write(
+        component.join("Cargo.toml"),
+        "[package]\nname = \"standalone\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[[bin]]\nname = \"standalone\"\npath = \"src/main.rs\"\n",
+    )?;
+    std::fs::write(component.join("src/main.rs"), "fn main() {}")?;
+    let error = discover_local_components(standalone.path(), true)
+        .expect_err("standalone drivers are not container-buildable");
+    assert!(error.to_string().contains("root Cargo.toml"), "{error:#}");
+    std::fs::write(component.join("Cargo.lock"), "version = 4\n")?;
+    let error = discover_local_components(standalone.path(), true)
+        .expect_err("a standalone lock must not restore standalone driver support");
+    assert!(error.to_string().contains("root Cargo.toml"), "{error:#}");
+    Ok(())
+}
+
+#[test]
+fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_driver_assets()
+-> anyhow::Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use sha2::Digest;
+
+    struct Http {
+        responses: BTreeMap<String, Vec<u8>>,
+        downloads: AtomicUsize,
+    }
+    impl crate::registry_package::RegistryHttp for Http {
+        fn get(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+            if url.contains("download.invalid") {
+                self.downloads.fetch_add(1, Ordering::SeqCst);
+            }
+            self.responses
+                .get(url)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("unexpected fake URL {url}"))
+        }
+    }
+    fn archive(package: &str, version: &str) -> anyhow::Result<Vec<u8>> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        let manifest = format!(
+            "[package]\nname = {package:?}\nversion = {version:?}\n\n[[bin]]\nname = {package:?}\npath = \"src/main.rs\"\n"
+        );
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        for (path, bytes) in [
+            ("Cargo.toml", manifest.as_bytes()),
+            ("src/main.rs", b"fn main() {}" as &[u8]),
+            ("component.yaml", b"schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n" as &[u8]),
+            ("structure.urdf", br#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"# as &[u8]),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, format!("{package}-{version}/{path}"), bytes)?;
+        }
+        Ok(tar.into_inner()?.finish()?)
+    }
+
+    let version = "0.1.0";
+    let base = "https://phoxal.github.io/registry";
+    let mut responses = BTreeMap::from([(
+        format!("{base}/config.json"),
+        br#"{"dl":"https://download.invalid/{lowerprefix}/{crate}/{version}.crate"}"#.to_vec(),
+    )]);
+    for id in ["left", "right"] {
+        let package = phoxal_cli_core::project::catalog::cargo_package_name(&format!(
+            "phoxal/component-{id}"
+        ));
+        let bytes = archive(&package, version)?;
+        let checksum = hex::encode(sha2::Sha256::digest(&bytes));
+        let index = crate::registry_package::index_path(&package)?;
+        responses.insert(
+            format!("{base}/{index}"),
+            format!(r#"{{"vers":"{version}","cksum":"{checksum}"}}"#).into_bytes(),
+        );
+        let prefix = index.rsplit_once('/').unwrap().0;
+        responses.insert(
+            format!("https://download.invalid/{prefix}/{package}/{version}.crate"),
+            bytes,
+        );
+    }
+    let http = Http {
+        responses,
+        downloads: AtomicUsize::new(0),
+    };
+    let cache_root = tempfile::tempdir()?;
+    let cache = crate::registry_package::PackageCache::new(cache_root.path().to_path_buf());
+    let ids = BTreeSet::from(["left".to_string(), "right".to_string()]);
+    let roots = resolve_registry_component_roots(&ids, &http, &cache, version, false)?;
+    assert_eq!(roots.len(), 2);
+    assert_eq!(http.downloads.load(Ordering::SeqCst), 2);
+    let repeated = resolve_registry_component_roots(&ids, &http, &cache, version, false)?;
+    assert_eq!(repeated, roots);
+    assert_eq!(http.downloads.load(Ordering::SeqCst), 2);
+
+    let project = locked_project_root()?;
+    let project_cache =
+        crate::registry_package::PackageCache::new(project.path().join(".phoxal/cache/registry"));
+    let one_id = BTreeSet::from(["left".to_string()]);
+    resolve_registry_component_roots(&one_id, &http, &project_cache, version, false)?;
+    let robot = minimal_robot_with_components(
+        r#"
+    left_drive:
+      component: left
+      mount_link: base
+      driver:
+        connection:
+          type: serial
+          port: /dev/ttyUSB0
+          baud: 115200
+"#,
+        "",
+    )?;
+    phoxal_manifest::source::robot::write_to_dir(&robot, project.path())?;
+    std::fs::write(
+        project.path().join("structure.urdf"),
+        r#"<robot name="fixture"><link name="base_footprint"/><link name="base_link"/><link name="base"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="base_mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
+    )?;
+    let resolved = resolve(
+        &robot,
+        project.path(),
+        ResolveOptions {
+            offline: true,
+            drivers: phoxal_cli_core::project::layout::DriverSelection::None,
+            ..Default::default()
+        },
+    )?;
+    let excluded = &resolved.components[0];
+    assert!(excluded.assets_root.join("component.yaml").is_file());
+    assert!(excluded.driver.is_none());
+    assert!(
+        resolved.source_manifest.robot.components["left_drive"]
+            .driver
+            .is_some()
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_component_directory_symlinks_are_rejected() -> anyhow::Result<()> {
+    let project = locked_project_root()?;
+    let external = tempfile::tempdir()?;
+    std::fs::write(
+        external.path().join("component.yaml"),
+        "schema: component/v0\n",
+    )?;
+    std::os::unix::fs::symlink(external.path(), project.path().join("components/external"))?;
+    let error = discover_local_components(project.path(), false)
+        .expect_err("external component source must not enter through a symlink");
+    assert!(
+        error.to_string().contains("must not be a symlink"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn components_root_symlink_is_rejected() -> anyhow::Result<()> {
+    let project = locked_project_root()?;
+    let external = tempfile::tempdir()?;
+    std::fs::remove_dir_all(project.path().join("components"))?;
+    std::os::unix::fs::symlink(external.path(), project.path().join("components"))?;
+    let error = discover_local_components_from_locked(project.path(), &[])
+        .expect_err("the components root must stay under the project");
+    assert!(
+        error.to_string().contains("components directory"),
+        "{error:#}"
+    );
+    assert!(
+        error.to_string().contains("must not be a symlink"),
+        "{error:#}"
+    );
     Ok(())
 }
 
 /// The driver policy gates resolution itself (#936): an excluded driver
-/// instance keeps `has_driver: true` (the declared intent) but resolves no
-/// driver package at all, so nothing downstream ever requires, builds, or
-/// installs a binary for it.
+/// instance resolves no driver package at all, so nothing downstream ever
+/// requires, builds, or installs a binary for it. Authored intent remains on
+/// `source_manifest` for reporting.
 #[test]
 fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
     let _phoxal_home = ScratchPhoxalHome::new()?;
@@ -461,7 +908,12 @@ fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
         },
     )?;
     let component = &resolved.components[0];
-    assert!(component.has_driver, "declared intent is preserved");
+    assert!(
+        resolved.source_manifest.robot.components["left_drive"]
+            .driver
+            .is_some(),
+        "declared intent is preserved"
+    );
     assert!(
         component.driver.is_none(),
         "an excluded driver resolves no package at all"

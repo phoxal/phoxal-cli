@@ -1,12 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use phoxal_cli_core::project::catalog::{self, ArtifactKind};
 pub use phoxal_cli_core::project::host_target_triple;
-use phoxal_cli_core::project::resolve_manifest::{
-    ComponentDependency, resolve_manifest_package_dirs, write_resolve_manifest,
-};
 use phoxal_cli_core::project::tooling::hash_tree;
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 
@@ -14,20 +12,18 @@ use phoxal_manifest::source::robot::v0::Manifest as Robot;
 const PHOXAL_PROVIDER: &str = "phoxal";
 
 use phoxal_cli_core::project::resolver::{
-    BundlePlan, CompiledBundle, ResolveOptions, ResolvedComponent, ResolvedComponentPackage,
-    ResolvedComponentSource, ResolvedPathOverride, ResolvedPathOverrideKind,
-    ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, UndeclaredRuntime,
-    official_binary_name,
+    BundlePlan, CompiledBundle, ResolveOptions, ResolvedComponent, ResolvedComponentDriver,
+    ResolvedPathOverride, ResolvedPathOverrideKind, ResolvedPlatformRuntime, ResolvedTool,
+    ResolvedUserRuntime, UndeclaredRuntime, official_binary_name,
 };
 
 /// Resolve a robot manifest against the CLI-internal official catalog
 /// (organization#951 WS4): no suite fetch, no vendored artifact store. Every
 /// official service, tool, the infrastructure router, and every component
 /// driver package materializes later via `cargo install` at exactly the
-/// locked framework train; official component *assets* resolve their
-/// on-disk directory via the generated `.phoxal/resolve/Cargo.toml` and
-/// `cargo metadata` here, so the manifest compiler receives the exact component
-/// source root without learning Cargo or registry policy.
+/// locked framework train; component assets resolve directly from authored
+/// directories or the checked sparse package cache, so the manifest compiler
+/// receives the exact source root without learning Cargo or registry policy.
 #[cfg(test)]
 pub fn resolve(robot: &Robot, project_root: &Path, options: ResolveOptions) -> Result<BundlePlan> {
     resolve_with_train(robot, project_root, options, |_| {})
@@ -39,13 +35,38 @@ pub(crate) fn resolve_with_train(
     options: ResolveOptions,
     resolved_train: impl FnOnce(&str),
 ) -> Result<BundlePlan> {
+    resolve_with_train_using_registry_cache(
+        robot,
+        project_root,
+        &project_root.join(".phoxal/cache/registry"),
+        options,
+        resolved_train,
+    )
+}
+
+/// Resolve a frozen source tree while keeping immutable registry archives in
+/// the live project's operational cache. Container snapshots are source
+/// inputs, never cache owners.
+pub(crate) fn resolve_with_train_using_registry_cache(
+    robot: &Robot,
+    project_root: &Path,
+    registry_cache_root: &Path,
+    options: ResolveOptions,
+    resolved_train: impl FnOnce(&str),
+) -> Result<BundlePlan> {
     // Declaration invariants are the very first check (#950): an invalid
     // workspace lock must not mask a dual/official declaration error.
     phoxal_cli_core::project::layout::validate_runtime_declarations(robot)?;
     let project =
         phoxal_cli_core::project::train::resolve_locked_project(project_root, options.offline)?;
     resolved_train(&project.train.version);
-    resolve_with_locked_project(robot, project_root, options, &project)
+    resolve_with_locked_project_using_registry_cache(
+        robot,
+        project_root,
+        registry_cache_root,
+        options,
+        &project,
+    )
 }
 
 /// Resolve against a locked workspace the caller has already loaded. `check`
@@ -54,6 +75,22 @@ pub(crate) fn resolve_with_train(
 pub(crate) fn resolve_with_locked_project(
     robot: &Robot,
     project_root: &Path,
+    options: ResolveOptions,
+    project: &phoxal_cli_core::project::train::LockedProject,
+) -> Result<BundlePlan> {
+    resolve_with_locked_project_using_registry_cache(
+        robot,
+        project_root,
+        &project_root.join(".phoxal/cache/registry"),
+        options,
+        project,
+    )
+}
+
+pub(crate) fn resolve_with_locked_project_using_registry_cache(
+    robot: &Robot,
+    project_root: &Path,
+    registry_cache_root: &Path,
     options: ResolveOptions,
     project: &phoxal_cli_core::project::train::LockedProject,
 ) -> Result<BundlePlan> {
@@ -94,14 +131,17 @@ pub(crate) fn resolve_with_locked_project(
         Vec::new()
     };
 
-    let mut components = resolve_components(
+    let components = resolve_components(
         robot,
-        project_root,
-        &train,
-        &target,
-        &project.runtimes,
-        &options.drivers,
-        options.offline,
+        ComponentResolutionContext {
+            project_root,
+            registry_cache_root,
+            train: &train,
+            target: &target,
+            drivers: &options.drivers,
+            local_packages: &project.local_components,
+            offline: options.offline,
+        },
     )?;
 
     let mut tools = catalog::NATIVE
@@ -122,23 +162,13 @@ pub(crate) fn resolve_with_locked_project(
         &project.runtimes,
         &mut platform_runtimes,
         &mut simulators,
-        &mut components,
         &mut tools,
-        &options.drivers,
     )?;
 
     let component_roots = components
         .iter()
-        .map(|component| {
-            let root = component.assets.path_override().with_context(|| {
-                format!(
-                    "resolved component '{}' has no compiler asset root",
-                    component.source_name
-                )
-            })?;
-            Ok((component.source_name.clone(), root.to_path_buf()))
-        })
-        .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+        .map(|component| (component.source_name.clone(), component.assets_root.clone()))
+        .collect::<BTreeMap<_, _>>();
     let robot_manifest = project_root.join("robot.yaml");
     let compiled = CompiledBundle::from_project(
         phoxal_manifest::compile(phoxal_manifest::SourceSet {
@@ -203,156 +233,257 @@ fn short_name(package: &str, kind: ArtifactKind) -> String {
         ArtifactKind::Tool => "phoxal/tool-",
         ArtifactKind::Simulator => "phoxal/simulator-",
         ArtifactKind::Infrastructure => "phoxal/infrastructure-",
-        ArtifactKind::ComponentAssets | ArtifactKind::ComponentDriver => "phoxal/component-",
+        ArtifactKind::ComponentDriver => "phoxal/component-",
     };
     package.strip_prefix(prefix).unwrap_or(package).to_string()
 }
 
-/// Resolve every `robot.components.<instance>` entry. A component whose id
-/// matches a `components/` workspace crate resolves from that crate; every
-/// other component resolves its assets directory from the registry via the
-/// generated `.phoxal/resolve/Cargo.toml` (one `cargo metadata` call for
-/// every distinct registry component this robot uses), and - when the
-/// instance declares a driver and the policy keeps it - a driver package
-/// that materializes later through the identical `cargo install` path a
-/// service does.
+/// Resolve authored component roots directly from `components/<id>/` or the
+/// exact locked registry package. Cargo workspace membership is deliberately
+/// irrelevant to definition discovery.
+struct ComponentResolutionContext<'a> {
+    project_root: &'a Path,
+    registry_cache_root: &'a Path,
+    train: &'a str,
+    target: &'a str,
+    drivers: &'a phoxal_cli_core::project::layout::DriverSelection,
+    local_packages: &'a [phoxal_cli_core::project::train::WorkspaceComponentCrate],
+    offline: bool,
+}
+
 fn resolve_components(
     robot: &Robot,
-    project_root: &Path,
-    train: &str,
-    target: &str,
-    workspace_runtimes: &[phoxal_cli_core::project::train::WorkspaceRuntime],
-    drivers: &phoxal_cli_core::project::layout::DriverSelection,
-    offline: bool,
+    context: ComponentResolutionContext<'_>,
 ) -> Result<Vec<ResolvedComponent>> {
-    let workspace_component = |component_id: &str| {
-        workspace_runtimes.iter().find(|runtime| {
-            runtime.kind == phoxal_cli_core::project::train::WorkspaceRuntimeKind::Component
-                && runtime.crate_dir.file_name().and_then(|name| name.to_str())
-                    == Some(component_id)
-        })
-    };
-
-    // Batch every distinct registry-sourced component into ONE generated
-    // manifest and ONE `cargo metadata` resolution, rather than one per
-    // instance/component.
+    let local =
+        discover_local_components_from_locked(context.project_root, context.local_packages)?;
     let mut registry_component_ids = BTreeSet::new();
     for instance in robot.robot.components.values() {
-        if workspace_component(&instance.component).is_none() {
+        if !local.contains_key(&instance.component) {
             registry_component_ids.insert(instance.component.clone());
         }
     }
-    let resolved_dirs = if registry_component_ids.is_empty() {
-        std::collections::BTreeMap::new()
+    let registry_roots = if registry_component_ids.is_empty() {
+        BTreeMap::new()
     } else {
-        let dependencies = registry_component_ids
-            .iter()
-            .map(|component_id| ComponentDependency {
-                catalog_id: format!("{PHOXAL_PROVIDER}/component-{component_id}"),
-                train: train.to_string(),
-            })
-            .collect::<Vec<_>>();
-        let manifest_path = write_resolve_manifest(project_root, &dependencies)
-            .context("failed to write the generated component-resolution manifest")?;
-        resolve_manifest_package_dirs(&manifest_path, offline)
-            .context("failed to resolve official component packages via `cargo metadata`")?
+        let http = crate::registry_package::HttpClient::new()?;
+        let cache =
+            crate::registry_package::PackageCache::new(context.registry_cache_root.to_path_buf());
+        resolve_registry_component_roots(
+            &registry_component_ids,
+            &http,
+            &cache,
+            context.train,
+            context.offline,
+        )?
     };
 
     let mut components = Vec::new();
     for (instance_name, instance) in &robot.robot.components {
         let component_id = &instance.component;
         let package = format!("{PHOXAL_PROVIDER}/component-{component_id}");
-        let has_driver = instance.driver.is_some();
+        let declares_driver = instance.driver.is_some();
 
-        if let Some(runtime) = workspace_component(component_id) {
-            let assets_dir = runtime
-                .component_assets
-                .as_ref()
-                .context("component workspace runtime has no component assets")?;
-            anyhow::ensure!(
-                runtime.binary_names.is_empty() != has_driver,
-                "components/{component_id} bin target presence must match robot component instance {instance_name} driver presence"
-            );
+        if let Some(local) = local.get(component_id) {
+            let driver = match (
+                &local.driver_crate,
+                declares_driver,
+                context.drivers.includes_instance(instance_name),
+            ) {
+                (Some(crate_dir), true, true) => Some(ResolvedComponentDriver::Local {
+                    crate_dir: crate_dir.clone(),
+                }),
+                (None, true, _) => anyhow::bail!(
+                    "robot component instance {instance_name} declares a driver, but local components/{component_id} is asset-only"
+                ),
+                _ => None,
+            };
             components.push(ResolvedComponent {
                 instance: instance_name.clone(),
                 source_name: component_id.clone(),
-                assets: ResolvedComponentPackage {
-                    package: format!("workspace/component-{component_id}"),
-                    kind: ArtifactKind::ComponentAssets,
-                    source: ResolvedComponentSource::Path {
-                        path: assets_dir.clone(),
-                    },
-                    resolved_dir: Some(assets_dir.clone()),
-                    registry_runtime: None,
-                },
-                driver: (has_driver && drivers.includes_instance(instance_name)).then(|| {
-                    ResolvedComponentPackage {
-                        package: format!("workspace/component-{component_id}"),
-                        kind: ArtifactKind::ComponentDriver,
-                        source: ResolvedComponentSource::Path {
-                            path: runtime.crate_dir.clone(),
-                        },
-                        resolved_dir: Some(runtime.crate_dir.clone()),
-                        registry_runtime: None,
-                    }
-                }),
-                has_driver,
+                assets_root: local.root.clone(),
+                driver,
             });
             continue;
         }
 
-        let cargo_name = phoxal_cli_core::project::catalog::cargo_package_name(&package);
-        let resolved_dir = resolved_dirs.get(&cargo_name).cloned().with_context(|| {
-            format!(
-                "robot.components.{instance_name}.component '{component_id}' failed to resolve its \
-                 component_assets package {package} from the registry"
-            )
-        })?;
-        let assets = ResolvedComponentPackage {
-            package: package.clone(),
-            kind: ArtifactKind::ComponentAssets,
-            source: ResolvedComponentSource::Registry,
-            resolved_dir: Some(resolved_dir),
-            registry_runtime: None,
-        };
-        let driver = (has_driver && drivers.includes_instance(instance_name)).then(|| {
-            ResolvedComponentPackage {
-                package: package.clone(),
-                kind: ArtifactKind::ComponentDriver,
-                source: ResolvedComponentSource::Registry,
-                resolved_dir: None,
-                registry_runtime: Some(ResolvedPlatformRuntime {
+        let assets_root = registry_roots
+            .get(component_id)
+            .expect("registry roots were resolved from every non-local component id")
+            .clone();
+        let driver =
+            (declares_driver && context.drivers.includes_instance(instance_name)).then(|| {
+                ResolvedComponentDriver::Registry(ResolvedPlatformRuntime {
                     name: component_id.clone(),
                     package: package.clone(),
                     kind: ArtifactKind::ComponentDriver,
                     path_override: None,
-                    train: train.to_string(),
-                    target: Some(target.to_string()),
-                }),
-            }
-        });
+                    train: context.train.to_string(),
+                    target: Some(context.target.to_string()),
+                })
+            });
 
         components.push(ResolvedComponent {
             instance: instance_name.clone(),
             source_name: component_id.clone(),
-            assets,
+            assets_root,
             driver,
-            has_driver,
         });
     }
     Ok(components)
 }
 
-#[allow(clippy::too_many_arguments)]
+fn resolve_registry_component_roots(
+    component_ids: &BTreeSet<String>,
+    http: &dyn crate::registry_package::RegistryHttp,
+    cache: &crate::registry_package::PackageCache,
+    train: &str,
+    offline: bool,
+) -> Result<BTreeMap<String, std::path::PathBuf>> {
+    component_ids
+        .iter()
+        .map(|id| {
+            let package = phoxal_cli_core::project::catalog::cargo_package_name(&format!(
+                "{PHOXAL_PROVIDER}/component-{id}"
+            ));
+            let package = crate::registry_package::fetch_registry_package(http, cache, &package, train, offline)
+                .with_context(|| format!(
+                    "robot component '{id}' failed to resolve {package} from the registry; add a local components/{id}/ directory to override it"
+                ))?;
+            let driver_source = package.require_component_driver_bin()?;
+            let root = package.extracted_root()?;
+            package.require_component_driver_source(&root, &driver_source)?;
+            Ok((id.clone(), root))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct LocalComponent {
+    root: std::path::PathBuf,
+    driver_crate: Option<std::path::PathBuf>,
+}
+
+fn discover_local_components_from_locked(
+    project_root: &Path,
+    local_packages: &[phoxal_cli_core::project::train::WorkspaceComponentCrate],
+) -> Result<BTreeMap<String, LocalComponent>> {
+    let canonical_project_root = project_root.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize project root {}",
+            project_root.display()
+        )
+    })?;
+    let root = project_root.join("components");
+    if !root.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let root_metadata = fs::symlink_metadata(&root)
+        .with_context(|| format!("failed to inspect {}", root.display()))?;
+    anyhow::ensure!(
+        !root_metadata.file_type().is_symlink(),
+        "components directory {} must not be a symlink; use a direct authored directory under the project root",
+        root.display()
+    );
+    let mut components = BTreeMap::new();
+    for entry in
+        fs::read_dir(&root).with_context(|| format!("failed to read {}", root.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read {} entry", root.display()))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to inspect local component {}", path.display()))?;
+        if metadata.file_type().is_symlink() && path.is_dir() {
+            anyhow::bail!(
+                "local component directory {} must not be a symlink; use a direct authored directory under components/",
+                path.display()
+            );
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().into_string().map_err(|_| {
+            anyhow!(
+                "component directory has a non-UTF-8 name under {}",
+                root.display()
+            )
+        })?;
+        let path = path.canonicalize().with_context(|| {
+            format!("failed to canonicalize local component {}", path.display())
+        })?;
+        anyhow::ensure!(
+            path.join("component.yaml").is_file(),
+            "local component directory {} is missing component.yaml",
+            path.display()
+        );
+        let manifest = path.join("Cargo.toml");
+        let src = path.join("src");
+        let driver_crate = if manifest.is_file() {
+            if !src.join("main.rs").is_file() {
+                if src.join("lib.rs").is_file() {
+                    anyhow::bail!(
+                        "local component {} is an obsolete anchor/assets crate; delete Cargo.toml and src/, then keep component.yaml and authored assets",
+                        path.display()
+                    );
+                }
+                anyhow::bail!(
+                    "local driver component {} must use src/main.rs",
+                    path.display()
+                );
+            }
+            let package = local_packages
+                .iter()
+                .find(|package| package.manifest_path == manifest)
+                .with_context(|| format!(
+                    "local driver component {} must be a member of the root workspace at {}; add it to root workspace.members",
+                    manifest.display(),
+                    canonical_project_root.display()
+                ))?;
+            verify_local_driver_shape(package)?;
+            Some(path.clone())
+        } else {
+            anyhow::ensure!(
+                !src.exists(),
+                "local asset-only component {} must not contain src/ without Cargo.toml",
+                path.display()
+            );
+            None
+        };
+        components.insert(
+            id,
+            LocalComponent {
+                root: path,
+                driver_crate,
+            },
+        );
+    }
+    Ok(components)
+}
+
+fn verify_local_driver_shape(
+    package: &phoxal_cli_core::project::train::WorkspaceComponentCrate,
+) -> Result<()> {
+    anyhow::ensure!(
+        package.binary_names.len() == 1,
+        "local driver component {} must define exactly one binary target, found {bins}",
+        package.manifest_path.display(),
+        bins = package.binary_names.len(),
+    );
+    anyhow::ensure!(
+        !package.has_library,
+        "local driver component {} must not define a library target",
+        package.manifest_path.display()
+    );
+    Ok(())
+}
+
 fn apply_workspace_runtimes(
     robot: &Robot,
     project_root: &Path,
     runtimes: &[phoxal_cli_core::project::train::WorkspaceRuntime],
     platform_runtimes: &mut [ResolvedPlatformRuntime],
     _simulators: &mut [ResolvedPlatformRuntime],
-    components: &mut [ResolvedComponent],
     tools: &mut [ResolvedTool],
-    drivers: &phoxal_cli_core::project::layout::DriverSelection,
 ) -> Result<WorkspaceRuntimeResolution> {
     use phoxal_cli_core::project::train::WorkspaceRuntimeKind;
 
@@ -434,60 +565,6 @@ fn apply_workspace_runtimes(
                     });
                 }
             }
-            WorkspaceRuntimeKind::Component => {
-                let matching = components
-                    .iter_mut()
-                    .filter(|component| component.source_name == logical_name)
-                    .collect::<Vec<_>>();
-                if matching.is_empty() {
-                    continue;
-                }
-                for component in matching {
-                    let assets_dir = runtime
-                        .component_assets
-                        .as_ref()
-                        .context("component workspace runtime has no component assets")?;
-                    component.assets = ResolvedComponentPackage {
-                        package: format!("workspace/component-{logical_name}"),
-                        kind: ArtifactKind::ComponentAssets,
-                        source: ResolvedComponentSource::Path {
-                            path: assets_dir.clone(),
-                        },
-                        resolved_dir: Some(assets_dir.clone()),
-                        registry_runtime: None,
-                    };
-                    if runtime.binary_names.is_empty() {
-                        anyhow::ensure!(
-                            !component.has_driver,
-                            "robot component instance {} declares a driver, but components/{logical_name} is lib-only",
-                            component.instance
-                        );
-                        component.driver = None;
-                    } else {
-                        anyhow::ensure!(
-                            component.has_driver,
-                            "components/{logical_name} has a bin target, but robot component instance {} has no driver connection",
-                            component.instance
-                        );
-                        // The driver policy gates resolution here too (#936):
-                        // an excluded workspace driver keeps `driver: None`, so
-                        // it never enters the source participants or the source
-                        // check and its crate is never built.
-                        component.driver =
-                            drivers.includes_instance(&component.instance).then(|| {
-                                ResolvedComponentPackage {
-                                    package: format!("workspace/component-{logical_name}"),
-                                    kind: ArtifactKind::ComponentDriver,
-                                    source: ResolvedComponentSource::Path {
-                                        path: runtime.crate_dir.clone(),
-                                    },
-                                    resolved_dir: Some(runtime.crate_dir.clone()),
-                                    registry_runtime: None,
-                                }
-                            });
-                    }
-                }
-            }
         }
     }
     let discovered_services = user_runtimes
@@ -550,6 +627,15 @@ fn apply_workspace_runtimes(
         undeclared_runtimes: undeclared,
         path_overrides: overrides,
     })
+}
+
+#[cfg(test)]
+fn discover_local_components(
+    project_root: &Path,
+    offline: bool,
+) -> Result<BTreeMap<String, LocalComponent>> {
+    let project = phoxal_cli_core::project::train::resolve_locked_project(project_root, offline)?;
+    discover_local_components_from_locked(project_root, &project.local_components)
 }
 
 /// The workspace-runtime half of resolution (#950): the declared user services

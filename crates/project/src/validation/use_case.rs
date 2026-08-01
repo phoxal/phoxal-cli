@@ -302,6 +302,7 @@ mod tests {
                 source: TrainSource::Registry,
             },
             runtimes,
+            local_components: Vec::new(),
         }
     }
 
@@ -317,7 +318,6 @@ mod tests {
             crate_dir,
             kind,
             binary_names: vec![name],
-            component_assets: None,
         }
     }
 
@@ -405,8 +405,6 @@ tools:
             // diagnostic elsewhere, never a config-check participant here.
             workspace_runtime("services/undeclared", WorkspaceRuntimeKind::Service),
             workspace_runtime("tools/lidar-viz", WorkspaceRuntimeKind::Tool),
-            // A component crate never carries a robot.yaml `config:` value.
-            workspace_runtime("components/ddsm115", WorkspaceRuntimeKind::Component),
         ]);
 
         let participants = declared_config_source_participants(&robot, &project);

@@ -29,7 +29,7 @@ use crate::build::container::{
     host_cargo_caches, platform_for_triple, require_platform_for_triple,
 };
 use crate::build::profile::StagingBuild;
-use crate::build::registry_manifest::{HttpClient, ManifestCache, fetch_runtime_manifest};
+use crate::registry_package::{HttpClient, PackageCache, fetch_registry_package};
 use crate::run::RunOptions;
 use crate::{BuildBackend, BuildBundleRequest, BuiltBundle};
 use anyhow::{Context, Result, bail};
@@ -356,8 +356,14 @@ impl Worker {
         // select the complete official package train and discover registry
         // component-driver packages. Host-side staging consumes the same value
         // after compilation instead of compiling the authored project again.
-        let resolved = resolve_container_staging(snapshot.path(), target, self.request.offline, ui)
-            .context("failed to resolve and compile the frozen project snapshot")?;
+        let resolved = resolve_container_staging(
+            snapshot.path(),
+            &project_root.join(".phoxal/cache/registry"),
+            target,
+            self.request.offline,
+            ui,
+        )
+        .context("failed to resolve and compile the frozen project snapshot")?;
 
         // The deterministic, robot-independent official set - every catalog
         // service, tool, and the router ("every official always runs" per
@@ -369,7 +375,6 @@ impl Worker {
         let source_participants = crate::validation::source_participants_from_resolved(
             snapshot.path(),
             resolved.resolved(),
-            crate::resolve::component_driver::component_driver_crate_dir,
         )?;
         let mut workspace_manifests = BTreeMap::<String, PathBuf>::new();
         for participant in source_participants {
@@ -403,19 +408,20 @@ impl Worker {
         }
 
         let http = HttpClient::new()?;
-        let manifest_cache = ManifestCache::new(project_root.join(".phoxal/cache/build-metadata"));
+        let package_cache = PackageCache::new(project_root.join(".phoxal/cache/registry"));
         ui.info(format!(
             "reading build requirements for {} registry runtimes",
             officials.len()
         ));
         for official in &officials {
-            let source = fetch_runtime_manifest(
+            let source = fetch_registry_package(
                 &http,
-                &manifest_cache,
+                &package_cache,
                 &official.package,
                 &official.train,
                 self.request.offline,
-            )?;
+            )?
+            .manifest()?;
             let requirements = phoxal_manifest::build_requirements::requirements_from_manifest(
                 &source,
                 &format!("{}@{}", official.package, official.train),
@@ -570,12 +576,14 @@ impl Worker {
 /// post-container staging.
 pub(crate) fn resolve_container_staging(
     snapshot_root: &Path,
+    registry_cache_root: &Path,
     target: &str,
     offline: bool,
     ui: &dyn crate::Reporter,
 ) -> Result<crate::run::prepare::ResolvedStagingInput> {
-    crate::run::prepare::resolve_staging(
+    crate::run::prepare::resolve_staging_with_registry_cache(
         snapshot_root,
+        Some(registry_cache_root),
         RunOptions {
             drivers: crate::run::DriversMode::On,
             drivers_subset: Vec::new(),
@@ -806,10 +814,12 @@ fn upload_source_payload(
 fn remote_unpack_source_command(remote_dir: &str) -> String {
     let source = format!("{remote_dir}/source");
     format!(
-        "set -eu; mkdir {}; tar -xzf {} -C {}",
+        "set -eu; if [ -z \"${{HOME:-}}\" ]; then echo >&2 'phoxal SSH build requires a remote HOME for $HOME/.cache/phoxal/registry'; exit 1; fi; cache=\"$HOME/.cache/phoxal/registry\"; if ! mkdir -p \"$cache\" || [ ! -w \"$cache\" ]; then echo >&2 \"phoxal SSH build cannot create persistent registry cache at $cache; set a writable remote HOME\"; exit 1; fi; mkdir {}; tar -xzf {} -C {}; mkdir -p {}/.phoxal/cache; ln -s \"$cache\" {}/.phoxal/cache/registry",
         shell_quote(&source),
         shell_quote(&format!("{remote_dir}/source.tar.gz")),
-        shell_quote(&source)
+        shell_quote(&source),
+        shell_quote(&source),
+        shell_quote(&source),
     )
 }
 
@@ -1116,8 +1126,8 @@ mod tests {
     use super::*;
     use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::resolver::{
-        BundlePlan, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-        ResolvedPlatformRuntime, ResolvedTool,
+        BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
+        ResolvedTool,
     };
 
     fn minimal_bundle_plan() -> BundlePlan {
@@ -1166,21 +1176,8 @@ robot:
         ResolvedComponent {
             instance: instance.to_string(),
             source_name: instance.to_string(),
-            assets: ResolvedComponentPackage {
-                package: package.to_string(),
-                kind: ArtifactKind::ComponentAssets,
-                source: ResolvedComponentSource::Registry,
-                resolved_dir: Some(PathBuf::from("/nonexistent")),
-                registry_runtime: None,
-            },
-            driver: Some(ResolvedComponentPackage {
-                package: package.to_string(),
-                kind: ArtifactKind::ComponentDriver,
-                source: ResolvedComponentSource::Registry,
-                resolved_dir: None,
-                registry_runtime: Some(runtime),
-            }),
-            has_driver: true,
+            assets_root: PathBuf::from("/nonexistent"),
+            driver: Some(ResolvedComponentDriver::Registry(runtime)),
         }
     }
 
@@ -1188,25 +1185,10 @@ robot:
         ResolvedComponent {
             instance: instance.to_string(),
             source_name: instance.to_string(),
-            assets: ResolvedComponentPackage {
-                package: format!("workspace/{instance}"),
-                kind: ArtifactKind::ComponentAssets,
-                source: ResolvedComponentSource::Path {
-                    path: PathBuf::from("components").join(instance),
-                },
-                resolved_dir: Some(PathBuf::from("components").join(instance)),
-                registry_runtime: None,
-            },
-            driver: Some(ResolvedComponentPackage {
-                package: format!("workspace/{instance}"),
-                kind: ArtifactKind::ComponentDriver,
-                source: ResolvedComponentSource::Path {
-                    path: PathBuf::from("components").join(instance),
-                },
-                resolved_dir: Some(PathBuf::from("components").join(instance)),
-                registry_runtime: None,
+            assets_root: PathBuf::from("components").join(instance),
+            driver: Some(ResolvedComponentDriver::Local {
+                crate_dir: PathBuf::from("components").join(instance),
             }),
-            has_driver: true,
         }
     }
 
@@ -1418,6 +1400,19 @@ robot:
                 target: Some("aarch64-unknown-linux-gnu".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn ssh_unpack_links_the_ephemeral_snapshot_to_the_stable_registry_cache() {
+        let command = remote_unpack_source_command("/tmp/phoxal-build.a b");
+        assert!(command.contains("cache=\"$HOME/.cache/phoxal/registry\""));
+        assert!(command.contains("remote HOME"));
+        assert!(command.contains("cannot create persistent registry cache"));
+        assert!(command.contains("mkdir -p \"$cache\""));
+        assert!(command.contains("[ ! -w \"$cache\" ]"));
+        assert!(command.contains("ln -s \"$cache\""));
+        assert!(command.contains("'/tmp/phoxal-build.a b/source'"));
+        assert!(command.contains("'/tmp/phoxal-build.a b/source.tar.gz'"));
     }
 
     #[test]

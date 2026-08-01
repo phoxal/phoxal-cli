@@ -9,7 +9,6 @@ use phoxal_manifest::{AssetId, CompiledProject, Participant};
 
 use super::catalog::ArtifactKind;
 
-const PHOXAL_PROVIDER: &str = "phoxal";
 const ROBOT_FILE: &str = "robot.yaml";
 
 pub fn tool_participant_id(tool_name: &str) -> &str {
@@ -24,9 +23,6 @@ pub fn tool_participant_id(tool_name: &str) -> &str {
 pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
     match kind {
         ArtifactKind::ComponentDriver => format!("phoxal-component-{name}"),
-        ArtifactKind::ComponentAssets => {
-            unreachable!("component_assets has no runtime binary to name")
-        }
         ArtifactKind::Service
         | ArtifactKind::Tool
         | ArtifactKind::Simulator
@@ -54,10 +50,8 @@ pub struct ResolveOptions {
     /// not: simulators execute beside Webots on an operator host and are never
     /// installed on the robot target.
     pub include_simulators: bool,
-    /// Pass `--offline` to every `cargo metadata`/`cargo install` invocation
-    /// resolution makes (organization#951 WS4 review, medium 4): the locked
-    /// train read and the generated `.phoxal/resolve/Cargo.toml` component
-    /// lookup. `PHOXAL_OFFLINE` is a Phoxal-only env var Cargo does not
+    /// Pass `--offline` to every Cargo/registry operation resolution makes.
+    /// `PHOXAL_OFFLINE` is a Phoxal-only env var Cargo does not
     /// recognize, so this must be threaded explicitly from the caller's own
     /// `--offline`/`AppContext::offline`, not read back from the
     /// environment.
@@ -178,81 +172,41 @@ pub struct UndeclaredRuntime {
     pub family: &'static str,
 }
 
-/// One resolved `robot.components.<instance>` entry: the logical component id
-/// (`component: <id>`) resolves to an always-present `component_assets`
-/// package and an optional `component_driver` package - present only when the
-/// instance declares a `driver` block AND a matching driver package exists in
-/// the resolved graph (docs #21). Driverless components are valid: they still
-/// carry assets and may be simulated, but never launch a hardware driver.
+/// One resolved `robot.components.<instance>` entry. Authored assets have one
+/// direct source root; they are not a runtime artifact or Cargo-package half.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedComponent {
     pub instance: String,
     /// The logical component id (`component: <id>` in `robot.yaml`).
     pub source_name: String,
-    /// The resolved `component_assets` package: the workspace assets crate
-    /// for a workspace component, or the official `phoxal/component-<id>`
-    /// assets package. Every component resolves its assets - a driverless
-    /// workspace component is an assets crate, and a component absent from
-    /// both workspace and catalog is a resolution error, never a silent
-    /// "assetless" (#936).
-    pub assets: ResolvedComponentPackage,
-    /// The resolved `component_driver` package. Present only when the
-    /// instance declares `driver` and a driver package resolves for this
-    /// component; see [`ComponentDriverUnavailable`].
-    pub driver: Option<ResolvedComponentPackage>,
-    /// Whether the instance declares a `driver:` block in `robot.yaml`. This
-    /// is the manifest-level intent; `driver.is_some()` is whether a matching
-    /// package actually resolved for it.
-    pub has_driver: bool,
-}
-
-impl ResolvedComponent {
-    #[must_use]
-    pub fn driver_path_override(&self) -> Option<&Path> {
-        self.driver
-            .as_ref()
-            .and_then(|driver| driver.path_override())
-    }
-}
-
-/// One resolved component package (either the `component_assets` or the
-/// `component_driver` half of a component instance).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedComponentPackage {
-    /// The provider-qualified package id (`phoxal/component-ddsm115`).
-    pub package: String,
-    pub kind: ArtifactKind,
-    pub source: ResolvedComponentSource,
-    /// The on-disk directory this package resolves to, whichever source it
-    /// came from: the workspace crate directory for `Path`, or the
-    /// registry-package extraction directory `cargo metadata` reported for
-    /// `Registry` (resolved once, at resolution time, against the generated
-    /// `.phoxal/resolve/Cargo.toml`). `None` only for a `Registry` driver
-    /// package - a driver has no directory to read; it materializes straight
-    /// to a `bin/` binary via `cargo install`, exactly like a service.
-    pub resolved_dir: Option<PathBuf>,
-    /// Present exactly when `source == Registry`, carrying the identity a
-    /// service/simulator resolves to so a driver package materializes
-    /// through the identical `cargo install` path instead of a parallel
-    /// bespoke one.
-    pub registry_runtime: Option<ResolvedPlatformRuntime>,
-}
-
-impl ResolvedComponentPackage {
-    #[must_use]
-    pub fn path_override(&self) -> Option<&Path> {
-        self.resolved_dir.as_deref()
-    }
+    /// Safe directory holding `component.yaml` and the authored assets.
+    pub assets_root: PathBuf,
+    /// The selected executable driver, if declared and included by policy.
+    pub driver: Option<ResolvedComponentDriver>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolvedComponentSource {
-    Path {
-        path: PathBuf,
-    },
-    /// Resolves from the official Cargo registry (no fork pin for this
-    /// package).
-    Registry,
+pub enum ResolvedComponentDriver {
+    Local { crate_dir: PathBuf },
+    Registry(ResolvedPlatformRuntime),
+}
+
+impl ResolvedComponentDriver {
+    #[must_use]
+    pub fn source_path(&self) -> Option<&Path> {
+        match self {
+            Self::Local { crate_dir } => Some(crate_dir),
+            Self::Registry(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn registry_runtime(&self) -> Option<&ResolvedPlatformRuntime> {
+        match self {
+            Self::Local { .. } => None,
+            Self::Registry(runtime) => Some(runtime),
+        }
+    }
 }
 
 /// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`, or
@@ -277,8 +231,6 @@ pub struct ResolvedTool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedPathOverrideKind {
     Service,
-    ComponentAssets,
-    ComponentDriver,
     Tool,
     Simulator,
     Infrastructure,
@@ -289,8 +241,6 @@ impl ResolvedPathOverrideKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Service => "service",
-            Self::ComponentAssets => "component_assets",
-            Self::ComponentDriver => "component_driver",
             Self::Tool => "tool",
             Self::Simulator => "simulator",
             Self::Infrastructure => "infrastructure",
@@ -305,26 +255,6 @@ pub struct ResolvedPathOverride {
     pub artifact_name: String,
     pub path: PathBuf,
 }
-
-/// A named diagnostic: an instance declares `driver:` but the resolved graph
-/// has no matching `component_driver` package for its component (docs #21).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComponentDriverUnavailable {
-    pub instance: String,
-    pub component: String,
-}
-
-impl std::fmt::Display for ComponentDriverUnavailable {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "ComponentDriverUnavailable: robot.components.{}.driver is declared but component '{}' has no {PHOXAL_PROVIDER}/component-{}-driver package in the resolved graph",
-            self.instance, self.component, self.component
-        )
-    }
-}
-
-impl std::error::Error for ComponentDriverUnavailable {}
 
 pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
     let mut cursor = if start.is_file() {

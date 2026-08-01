@@ -99,7 +99,6 @@ pub fn cargo_package_name(catalog_id: &str) -> String {
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Service,
-    ComponentAssets,
     ComponentDriver,
     Tool,
     Simulator,
@@ -111,7 +110,6 @@ impl ArtifactKind {
     pub const fn wire_kind(self) -> &'static str {
         match self {
             Self::Service => "service",
-            Self::ComponentAssets => "component_assets",
             Self::ComponentDriver => "driver",
             Self::Tool => "tool",
             Self::Simulator => "simulator",

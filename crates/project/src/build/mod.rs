@@ -3,7 +3,6 @@ pub(crate) mod cargo;
 pub(crate) mod container;
 pub(crate) mod materialise;
 pub(crate) mod profile;
-pub(crate) mod registry_manifest;
 pub(crate) mod shell;
 mod use_case;
 

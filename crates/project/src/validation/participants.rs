@@ -1,20 +1,17 @@
 //! Participants responsibilities for check.
 
 use super::tool_env_override;
-use anyhow::Context;
 use anyhow::Result;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::ToolParticipant;
 use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::resolver::BundlePlan;
-use phoxal_cli_core::project::resolver::ResolvedComponent;
-use phoxal_cli_core::project::resolver::ResolvedComponentSource;
+use phoxal_cli_core::project::resolver::ResolvedComponentDriver;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::official_binary_name;
 use phoxal_cli_core::project::resolver::tool_participant_id;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use std::path::Path;
-use std::path::PathBuf;
 
 /// One resolved official artifact `run_check_with_context` needs a
 /// participant report for: its canonical `bin/` file name (the key its
@@ -42,7 +39,6 @@ impl PlatformArtifactRef {
     pub(super) fn kind_label(&self) -> &'static str {
         match self.kind {
             ArtifactKind::Service => "official service",
-            ArtifactKind::ComponentAssets => "official component assets",
             ArtifactKind::ComponentDriver => "official driver",
             ArtifactKind::Tool => "official tool",
             ArtifactKind::Simulator => "official simulator",
@@ -112,14 +108,11 @@ pub(crate) fn component_driver_platform_refs_from_resolved(
         let Some(driver) = &component.driver else {
             continue;
         };
-        if !matches!(driver.source, ResolvedComponentSource::Registry) {
-            continue;
-        }
-        let Some(runtime) = &driver.registry_runtime else {
+        let Some(runtime) = driver.registry_runtime() else {
             continue;
         };
         by_package
-            .entry(driver.package.clone())
+            .entry(runtime.package.clone())
             .or_insert_with(|| RegistryDriverRef {
                 name: runtime.name.clone(),
                 binary_name: official_binary_name(runtime.kind, &runtime.name),
@@ -153,8 +146,7 @@ pub(crate) fn component_driver_runtimes_by_ref(
         .components
         .iter()
         .filter_map(|component| component.driver.as_ref())
-        .filter(|driver| matches!(driver.source, ResolvedComponentSource::Registry))
-        .filter_map(|driver| driver.registry_runtime.as_ref())
+        .filter_map(ResolvedComponentDriver::registry_runtime)
         .map(|runtime| (official_binary_name(runtime.kind, &runtime.name), runtime))
         .collect()
 }
@@ -194,21 +186,14 @@ pub(crate) fn check_artifact_refs_from_resolved(
 pub(crate) fn source_participants_from_resolved(
     project_root: &Path,
     resolved: &BundlePlan,
-    locate_component_crate: impl FnMut(&ResolvedComponent, &Path) -> Result<PathBuf>,
 ) -> Result<Vec<SourceParticipant>> {
-    source_participants_from_resolved_with_drivers(
-        project_root,
-        resolved,
-        true,
-        locate_component_crate,
-    )
+    source_participants_from_resolved_with_drivers(project_root, resolved, true)
 }
 
 pub(crate) fn source_participants_from_resolved_with_drivers(
     project_root: &Path,
     resolved: &BundlePlan,
     include_component_drivers: bool,
-    mut locate_component_crate: impl FnMut(&ResolvedComponent, &Path) -> Result<PathBuf>,
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants = resolved
         .platform_runtimes
@@ -243,27 +228,18 @@ pub(crate) fn source_participants_from_resolved_with_drivers(
     // instead (see `component_driver_platform_refs_from_resolved`),
     // materialized via `cargo install` and validated like a service. Only a
     // Path/Git (fork/dev-override) driver builds from source here.
-    for component in resolved.components.iter().filter(|component| {
+    for (component, crate_dir) in resolved.components.iter().filter_map(|component| {
         include_component_drivers
-            && component
-                .driver
-                .as_ref()
-                .is_some_and(|driver| !matches!(driver.source, ResolvedComponentSource::Registry))
+            .then_some(component)
+            .and_then(|component| match component.driver.as_ref() {
+                Some(ResolvedComponentDriver::Local { crate_dir }) => Some((component, crate_dir)),
+                Some(ResolvedComponentDriver::Registry(_)) | None => None,
+            })
     }) {
-        let crate_dir = if let Some(path) = component.driver_path_override() {
-            path.to_path_buf()
-        } else {
-            locate_component_crate(component, project_root).with_context(|| {
-                format!(
-                    "failed to locate component driver {} source",
-                    component.instance
-                )
-            })?
-        };
         participants.push(SourceParticipant::component_driver_with_artifact_id(
             component.instance.clone(),
             component.source_name.clone(),
-            crate_dir,
+            crate_dir.clone(),
         ));
     }
 

@@ -31,6 +31,7 @@ pub struct ProjectLockIdentity {
 pub enum ProjectOperation {
     Run,
     Build,
+    Validate,
     Install,
 }
 
@@ -39,6 +40,7 @@ impl std::fmt::Display for ProjectOperation {
         formatter.write_str(match self {
             Self::Run => "run",
             Self::Build => "build",
+            Self::Validate => "validate",
             Self::Install => "install",
         })
     }
@@ -297,6 +299,22 @@ mod tests {
         drop((first, second));
         assert!(first_project.join(".phoxal/project.lock").is_file());
         assert!(second_project.join(".phoxal/project.lock").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn validate_operation_round_trips_and_identifies_itself_precisely() -> Result<()> {
+        let identity = ProjectLockIdentity {
+            project: PathBuf::from("/project"),
+            entry: PathBuf::from("/project/robot.yaml"),
+            operation: ProjectOperation::Validate,
+            pid: 7,
+            execution: None,
+        };
+        let restored: ProjectLockIdentity =
+            serde_json::from_slice(&serde_json::to_vec(&identity)?)?;
+        assert_eq!(restored.operation, ProjectOperation::Validate);
+        assert_eq!(restored.operation.to_string(), "validate");
         Ok(())
     }
 }

@@ -237,9 +237,8 @@ impl RuntimeLayout {
                 // additions are not requested here (see the doc above), so a
                 // simulator entry can never appear. Guard structurally anyway.
                 ArtifactKind::Simulator => continue,
-                // The catalog carries no component packages; assets/drivers are
-                // never members of the official runtime set.
-                ArtifactKind::ComponentAssets | ArtifactKind::ComponentDriver => continue,
+                // The catalog carries no component drivers.
+                ArtifactKind::ComponentDriver => continue,
             };
             // Official runtimes take no authored service-map configuration.
             // The framework compiler does, however, own the behavior service's
@@ -452,7 +451,7 @@ fn official_short_name(official: &OfficialRuntime) -> String {
         ArtifactKind::Tool => "phoxal/tool-",
         ArtifactKind::Simulator => "phoxal/simulator-",
         ArtifactKind::Infrastructure => "phoxal/infrastructure-",
-        ArtifactKind::ComponentAssets | ArtifactKind::ComponentDriver => "phoxal/component-",
+        ArtifactKind::ComponentDriver => "phoxal/component-",
     };
     official
         .package

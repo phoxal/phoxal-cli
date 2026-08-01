@@ -102,14 +102,8 @@ pub(crate) fn sim_source_participants(
     project_root: &Path,
     resolved: &BundlePlan,
 ) -> Result<Vec<SourceParticipant>> {
-    let mut participants = source_participants_from_resolved_with_drivers(
-        project_root,
-        resolved,
-        false,
-        |component, root| {
-            crate::resolve::component_driver::component_driver_crate_dir(component, root)
-        },
-    )?;
+    let mut participants =
+        source_participants_from_resolved_with_drivers(project_root, resolved, false)?;
     retain_simulation_sources(&mut participants);
     participants.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(participants)

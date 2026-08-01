@@ -622,7 +622,7 @@ fn expected_checked_participant_ids(mode: &LaunchMode, resolved: &BundlePlan) ->
             resolved
                 .components
                 .iter()
-                .filter(|component| component.has_driver)
+                .filter(|component| component.driver.is_some())
                 .map(|component| component.instance.clone()),
         );
     }
@@ -664,8 +664,8 @@ mod tests {
 
     use crate::project::catalog::ArtifactKind;
     use crate::project::resolver::{
-        BundlePlan, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-        ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime,
+        BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
+        ResolvedTool, ResolvedUserRuntime,
     };
 
     use super::*;
@@ -890,24 +890,13 @@ mod tests {
     #[test]
     fn webots_excludes_physical_drivers_from_expected_and_resident_sets() -> anyhow::Result<()> {
         let mut resolved = empty_bundle_plan("testbot")?;
-        let component_package = || ResolvedComponentPackage {
-            package: "phoxal/component-ddsm115".to_string(),
-            kind: ArtifactKind::ComponentAssets,
-            source: ResolvedComponentSource::Path {
-                path: PathBuf::from("/tmp/ddsm115"),
-            },
-            resolved_dir: Some(PathBuf::from("/tmp/ddsm115")),
-            registry_runtime: None,
-        };
         resolved.components.push(ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: component_package(),
-            driver: Some(ResolvedComponentPackage {
-                kind: ArtifactKind::ComponentDriver,
-                ..component_package()
+            assets_root: PathBuf::from("/tmp/ddsm115"),
+            driver: Some(ResolvedComponentDriver::Local {
+                crate_dir: PathBuf::from("/tmp/ddsm115"),
             }),
-            has_driver: true,
         });
         let mut driver = participant(
             "left_drive",
@@ -933,6 +922,97 @@ mod tests {
         assert!(
             expected_checked_participant_ids(&LaunchMode::Run, &resolved).contains("left_drive")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn run_launch_plan_omits_authored_drivers_not_selected_by_policy() -> anyhow::Result<()> {
+        let mut resolved = empty_bundle_plan("testbot")?;
+        resolved.source_manifest = phoxal_manifest::source::robot::parse_from_string(
+            r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: []
+    encoders: []
+  components:
+    left_drive:
+      component: wheel
+      mount_link: base
+      driver:
+        connection:
+          type: serial
+          port: /dev/ttyUSB0
+          baud: 115200
+    right_drive:
+      component: wheel
+      mount_link: base
+      driver:
+        connection:
+          type: serial
+          port: /dev/ttyUSB1
+          baud: 115200
+"#,
+        )?;
+
+        // A `--driver left_drive` policy materializes only that one declared
+        // driver. Its unselected peer must not make checked-plan parity fail.
+        resolved.components.push(ResolvedComponent {
+            instance: "left_drive".to_string(),
+            source_name: "wheel".to_string(),
+            assets_root: PathBuf::from("/tmp/wheel"),
+            driver: Some(ResolvedComponentDriver::Local {
+                crate_dir: PathBuf::from("/tmp/wheel"),
+            }),
+        });
+        resolved.components.push(ResolvedComponent {
+            instance: "right_drive".to_string(),
+            source_name: "wheel".to_string(),
+            assets_root: PathBuf::from("/tmp/wheel"),
+            driver: None,
+        });
+        let mut left_driver = participant(
+            "left_drive",
+            "wheel",
+            graph_check::ParticipantScope::ComponentInstance("left_drive".to_string()),
+        );
+        left_driver.participant_kind = graph_check::ParticipantKind::Driver;
+        let selected = build_launch_plan(
+            LaunchMode::Run,
+            &[CheckedRobotLaunchInput {
+                project_root: Path::new("/tmp/robot"),
+                resolved: &resolved,
+                checked_participants: &[left_driver],
+                source_participants: &[],
+            }],
+            RunIdentity::default(),
+        )?;
+        assert_eq!(
+            selected.robots[0]
+                .participants
+                .iter()
+                .map(|participant| participant.launch.participant_id.as_str())
+                .collect::<Vec<_>>(),
+            ["left_drive"]
+        );
+
+        // `--drivers off` uses the same resolved-model fact (`driver: None`)
+        // for every authored driver. It must likewise build a plan without
+        // inventing checked participants from the source declaration.
+        for component in &mut resolved.components {
+            component.driver = None;
+        }
+        let disabled = build_launch_plan(
+            LaunchMode::Run,
+            &[empty_checked_input(Path::new("/tmp/robot"), &resolved)],
+            RunIdentity::default(),
+        )?;
+        assert!(disabled.robots[0].participants.is_empty());
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 //! Exact framework-train resolution from a robot project's locked Cargo graph.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -30,7 +30,6 @@ pub enum RegistryStatus {
 pub enum WorkspaceRuntimeKind {
     Service,
     Tool,
-    Component,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,15 +38,25 @@ pub struct WorkspaceRuntime {
     pub crate_dir: PathBuf,
     pub kind: WorkspaceRuntimeKind,
     pub binary_names: Vec<String>,
-    /// Directory containing `component.yaml`; present for every component
-    /// workspace package and absent for other runtime kinds.
-    pub component_assets: Option<PathBuf>,
+}
+
+/// A `components/<id>/Cargo.toml` package retained from the root locked graph.
+/// Component discovery is filesystem-based, while this record supplies the
+/// already-locked Cargo shape without launching one metadata process per
+/// component.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceComponentCrate {
+    pub manifest_path: PathBuf,
+    pub crate_dir: PathBuf,
+    pub binary_names: Vec<String>,
+    pub has_library: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LockedProject {
     pub train: LockedTrain,
     pub runtimes: Vec<WorkspaceRuntime>,
+    pub local_components: Vec<WorkspaceComponentCrate>,
 }
 
 impl LockedTrain {
@@ -130,7 +139,71 @@ pub fn resolve_locked_project(project_root: &Path, offline: bool) -> Result<Lock
         source,
     };
     let runtimes = discover_workspace_runtimes(project_root, &metadata)?;
-    Ok(LockedProject { train, runtimes })
+    let local_components = discover_local_component_packages(project_root, &metadata)?;
+    Ok(LockedProject {
+        train,
+        runtimes,
+        local_components,
+    })
+}
+
+fn discover_local_component_packages(
+    project_root: &Path,
+    metadata: &Metadata,
+) -> Result<Vec<WorkspaceComponentCrate>> {
+    let root = project_root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", project_root.display()))?;
+    let members = metadata.workspace_members.iter().collect::<BTreeSet<_>>();
+    let mut components = Vec::new();
+    for package in metadata
+        .packages
+        .iter()
+        .filter(|package| members.contains(&package.id))
+    {
+        let manifest_path = Path::new(&package.manifest_path)
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize {}", package.manifest_path))?;
+        let crate_dir = manifest_path
+            .parent()
+            .context("Cargo package manifest has no parent")?
+            .to_path_buf();
+        let Ok(relative) = crate_dir.strip_prefix(&root) else {
+            continue;
+        };
+        if relative
+            .components()
+            .next()
+            .and_then(|part| part.as_os_str().to_str())
+            != Some("components")
+        {
+            continue;
+        }
+        let mut binary_names = package
+            .targets
+            .iter()
+            .filter(|target| target.kind.iter().any(|kind| kind == "bin"))
+            .map(|target| target.name.clone())
+            .collect::<Vec<_>>();
+        binary_names.sort();
+        binary_names.dedup();
+        let has_library = package.targets.iter().any(|target| {
+            target.kind.iter().any(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro"
+                )
+            })
+        });
+        components.push(WorkspaceComponentCrate {
+            manifest_path,
+            crate_dir,
+            binary_names,
+            has_library,
+        });
+    }
+    components.sort_by(|left, right| left.crate_dir.cmp(&right.crate_dir));
+    Ok(components)
 }
 
 fn load_metadata(project_root: &Path, offline: bool) -> Result<Metadata> {
@@ -161,30 +234,6 @@ fn discover_workspace_runtimes(
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", project_root.display()))?;
     let members = metadata.workspace_members.iter().collect::<BTreeSet<_>>();
-    let packages = metadata
-        .packages
-        .iter()
-        .map(|package| (package.id.as_str(), package))
-        .collect::<BTreeMap<_, _>>();
-    let direct_dependencies = metadata
-        .resolve
-        .as_ref()
-        .map(|resolve| {
-            resolve
-                .nodes
-                .iter()
-                .map(|node| {
-                    (
-                        node.id.as_str(),
-                        node.deps
-                            .iter()
-                            .map(|dependency| dependency.pkg.as_str())
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
     let mut runtimes = Vec::new();
     for package in metadata
         .packages
@@ -212,7 +261,7 @@ fn discover_workspace_runtimes(
         let kind = match directory {
             "services" => WorkspaceRuntimeKind::Service,
             "tools" => WorkspaceRuntimeKind::Tool,
-            "components" => WorkspaceRuntimeKind::Component,
+            "components" => continue,
             _ => continue,
         };
         let mut binary_names = package
@@ -223,7 +272,7 @@ fn discover_workspace_runtimes(
             .collect::<Vec<_>>();
         binary_names.sort();
         binary_names.dedup();
-        if kind != WorkspaceRuntimeKind::Component && binary_names.len() != 1 {
+        if binary_names.len() != 1 {
             bail!(
                 "{} workspace package {} must define exactly one bin target, found {}",
                 directory,
@@ -231,52 +280,11 @@ fn discover_workspace_runtimes(
                 binary_names.len()
             );
         }
-        if kind == WorkspaceRuntimeKind::Component && binary_names.len() > 1 {
-            bail!(
-                "component workspace package {} must define at most one bin target, found {}",
-                package.name,
-                binary_names.len()
-            );
-        }
-        let component_assets = if kind == WorkspaceRuntimeKind::Component {
-            let mut definitions = Vec::new();
-            if crate_dir.join("component.yaml").is_file() {
-                definitions.push(crate_dir.clone());
-            }
-            for dependency in direct_dependencies
-                .get(package.id.as_str())
-                .into_iter()
-                .flatten()
-            {
-                let Some(dependency) = packages.get(dependency) else {
-                    continue;
-                };
-                let directory = Path::new(&dependency.manifest_path)
-                    .parent()
-                    .context("dependency manifest has no parent")?;
-                if directory.join("component.yaml").is_file() {
-                    definitions.push(directory.to_path_buf());
-                }
-            }
-            definitions.sort();
-            definitions.dedup();
-            if definitions.len() != 1 {
-                bail!(
-                    "component workspace package {} must resolve component.yaml from itself or exactly one direct dependency, found {}",
-                    package.name,
-                    definitions.len()
-                );
-            }
-            definitions.pop()
-        } else {
-            None
-        };
         runtimes.push(WorkspaceRuntime {
             package: package.name.clone(),
             crate_dir,
             kind,
             binary_names,
-            component_assets,
         });
     }
     runtimes.sort_by(|left, right| left.crate_dir.cmp(&right.crate_dir));
@@ -287,7 +295,6 @@ fn discover_workspace_runtimes(
 struct Metadata {
     packages: Vec<Package>,
     workspace_members: Vec<String>,
-    resolve: Option<Resolve>,
 }
 
 #[derive(Deserialize)]
@@ -311,22 +318,6 @@ struct PackageDependency {
 struct Target {
     name: String,
     kind: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct Resolve {
-    nodes: Vec<ResolveNode>,
-}
-
-#[derive(Deserialize)]
-struct ResolveNode {
-    id: String,
-    deps: Vec<ResolveDependency>,
-}
-
-#[derive(Deserialize)]
-struct ResolveDependency {
-    pkg: String,
 }
 
 #[cfg(test)]
@@ -366,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_runtime_discovery_classifies_directories_and_component_assets() {
+    fn workspace_runtime_discovery_classifies_services_and_tools_and_ignores_components() {
         let root = tempfile::tempdir().unwrap();
         let write_manifest = |relative: &str| {
             let path = root.path().join(relative).join("Cargo.toml");
@@ -378,20 +369,9 @@ mod tests {
             "tools/operator",
             "components/passive",
             "components/wrapped",
-            "vendor/remote-component",
         ] {
             write_manifest(directory);
         }
-        fs::write(
-            root.path().join("components/passive/component.yaml"),
-            "schema: component/v0\n",
-        )
-        .unwrap();
-        fs::write(
-            root.path().join("vendor/remote-component/component.yaml"),
-            "schema: component/v0\n",
-        )
-        .unwrap();
 
         let package = |id: &str, name: &str, directory: &str, binaries: &[&str]| Package {
             id: id.to_string(),
@@ -420,12 +400,6 @@ mod tests {
                 package("operator", "operator", "tools/operator", &["operator"]),
                 package("passive", "passive", "components/passive", &[]),
                 package("wrapped", "wrapped", "components/wrapped", &["wrapped"]),
-                package(
-                    "remote-component",
-                    "remote-component",
-                    "vendor/remote-component",
-                    &[],
-                ),
             ],
             workspace_members: vec![
                 "mission".to_string(),
@@ -433,18 +407,10 @@ mod tests {
                 "passive".to_string(),
                 "wrapped".to_string(),
             ],
-            resolve: Some(Resolve {
-                nodes: vec![ResolveNode {
-                    id: "wrapped".to_string(),
-                    deps: vec![ResolveDependency {
-                        pkg: "remote-component".to_string(),
-                    }],
-                }],
-            }),
         };
 
         let runtimes = discover_workspace_runtimes(root.path(), &metadata).unwrap();
-        assert_eq!(runtimes.len(), 4);
+        assert_eq!(runtimes.len(), 2);
         let runtime = |package: &str| {
             runtimes
                 .iter()
@@ -455,23 +421,68 @@ mod tests {
         assert_eq!(runtime("mission").binary_names, ["mission"]);
         assert_eq!(runtime("operator").kind, WorkspaceRuntimeKind::Tool);
         assert_eq!(runtime("operator").binary_names, ["operator"]);
-        assert_eq!(runtime("passive").kind, WorkspaceRuntimeKind::Component);
-        assert!(runtime("passive").binary_names.is_empty());
-        assert_eq!(
-            runtime("passive").component_assets.as_deref(),
-            Some(
-                root.path()
-                    .join("components/passive")
-                    .canonicalize()
-                    .unwrap()
-                    .as_path()
-            )
-        );
-        assert_eq!(runtime("wrapped").kind, WorkspaceRuntimeKind::Component);
-        assert_eq!(runtime("wrapped").binary_names, ["wrapped"]);
-        assert_eq!(
-            runtime("wrapped").component_assets.as_deref(),
-            Some(root.path().join("vendor/remote-component").as_path())
+        assert!(runtimes.iter().all(|runtime| runtime.package != "passive"));
+        assert!(runtimes.iter().all(|runtime| runtime.package != "wrapped"));
+    }
+
+    #[test]
+    fn locked_metadata_retains_component_driver_target_shapes() {
+        let root = tempfile::tempdir().unwrap();
+        let package = |id: &str, directory: &str, targets: Vec<Target>| {
+            let manifest = root.path().join(directory).join("Cargo.toml");
+            fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+            fs::write(&manifest, "").unwrap();
+            Package {
+                id: id.to_string(),
+                name: id.to_string(),
+                version: "0.1.0".to_string(),
+                source: None,
+                manifest_path: manifest.display().to_string(),
+                publish: None,
+                dependencies: Vec::new(),
+                targets,
+            }
+        };
+        let target = |name: &str, kinds: &[&str]| Target {
+            name: name.to_string(),
+            kind: kinds.iter().map(|kind| (*kind).to_string()).collect(),
+        };
+        let metadata = Metadata {
+            packages: vec![
+                package("one", "components/one", vec![target("one", &["bin"])]),
+                package(
+                    "mixed",
+                    "components/mixed",
+                    vec![target("mixed", &["bin"]), target("mixed", &["lib"])],
+                ),
+                package(
+                    "many",
+                    "components/many",
+                    vec![target("many", &["bin"]), target("extra", &["bin"])],
+                ),
+                // This package has the same components-root shape as the
+                // members above but is only a transitive metadata package,
+                // never a root workspace component.
+                package(
+                    "nonmember",
+                    "components/nonmember",
+                    vec![target("nonmember", &["bin"])],
+                ),
+            ],
+            workspace_members: vec!["one".into(), "mixed".into(), "many".into()],
+        };
+        let components = discover_local_component_packages(root.path(), &metadata).unwrap();
+        assert_eq!(components.len(), 3);
+        assert_eq!(components[0].binary_names, ["extra", "many"]);
+        assert!(!components[0].has_library);
+        assert_eq!(components[1].binary_names, ["mixed"]);
+        assert!(components[1].has_library);
+        assert_eq!(components[2].binary_names, ["one"]);
+        assert!(!components[2].has_library);
+        assert!(
+            components
+                .iter()
+                .all(|component| component.crate_dir != root.path().join("components/nonmember"))
         );
     }
 }

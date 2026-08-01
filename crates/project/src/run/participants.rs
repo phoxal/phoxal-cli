@@ -346,7 +346,7 @@ fn official_runtimes_by_name(resolved: &BundlePlan) -> BTreeMap<&str, &ResolvedP
                 .components
                 .iter()
                 .filter_map(|component| component.driver.as_ref())
-                .filter_map(|driver| driver.registry_runtime.as_ref()),
+                .filter_map(|driver| driver.registry_runtime()),
         )
         .map(|runtime| (runtime.name.as_str(), runtime))
         .collect()
@@ -728,7 +728,7 @@ services:
         let bin = root.join("bin");
         // Stray `.phoxal/` state the layout path must never touch: if it were
         // consulted the run would depend on it, defeating the bundle guarantee.
-        std::fs::create_dir_all(root.join(".phoxal/resolve"))?;
+        std::fs::create_dir_all(root.join(".phoxal/stray"))?;
 
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {
