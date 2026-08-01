@@ -13,8 +13,8 @@ use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_DEVICE, ROBOT_TOOL_JOYPAD, build_launch_plan,
 };
 use phoxal_cli_core::project::resolver::{
-    BundlePlan, ResolveOptions, ResolvedComponent, ResolvedComponentPackage,
-    ResolvedComponentSource, ResolvedPlatformRuntime, ResolvedTool,
+    BundlePlan, ResolveOptions, ResolvedComponent, ResolvedComponentDriver,
+    ResolvedPlatformRuntime, ResolvedTool,
 };
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 use std::path::{Path, PathBuf};
@@ -390,47 +390,24 @@ fn robot_with_service_config(service_id: &str, config: Value) -> Result<Robot> {
     Ok(robot)
 }
 
-fn fixture_component_package(
-    package: &str,
-    kind: ArtifactKind,
-    path: &str,
-) -> ResolvedComponentPackage {
-    ResolvedComponentPackage {
-        package: package.to_string(),
-        kind,
-        source: ResolvedComponentSource::Path {
-            path: PathBuf::from(path),
-        },
-        resolved_dir: Some(PathBuf::from(path)),
-        registry_runtime: None,
+fn fixture_local_driver(path: &str) -> ResolvedComponentDriver {
+    ResolvedComponentDriver::Local {
+        crate_dir: PathBuf::from(path),
     }
 }
 
 /// A registry-sourced component package with a populated `registry_runtime`,
 /// the shape `resolve_components` produces for a package with no matching
 /// `components/` workspace crate.
-fn fixture_registry_component_package(
-    package: &str,
-    kind: ArtifactKind,
-    component_name: &str,
-) -> ResolvedComponentPackage {
-    ResolvedComponentPackage {
+fn fixture_registry_driver(package: &str, component_name: &str) -> ResolvedComponentDriver {
+    ResolvedComponentDriver::Registry(ResolvedPlatformRuntime {
+        name: component_name.to_string(),
         package: package.to_string(),
-        kind,
-        source: ResolvedComponentSource::Registry,
-        resolved_dir: (kind == ArtifactKind::ComponentAssets)
-            .then(|| PathBuf::from(format!("registry/{component_name}"))),
-        registry_runtime: (kind == ArtifactKind::ComponentDriver).then(|| {
-            ResolvedPlatformRuntime {
-                name: component_name.to_string(),
-                package: package.to_string(),
-                kind,
-                path_override: None,
-                train: "0.36.0".to_string(),
-                target: Some("aarch64-unknown-linux-gnu".to_string()),
-            }
-        }),
-    }
+        kind: ArtifactKind::ComponentDriver,
+        path_override: None,
+        train: "0.36.0".to_string(),
+        target: Some("aarch64-unknown-linux-gnu".to_string()),
+    })
 }
 
 #[test]
@@ -1087,38 +1064,19 @@ fn components_without_drivers_are_not_built() -> Result<()> {
         ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: (fixture_component_package(
-                "phoxal/component-ddsm115",
-                ArtifactKind::ComponentAssets,
-                "components/ddsm115",
-            )),
-            driver: Some(fixture_component_package(
-                "phoxal/component-ddsm115",
-                ArtifactKind::ComponentDriver,
-                "components/ddsm115",
-            )),
-            has_driver: true,
+            assets_root: PathBuf::from("components/ddsm115"),
+            driver: Some(fixture_local_driver("components/ddsm115")),
         },
         ResolvedComponent {
             instance: "caster".to_string(),
             source_name: "passive_caster".to_string(),
-            assets: (fixture_component_package(
-                "phoxal/component-passive_caster",
-                ArtifactKind::ComponentAssets,
-                "components/passive_caster",
-            )),
+            assets_root: PathBuf::from("components/passive_caster"),
             driver: None,
-            has_driver: false,
         },
     ])?;
-    // Resolution already settled each package's on-disk directory into
-    // `resolved_dir` (`driver_path_override()`), so the locator callback is
-    // never reached - only a driverless component (no driver package at all)
-    // would ever have nothing to resolve.
-    let source_participants =
-        source_participants_from_resolved(temp.path(), &resolved, |_component, _project_root| {
-            panic!("resolved_dir is always pre-populated; the locator callback is never reached")
-        })?;
+    // Resolution retains the local driver's settled source directory; source
+    // participant construction never rediscoveries a component package.
+    let source_participants = source_participants_from_resolved(temp.path(), &resolved)?;
 
     assert_eq!(
         source_participants,
@@ -1149,16 +1107,9 @@ fn components_without_drivers_are_not_built() -> Result<()> {
 
     // Simulation uses the same resolved plan but deliberately substitutes
     // physical components. The selector must not merely filter an already
-    // built list: its component locator is unreachable for this real
-    // path-sourced driver.
-    let simulation_sources = source_participants_from_resolved_with_drivers(
-        temp.path(),
-        &resolved,
-        false,
-        |_component, _project_root| {
-            panic!("simulation must not try to locate physical component drivers")
-        },
-    )?;
+    // built list.
+    let simulation_sources =
+        source_participants_from_resolved_with_drivers(temp.path(), &resolved, false)?;
     assert!(simulation_sources.is_empty(), "{simulation_sources:?}");
     Ok(())
 }
@@ -1172,26 +1123,14 @@ fn registry_component_driver_becomes_a_platform_ref_not_a_source_participant() -
     let resolved = resolved_with_components(vec![ResolvedComponent {
         instance: "left_drive".to_string(),
         source_name: "ddsm115".to_string(),
-        assets: (fixture_registry_component_package(
+        assets_root: PathBuf::from("registry/ddsm115"),
+        driver: Some(fixture_registry_driver(
             "phoxal/component-ddsm115",
-            ArtifactKind::ComponentAssets,
             "ddsm115",
         )),
-        driver: Some(fixture_registry_component_package(
-            "phoxal/component-ddsm115",
-            ArtifactKind::ComponentDriver,
-            "ddsm115",
-        )),
-        has_driver: true,
     }])?;
 
-    let source_participants =
-        source_participants_from_resolved(temp.path(), &resolved, |component, _project_root| {
-            panic!(
-                "a registry-sourced driver for '{}' must never reach the source-crate locator",
-                component.instance
-            )
-        })?;
+    let source_participants = source_participants_from_resolved(temp.path(), &resolved)?;
     assert!(
         source_participants.is_empty(),
         "registry driver must not become a source participant: {source_participants:?}"
@@ -1220,32 +1159,20 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
         ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: (fixture_registry_component_package(
+            assets_root: PathBuf::from("registry/ddsm115"),
+            driver: Some(fixture_registry_driver(
                 "phoxal/component-ddsm115",
-                ArtifactKind::ComponentAssets,
                 "ddsm115",
             )),
-            driver: Some(fixture_registry_component_package(
-                "phoxal/component-ddsm115",
-                ArtifactKind::ComponentDriver,
-                "ddsm115",
-            )),
-            has_driver: true,
         },
         ResolvedComponent {
             instance: "right_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: (fixture_registry_component_package(
+            assets_root: PathBuf::from("registry/ddsm115"),
+            driver: Some(fixture_registry_driver(
                 "phoxal/component-ddsm115",
-                ArtifactKind::ComponentAssets,
                 "ddsm115",
             )),
-            driver: Some(fixture_registry_component_package(
-                "phoxal/component-ddsm115",
-                ArtifactKind::ComponentDriver,
-                "ddsm115",
-            )),
-            has_driver: true,
         },
     ])?;
 
@@ -1283,10 +1210,7 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
         .expect("the selected registry driver remains checkable");
     assert_eq!(selected.instances, ["left_drive"]);
 
-    let source_participants =
-        source_participants_from_resolved(temp.path(), &resolved, |_component, _project_root| {
-            panic!("registry drivers never reach the source locator")
-        })?;
+    let source_participants = source_participants_from_resolved(temp.path(), &resolved)?;
     assert!(source_participants.is_empty());
 
     let mut fetch_calls = 0;
@@ -1341,19 +1265,11 @@ fn driverless_registry_component_stages_assets_only_and_is_not_a_check_participa
     let resolved = resolved_with_components(vec![ResolvedComponent {
         instance: "caster".to_string(),
         source_name: "passive_caster".to_string(),
-        assets: (fixture_registry_component_package(
-            "phoxal/component-passive_caster",
-            ArtifactKind::ComponentAssets,
-            "passive_caster",
-        )),
+        assets_root: PathBuf::from("registry/passive_caster"),
         driver: None,
-        has_driver: false,
     }])?;
 
-    let source_participants =
-        source_participants_from_resolved(temp.path(), &resolved, |_component, _project_root| {
-            panic!("a driverless component has no driver to locate")
-        })?;
+    let source_participants = source_participants_from_resolved(temp.path(), &resolved)?;
     assert!(source_participants.is_empty());
     assert!(component_driver_platform_refs_from_resolved(&resolved).is_empty());
 
@@ -1376,10 +1292,7 @@ fn path_overridden_service_enters_check_through_source_participant_report() -> R
     let platform_refs = platform_artifact_refs_from_resolved(&resolved);
     assert!(platform_refs.is_empty());
 
-    let source_participants =
-        source_participants_from_resolved(temp.path(), &resolved, |_component, _root| {
-            bail!("no components in this fixture")
-        })?;
+    let source_participants = source_participants_from_resolved(temp.path(), &resolved)?;
     assert_eq!(
         source_participants,
         vec![SourceParticipant::official_service(

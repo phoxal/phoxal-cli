@@ -33,6 +33,30 @@ pub(crate) fn resolve_project(
     options: SimulateOptions,
     reporter: &dyn crate::Reporter,
 ) -> Result<ResolvedSimulation> {
+    resolve_project_with(
+        project_start,
+        options,
+        reporter,
+        |robot, project_root, options| {
+            resolve_with_train(robot, project_root, options, |train| {
+                reporter.report(crate::PreparationEvent::ProjectResolved {
+                    train: train.to_string(),
+                });
+            })
+        },
+    )
+}
+
+fn resolve_project_with(
+    project_start: &Path,
+    options: SimulateOptions,
+    reporter: &dyn crate::Reporter,
+    resolver: impl FnOnce(
+        &phoxal_manifest::source::robot::v0::Manifest,
+        &Path,
+        ResolveOptions,
+    ) -> Result<BundlePlan>,
+) -> Result<ResolvedSimulation> {
     let robot_path = phoxal_cli_core::project::resolver::discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
@@ -49,11 +73,14 @@ pub(crate) fn resolve_project(
         crate::PhaseId::new("validate"),
         "Validating robot.yaml",
         || {
-            resolve_with_train(&robot, &project_root, ResolveOptions::default(), |train| {
-                reporter.report(crate::PreparationEvent::ProjectResolved {
-                    train: train.to_string(),
-                });
-            })
+            resolver(
+                &robot,
+                &project_root,
+                ResolveOptions {
+                    offline: options.offline,
+                    ..Default::default()
+                },
+            )
         },
     )?;
     Ok(ResolvedSimulation {
@@ -61,6 +88,48 @@ pub(crate) fn resolve_project(
         world_path,
         resolved,
     })
+}
+
+#[cfg(test)]
+mod resolve_project_tests {
+    use super::*;
+
+    struct Reporter;
+    impl crate::Reporter for Reporter {
+        fn report(&self, _event: crate::PreparationEvent) {}
+    }
+
+    #[test]
+    fn resolve_project_forwards_offline_to_the_resolution_seam() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        std::fs::create_dir_all(project.path().join("worlds"))?;
+        std::fs::write(
+            project.path().join("worlds/test.wbt"),
+            "#VRML_SIM R2025a utf8",
+        )?;
+        std::fs::write(
+            project.path().join("robot.yaml"),
+            "schema: robot/v0\nrobot:\n  id: test\n  namespace: dev\n  motion_limits:\n    max_linear_speed_mps: 1.0\n    max_angular_speed_radps: 1.0\n  kinematic:\n    kind: omnidirectional\n    actuators: [drive.motor]\n    encoders: []\n  components:\n    drive:\n      component: wheel\n      mount_link: base\n",
+        )?;
+        let reporter = Reporter;
+        let seen = std::sync::atomic::AtomicBool::new(false);
+        let error = resolve_project_with(
+            project.path(),
+            SimulateOptions {
+                world: "worlds/test.wbt".to_string(),
+                offline: true,
+            },
+            &reporter,
+            |_robot, _root, options| {
+                assert!(options.offline, "simulation must never drop --offline");
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                anyhow::bail!("stop after observing options")
+            },
+        )
+        .expect_err("the test resolver intentionally stops after observing options");
+        assert!(seen.load(std::sync::atomic::Ordering::SeqCst), "{error:#}");
+        Ok(())
+    }
 }
 
 /// Build the checked simulation launch plan from the one already-prepared,

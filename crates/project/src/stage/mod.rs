@@ -77,8 +77,8 @@ mod tests {
     use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::launch_plan::{ParticipantExecution, ParticipantLaunchRecord};
     use phoxal_cli_core::project::resolver::{
-        BundlePlan, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-        ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, official_binary_name,
+        BundlePlan, ResolvedComponent, ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime,
+        official_binary_name,
     };
     use std::fs;
     use std::os::unix::fs::MetadataExt;
@@ -751,17 +751,8 @@ robot:
         resolved.components.push(ResolvedComponent {
             instance: "left_drive".to_string(),
             source_name: "ddsm115".to_string(),
-            assets: (ResolvedComponentPackage {
-                package: "phoxal/component-ddsm115".to_string(),
-                kind: ArtifactKind::ComponentAssets,
-                source: ResolvedComponentSource::Path {
-                    path: PathBuf::from("components/ddsm115"),
-                },
-                resolved_dir: Some(source.clone()),
-                registry_runtime: None,
-            }),
+            assets_root: source.clone(),
             driver: None,
-            has_driver: false,
         });
 
         let staged = stage_runtime_layout(project.path(), &resolved)?;

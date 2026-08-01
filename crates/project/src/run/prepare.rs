@@ -12,7 +12,6 @@
 use super::{DriverPolicy, PreparedRun, RunOptions};
 use crate::build::cargo::{SourceArtifacts, build_selected_source_artifacts};
 use crate::build::profile::StagingBuild;
-use crate::resolve::component_driver::component_driver_crate_dir;
 use crate::resolve::project::resolve_with_train;
 use crate::run::participants::{
     build_layout_specs, source_cwd, source_dirs_by_participant, stage_complete_bin_store,
@@ -110,6 +109,18 @@ pub(crate) fn resolve_staging(
     build: StagingBuild,
     ui: &dyn crate::Reporter,
 ) -> Result<ResolvedStagingInput> {
+    resolve_staging_with_registry_cache(project_start, None, options, build, ui)
+}
+
+/// Resolve a frozen source tree while directing immutable registry archives to
+/// an explicitly owned live cache (the container builder's project root).
+pub(crate) fn resolve_staging_with_registry_cache(
+    project_start: &Path,
+    registry_cache_root: Option<&Path>,
+    options: RunOptions,
+    build: StagingBuild,
+    ui: &dyn crate::Reporter,
+) -> Result<ResolvedStagingInput> {
     crate::progress::ensure_active(ui)?;
     let robot_path = discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
@@ -132,22 +143,32 @@ pub(crate) fn resolve_staging(
         crate::PhaseId::new("validate"),
         "Validating robot.yaml",
         || {
-            resolve_with_train(
-                &robot,
-                project_root,
-                ResolveOptions {
-                    official_target_triple: official_target.clone(),
-                    tool_target_triple: official_target,
-                    drivers: driver_policy.selection(),
-                    include_simulators: build.include_simulators(),
-                    offline: options.offline,
-                },
-                |train| {
+            let options = ResolveOptions {
+                official_target_triple: official_target.clone(),
+                tool_target_triple: official_target,
+                drivers: driver_policy.selection(),
+                include_simulators: build.include_simulators(),
+                offline: options.offline,
+            };
+            if let Some(registry_cache_root) = registry_cache_root {
+                crate::resolve::project::resolve_with_train_using_registry_cache(
+                    &robot,
+                    project_root,
+                    registry_cache_root,
+                    options,
+                    |train| {
+                        ui.report(crate::PreparationEvent::ProjectResolved {
+                            train: train.to_string(),
+                        });
+                    },
+                )
+            } else {
+                resolve_with_train(&robot, project_root, options, |train| {
                     ui.report(crate::PreparationEvent::ProjectResolved {
                         train: train.to_string(),
                     });
-                },
-            )
+                })
+            }
         },
     )?;
 
@@ -205,8 +226,7 @@ pub(crate) fn refresh_staging_resolved(
     crate::progress::ensure_active(ui)?;
     let materialize_settings = build.materialize_settings(&project_root, options.offline)?;
 
-    let source_participants =
-        source_participants_from_resolved(&project_root, &resolved, component_driver_crate_dir)?;
+    let source_participants = source_participants_from_resolved(&project_root, &resolved)?;
     // Driver selection is resolution-visible: an excluded source driver must
     // be absent from the Cargo command as well as the staged layout. Keep the
     // full list for source cwd provenance, but plan only selected artifacts.
@@ -235,7 +255,7 @@ pub(crate) fn refresh_staging_resolved(
                 .includes_instance(&component.instance)
         })
         .filter_map(|component| component.driver.as_ref())
-        .filter_map(|driver| driver.registry_runtime.as_ref())
+        .filter_map(|driver| driver.registry_runtime())
         .collect::<Vec<_>>();
     crate::stage::materialize_candidate_store(
         candidate.path(),

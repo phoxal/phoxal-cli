@@ -231,6 +231,7 @@ mod tests {
 
     #[test]
     fn reporter_maps_repeats_and_failures_without_reopening_done_prepare() {
+        let _diagnostics_guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK.blocking_lock();
         let board = SupervisorState::new();
         board.plan_startup_steps();
         let reporter = BoardReporter::new(
@@ -302,6 +303,7 @@ mod tests {
 
     #[test]
     fn unsupported_train_finishes_project_then_fails_prepare_with_typed_train() {
+        let _diagnostics_guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK.blocking_lock();
         let board = SupervisorState::new();
         board.plan_startup_steps();
         let reporter = BoardReporter::new(
@@ -340,6 +342,7 @@ mod tests {
 
     #[test]
     fn staged_layout_carries_opening_detail_into_active_prepare_step() {
+        let _diagnostics_guard = super::super::diagnostics::DIAGNOSTICS_TEST_LOCK.blocking_lock();
         let board = SupervisorState::new();
         board.plan_startup_steps();
         let reporter = BoardReporter::new(

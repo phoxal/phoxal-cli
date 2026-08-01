@@ -382,8 +382,8 @@ mod tests {
         runtime_layout_dir,
     };
     use super::super::super::resolver::{
-        BundlePlan, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
-        ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime, official_binary_name,
+        BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
+        ResolvedTool, ResolvedUserRuntime, official_binary_name,
     };
     use super::super::RuntimeLayout;
     use super::*;
@@ -580,15 +580,10 @@ services:
         ResolvedComponent {
             instance: instance.to_string(),
             source_name: "ddsm115".to_string(),
-            assets: ResolvedComponentPackage {
-                package: "phoxal/component-fixture".to_string(),
-                kind: ArtifactKind::ComponentAssets,
-                source: ResolvedComponentSource::Registry,
-                resolved_dir: None,
-                registry_runtime: None,
-            },
-            driver: None,
-            has_driver: true,
+            assets_root: PathBuf::from("/tmp/ddsm115"),
+            driver: Some(ResolvedComponentDriver::Local {
+                crate_dir: PathBuf::from("/tmp/ddsm115"),
+            }),
         }
     }
 
