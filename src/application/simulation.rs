@@ -70,7 +70,7 @@ pub(crate) async fn run_command(
 mod setup {
 
     use anyhow::{Context, Result};
-    use phoxal_cli_core::project::launch_plan::{PlanRevision, RunIdentity};
+    use phoxal_cli_core::project::launch_plan::RunIdentity;
     use tokio::sync::mpsc;
 
     use crate::cli::output::OutputContext;
@@ -169,7 +169,7 @@ mod setup {
             simulation.stage_root.display()
         ));
 
-        let mut specs = prepared
+        let specs = prepared
             .participants
             .iter()
             .filter_map(|participant| participant.launch.clone())
@@ -180,12 +180,6 @@ mod setup {
             .context("simulation stop-first participant has no launch spec")?;
         let requested_stop =
             RequestedStop::new(requested_spec.key.clone(), requested_spec.shutdown_grace);
-        let revision = PlanRevision::compile(1, prepared.plan.clone())?;
-        phoxal_cli_supervisor::materialize_plan_binaries(
-            &prepared.project_root,
-            &revision,
-            &mut specs,
-        )?;
         ui.info(format!(
             "simulation launch plan resolved: {} robot(s)",
             prepared.plan.robots.len()

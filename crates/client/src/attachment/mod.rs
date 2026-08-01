@@ -389,7 +389,6 @@ fn supervisor_observation(snapshot: &SupervisorSnapshotV0) -> SupervisorObservat
         simulation: snapshot.simulation.clone(),
         lifecycle: snapshot.lifecycle,
         router: snapshot.router.clone(),
-        plan_revision: snapshot.plan_revision,
         graph_generation: snapshot.graph_generation,
         startup: snapshot.startup.clone(),
         failure: snapshot.failure.clone(),

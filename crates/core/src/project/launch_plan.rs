@@ -11,7 +11,6 @@ use phoxal_runtime_contract::{
     BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ParticipantLaunch,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::catalog::ArtifactKind;
 use super::resolver::{BundlePlan, official_binary_name};
@@ -100,89 +99,8 @@ pub struct LaunchPlan {
     pub robots: Vec<RobotLaunch>,
 }
 
-/// An immutable, content-identified compilation of the complete launch graph.
-/// Watch rebuilds create a new value; a running revision is never edited.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PlanRevision {
-    pub number: u64,
-    /// The digest of the plan's *content* - what to launch - and deliberately
-    /// not of the run identities it carries. Two builds of the same layout
-    /// digest identically even though every supervised run mints a fresh
-    /// `ExecutionId` (#952 section B).
-    pub digest: String,
-    pub plan: LaunchPlan,
-}
-
-impl PlanRevision {
-    pub fn compile(number: u64, plan: LaunchPlan) -> Result<Self> {
-        anyhow::ensure!(number > 0, "plan revision numbers start at one");
-        validate_runtime_bounds(&plan)?;
-        // The digest is the plan's *content* - what to launch - so it excludes
-        // the run identities, which say *which run* rather than what (#952
-        // section B). Two builds of the same layout must digest identically
-        // even though every supervised run mints fresh identities.
-        let canonical = serde_json::to_vec(&content_only(plan.clone()))?;
-        let digest = hex::encode(Sha256::digest(canonical));
-        Ok(Self {
-            number,
-            digest,
-            plan,
-        })
-    }
-
-    #[must_use]
-    pub fn content_path_in(&self, content_root: &Path, name: &str) -> PathBuf {
-        content_root.join(name)
-    }
-
-    /// Publish content-addressed bytes without ever overwriting an existing
-    /// artifact. The shared content store deliberately does not include the
-    /// whole-plan digest: an unchanged binary keeps the same executable path
-    /// across revisions, so reconciliation does not restart unrelated
-    /// participants. A repeated identical write is idempotent; different
-    /// bytes at the same content address are corruption and fail closed.
-    pub fn publish_content_in(
-        &self,
-        content_root: &Path,
-        name: &str,
-        bytes: &[u8],
-    ) -> Result<PathBuf> {
-        anyhow::ensure!(
-            !name.is_empty() && Path::new(name).components().count() == 1,
-            "plan content name must be one path component"
-        );
-        let path = self.content_path_in(content_root, name);
-        let parent = path.parent().expect("content path has parent");
-        std::fs::create_dir_all(parent)?;
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(bytes)?;
-                file.sync_all()?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                anyhow::ensure!(
-                    std::fs::read(&path)? == bytes,
-                    "immutable plan content collision at {}",
-                    path.display()
-                );
-            }
-            Err(error) => return Err(error.into()),
-        }
-        Ok(path)
-    }
-}
-
 /// Reject a launch graph that cannot be represented by runtime state.
-///
-/// Preparation calls this before publishing participant rows; revision
-/// compilation repeats it as the domain-level invariant at its final choke
-/// point.
-pub fn validate_runtime_bounds(plan: &LaunchPlan) -> Result<()> {
+pub(crate) fn validate_runtime_bounds(plan: &LaunchPlan) -> Result<()> {
     let process_count = plan
         .robots
         .iter()
@@ -328,7 +246,9 @@ pub fn build_launch_plan(
         .map(|robot| build_robot_launch(&mode, robot, run))
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(LaunchPlan { mode, robots })
+    let plan = LaunchPlan { mode, robots };
+    validate_runtime_bounds(&plan)?;
+    Ok(plan)
 }
 
 /// Erase the per-run identities so two plans can be compared for content.
@@ -337,7 +257,8 @@ pub fn build_launch_plan(
 /// one `ProducerId` per participant, so no two plan builds ever agree on them -
 /// and none of them describes *what* the plan launches.
 #[must_use]
-pub fn content_only(mut plan: LaunchPlan) -> LaunchPlan {
+#[cfg(test)]
+pub(crate) fn content_only(mut plan: LaunchPlan) -> LaunchPlan {
     let fixed_execution =
         ExecutionId::parse(&"0".repeat(ExecutionId::LEN)).expect("fixed execution id");
     let fixed_producer =
@@ -741,8 +662,6 @@ mod tests {
         );
     }
 
-    use std::path::Path;
-
     use crate::project::catalog::ArtifactKind;
     use crate::project::resolver::{
         BundlePlan, ResolvedComponent, ResolvedComponentPackage, ResolvedComponentSource,
@@ -750,43 +669,6 @@ mod tests {
     };
 
     use super::*;
-
-    #[test]
-    fn plan_revisions_are_content_identified_and_never_overwritten() -> anyhow::Result<()> {
-        let plan = LaunchPlan {
-            mode: LaunchMode::Run,
-            robots: Vec::new(),
-        };
-        let first = PlanRevision::compile(1, plan.clone())?;
-        let second = PlanRevision::compile(2, plan)?;
-        assert_eq!(first.digest, second.digest);
-        let changed_plan = PlanRevision::compile(
-            3,
-            LaunchPlan {
-                mode: LaunchMode::Webots {
-                    world: PathBuf::from("/tmp/world.wbt"),
-                },
-                robots: Vec::new(),
-            },
-        )?;
-        assert_ne!(first.digest, changed_plan.digest);
-        let content_root = Path::new("/tmp/project/content");
-        assert_eq!(
-            first.content_path_in(content_root, "participant"),
-            changed_plan.content_path_in(content_root, "participant")
-        );
-        let temp = tempfile::tempdir()?;
-        let path = first.publish_content_in(temp.path(), "participant", b"revision-one")?;
-        assert_eq!(std::fs::read(&path)?, b"revision-one");
-        first.publish_content_in(temp.path(), "participant", b"revision-one")?;
-        assert!(
-            first
-                .publish_content_in(temp.path(), "participant", b"mutated")
-                .is_err()
-        );
-        assert_eq!(std::fs::read(path)?, b"revision-one");
-        Ok(())
-    }
 
     #[test]
     fn reference_graph_process_count_fits_runtime_bound() {
@@ -823,13 +705,31 @@ mod tests {
             }],
         };
 
-        PlanRevision::compile(1, plan(36)).expect("40-process reference graph should fit");
+        validate_runtime_bounds(&plan(36)).expect("40-process reference graph should fit");
         let error =
-            PlanRevision::compile(1, plan(37)).expect_err("41 processes must remain bounded");
-        assert!(
-            error.to_string().contains("runtime supports at most 40"),
-            "{error:#}"
-        );
+            validate_runtime_bounds(&plan(37)).expect_err("41 processes must remain bounded");
+        let message = error.to_string();
+        assert!(message.contains("has 41 supervised processes"), "{error:#}");
+        assert!(message.contains("runtime supports at most 40"), "{error:#}");
+    }
+
+    #[test]
+    fn launch_plan_constructor_enforces_runtime_process_bound() -> anyhow::Result<()> {
+        let mut resolved = empty_bundle_plan("testbot")?;
+        resolved.tools = (0..37)
+            .map(|index| tool(&format!("tool-{index}")))
+            .collect();
+
+        let error = build_launch_plan(
+            LaunchMode::Run,
+            &[empty_checked_input(Path::new("/tmp/robot"), &resolved)],
+            RunIdentity::default(),
+        )
+        .expect_err("the authoritative constructor must reject 41 processes");
+        let message = error.to_string();
+        assert!(message.contains("has 41 supervised processes"), "{error:#}");
+        assert!(message.contains("runtime supports at most 40"), "{error:#}");
+        Ok(())
     }
 
     #[test]

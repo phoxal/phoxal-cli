@@ -24,11 +24,7 @@ pub fn project_state_dir() -> Result<PathBuf> {
     project_root().map(|root| crate::paths::runtime::RuntimePaths::for_root(&root).state_root)
 }
 
-/// Base directory holding the staged runtime layouts, one subdirectory per
-/// target triple (`.phoxal/bundle/`). Written by the stager for `run`
-/// and live simulation; never runtime state (project.lock, supervisor.sock,
-/// and plans stay in the selected [`crate::paths::runtime::RuntimePaths`] state
-/// root).
+/// Project-local staging root for generated Webots worlds and controllers.
 pub fn webots_dir() -> Result<PathBuf> {
     project_state_dir().map(|root| root.join("webots"))
 }

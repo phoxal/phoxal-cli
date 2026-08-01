@@ -97,7 +97,6 @@ pub(crate) struct BuildRequest {
 
 #[derive(Debug)]
 pub(crate) struct PreparedRun {
-    pub(crate) project_root: PathBuf,
     pub(crate) plan: LaunchPlan,
     pub(crate) board: SupervisorState,
     pub(crate) specs: Vec<ParticipantSpec>,
@@ -840,7 +839,6 @@ async fn prepare_run(
         .filter_map(|participant| participant.launch.clone())
         .collect();
     Ok(PreparedRun {
-        project_root: prepared.project_root,
         robot_targets: RobotFeedTarget::from_plan(&prepared.plan),
         plan: prepared.plan,
         board,
@@ -1109,7 +1107,7 @@ async fn cancel_startup_wait(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn live_run_setup(
-    mut prepared: PreparedRun,
+    prepared: PreparedRun,
     ui: crate::cli::Ui,
     output: crate::cli::output::OutputContext,
     token: tokio_util::sync::CancellationToken,
@@ -1147,13 +1145,6 @@ pub(crate) async fn live_run_setup(
         phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
         format!("router {connect}"),
     );
-    let revision =
-        phoxal_cli_core::project::launch_plan::PlanRevision::compile(1, prepared.plan.clone())?;
-    phoxal_cli_supervisor::materialize_plan_binaries(
-        &prepared.project_root,
-        &revision,
-        &mut prepared.specs,
-    )?;
     prepared.board.set_router_endpoint(connect.clone());
     prepared.board.set_state(
         phoxal_cli_core::runtime::ProcessKey::project("infrastructure-router"),

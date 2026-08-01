@@ -63,7 +63,7 @@ pub use lock::{
     ProjectLock, ProjectLockIdentity, ProjectLockStatus, ProjectOperation, active_execution,
 };
 pub(crate) use process::child::ManagedChild;
-pub use process::child::{materialize_plan_binaries, maybe_run_guardian};
+pub use process::child::maybe_run_guardian;
 pub use process::spec::{
     RequestedStop, SupervisorAction, SupervisorActionReceiver, SupervisorOptions,
 };

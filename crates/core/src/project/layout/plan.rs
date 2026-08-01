@@ -13,7 +13,7 @@
 //! It is the source-free counterpart of
 //! [`build_launch_plan`](super::super::launch_plan::build_launch_plan): for the
 //! same robot the two produce an identical process graph - same participants,
-//! identities, policies, and plan digest - which is exactly what lets an
+//! identities, and policies - which is exactly what lets an
 //! extracted bundle run without ever re-resolving from source.
 //!
 //! The jsonschema validator lives in the bin crate, so this module does not
@@ -33,7 +33,7 @@ use phoxal_runtime_contract::{
 
 use super::super::launch_plan::{
     DEFAULT_ROUTER_CONNECT, LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
-    RobotLaunch, RunIdentity,
+    RobotLaunch, RunIdentity, validate_runtime_bounds,
 };
 use super::{
     DriverSelection, LayoutInspection, RequiredRuntimeKind, RuntimeLayout, SelectedBinary,
@@ -54,12 +54,13 @@ pub struct PlanOptions {
 /// The complete launch graph a staged layout derives, plus the validation
 /// input the bin-side "validate through the loader" entry runs its own
 /// validator over. The plan is what the supervisor launches from; the config
-/// pairings never enter the plan or its content digest.
+/// pairings never enter the plan.
 #[derive(Debug, Clone)]
 pub struct ConstructedPlan {
-    /// The launch plan, identical in shape and digest to the one the
-    /// [`build_launch_plan`](super::super::launch_plan::build_launch_plan)
+    /// The launch plan, identical in shape to the one the [`build_launch_plan`]
     /// leg builds for the same robot.
+    ///
+    /// [`build_launch_plan`]: super::super::launch_plan::build_launch_plan
     pub plan: LaunchPlan,
     /// One schema pairing per compiler-owned runtime config, so the project
     /// crate can validate the config the compiled declaration carries.
@@ -315,6 +316,7 @@ impl RuntimeLayout {
                 participants,
             }],
         };
+        validate_runtime_bounds(&plan)?;
         Ok(ConstructedPlan {
             plan,
             user_runtime_configs,
@@ -376,7 +378,7 @@ mod tests {
     use super::super::super::catalog;
     use super::super::super::catalog::ArtifactKind;
     use super::super::super::launch_plan::{
-        CheckedRobotLaunchInput, LaunchMode, ParticipantExecution, PlanRevision, build_launch_plan,
+        CheckedRobotLaunchInput, LaunchMode, ParticipantExecution, build_launch_plan,
         runtime_layout_dir,
     };
     use super::super::super::resolver::{
@@ -608,8 +610,8 @@ services:
 
     /// The acceptance criterion made executable: the legacy resolved-robot leg
     /// and the layout constructor produce the same robot's plan - identical
-    /// participant set, identities, policies, and content digest - so an
-    /// extracted bundle runs the exact process graph the source run does.
+    /// participant set, identities, and policies - so an extracted bundle runs
+    /// the exact process graph the source run does.
     #[test]
     fn source_and_bundle_produce_identical_process_graphs() -> Result<()> {
         let project = tempfile::tempdir()?;
@@ -685,11 +687,6 @@ services:
             crate::project::launch_plan::content_only(legacy.clone()),
             "the layout constructor must reproduce the resolved-robot plan exactly"
         );
-        assert_eq!(
-            PlanRevision::compile(1, constructed.plan.clone())?.digest,
-            PlanRevision::compile(1, legacy.clone())?.digest,
-            "identical plans must have identical content digests"
-        );
         Ok(())
     }
 
@@ -725,10 +722,10 @@ services:
     /// is determined by the staged layout's CONTENT (canonical model plus
     /// `bin/` metadata), not by where it lives. Staging a layout, then
     /// "extracting" (copying) it to an arbitrary directory and constructing
-    /// again, yields the identical plan and content digest once the
-    /// deployment-scoped layout root and freshly minted run identities are
-    /// normalized. Nothing else is path-dependent, so a `build.phoxal` extracted
-    /// anywhere runs the same process graph its source staged.
+    /// again, yields the identical plan once the deployment-scoped layout root
+    /// and freshly minted run identities are normalized. Nothing else is
+    /// path-dependent, so a `build.phoxal` extracted anywhere runs the same
+    /// process graph its source staged.
     #[test]
     fn staged_and_extracted_layout_construct_identical_graphs() -> Result<()> {
         let staged_project = tempfile::tempdir()?;
@@ -764,11 +761,6 @@ services:
         assert_eq!(
             staged_plan, extracted_plan,
             "the layout content, not its path, must determine the process graph"
-        );
-        assert_eq!(
-            PlanRevision::compile(1, staged_plan)?.digest,
-            PlanRevision::compile(1, extracted_plan)?.digest,
-            "content-identical plans must have identical content digests"
         );
         Ok(())
     }

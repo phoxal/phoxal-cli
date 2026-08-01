@@ -78,8 +78,7 @@ pub(super) fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> St
 /// always a plain executable (a cargo-built `target/` binary), never a macOS
 /// `.app` bundle. The only `.app` in the whole system is the Webots
 /// *application* on the `simulate` path, which is a CLI-managed host process
-/// outside the plan/layout contract entirely (its bundle is handled by the
-/// supervisor's `materialize_macos_app_binary`, never here).
+/// outside the plan/layout contract entirely and runs in place, never here.
 pub(crate) fn stage_participant_binary(
     staged_root: &Path,
     participant: &ParticipantLaunchRecord,

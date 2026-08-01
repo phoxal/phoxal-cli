@@ -1826,7 +1826,6 @@ mod tests {
             simulation: None,
             lifecycle,
             router: "unixsock-stream/test".to_string(),
-            plan_revision: 1,
             graph_generation: 1,
             startup: StartupStatus::default(),
             failure: failure.map(str::to_string),

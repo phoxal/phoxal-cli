@@ -392,7 +392,6 @@ impl SupervisorState {
             snapshot.framework_train = bounded_text(&framework_train.into());
             snapshot.execution_id = execution_id;
             snapshot.router = bounded_text(&router_endpoint.into());
-            snapshot.plan_revision = 1;
         });
     }
 

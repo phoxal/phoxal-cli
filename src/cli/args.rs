@@ -305,12 +305,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_watch_simulation_join_and_removed_overlays() {
-        assert!(Cli::try_parse_from(["phoxal", "run", "--watch"]).is_err());
+    fn rejects_removed_run_and_simulation_options_and_alternate_surfaces() {
         assert!(Cli::try_parse_from(["phoxal", "run", "--env", "dev"]).is_err());
 
         for removed in [
-            vec!["--watch"],
             vec!["--env", "dev"],
             vec!["--dry-run"],
             vec!["--target", "aarch64-apple-darwin"],
@@ -381,9 +379,8 @@ mod tests {
             Some(std::path::Path::new("/var/phoxal"))
         );
 
-        // `start` is headless: no `--watch`, no `run`-only driver/detach flags.
+        // `start` is headless: it accepts no `run`-only driver/detach flags.
         for rejected in [
-            vec!["phoxal", "start", "--watch"],
             vec!["phoxal", "start", "-d"],
             vec!["phoxal", "start", "--drivers", "off"],
             vec!["phoxal", "start", "--driver", "left_drive"],
