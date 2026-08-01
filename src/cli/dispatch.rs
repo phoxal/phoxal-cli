@@ -24,6 +24,7 @@ impl RootCommand {
             Self::Install(command) => command.run(app).await,
             Self::Rollback(command) => command.run(app).await,
             Self::Validate(command) => command.run(app).await,
+            Self::Schema(command) => command.run(app).await,
             Self::Simulation(command) => command.run(app).await,
             Self::Run(command) => command.run(app).await,
             Self::Start(command) => command.run(app).await,

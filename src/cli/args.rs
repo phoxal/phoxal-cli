@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use super::commands::{
-    attach, build, deploy, doctor, install, logs, rollback, run, self_update, service, simulation,
-    start, status, stop, validate, version,
+    attach, build, deploy, doctor, install, logs, rollback, run, schema, self_update, service,
+    simulation, start, status, stop, validate, version,
 };
 
 #[derive(Debug, Parser)]
@@ -62,6 +62,8 @@ pub enum RootCommand {
                       The config-schema check compiles the declared service/tool crates (never the official set, never a staged bundle) to read their embedded schema - the one part of `validate` that is not free. A robot.yaml with no declared services/tools compiles nothing."
     )]
     Validate(validate::Validate),
+    #[command(about = "Generate portable JSON Schemas for authored YAML editors.")]
+    Schema(schema::Schema),
     #[command(about = "Simulate a robot with `simulation webots run`.")]
     Simulation(simulation::Simulation),
     #[command(about = "Run the resolved robot graph with the host-native supervisor.")]
