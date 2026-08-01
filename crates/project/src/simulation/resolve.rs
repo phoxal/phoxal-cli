@@ -1,13 +1,13 @@
 //! Project resolution and checked simulation launch-plan construction.
 
 use super::{
-    ResolvedSimulation, SimulateOptions, driver_metadata_unavailable, ensure_exactly_one_simulator,
+    ResolvedSimulation, SimulateOptions, ensure_exactly_one_simulator,
     official_simulator_participants, remap_simulator_participant_ids, sim_checked_participants,
-    sim_source_participants,
 };
+use crate::build::cargo::SourceArtifacts;
 use crate::resolve::project::resolve_with_train;
 use crate::validation::CheckGraphContext;
-use crate::validation::build_participant_report_from_source;
+use crate::validation::build_participant_report_from_binary;
 use crate::validation::check_artifact_refs_from_resolved;
 use crate::validation::extract_participant_report_from_staged_runtime;
 use crate::validation::extract_participant_report_from_staged_tool;
@@ -17,7 +17,6 @@ use crate::validation::tool_participants_from_resolved;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use phoxal_cli_core::check::source::SourceParticipantKind;
 use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
@@ -64,37 +63,47 @@ pub(crate) fn resolve_project(
     })
 }
 
-/// Build the checked simulation launch plan. Every source participant
-/// (drivers, path-overridden services/simulators) rebuilds live - there is no
-/// disk cache for metadata extraction (`check::build_participant_report_from_source`
-/// never caches).
+/// Build the checked simulation launch plan from the one already-prepared,
+/// unpublished candidate. Source metadata reads use compiler-reported batch
+/// artifacts; registry metadata reads use that candidate's flat `bin/` store.
+pub(crate) struct CheckedSimulationInput<'a> {
+    pub(crate) project_root: &'a Path,
+    pub(crate) world: &'a Path,
+    pub(crate) resolved: &'a BundlePlan,
+    pub(crate) candidate_root: &'a Path,
+    pub(crate) source_participants: &'a [phoxal_cli_core::check::source::SourceParticipant],
+    pub(crate) source_artifacts: &'a SourceArtifacts,
+    pub(crate) offline: bool,
+    pub(crate) run: RunIdentity,
+}
+
 pub(crate) fn build_checked_sim_launch_plan(
-    project_root: &Path,
-    world: &Path,
-    resolved: &BundlePlan,
-    offline: bool,
-    run: RunIdentity,
+    input: CheckedSimulationInput<'_>,
     reporter: &dyn crate::Reporter,
 ) -> Result<LaunchPlan> {
-    let source_participants = sim_source_participants(project_root, resolved)
-        .with_context(|| "failed to prepare source participants for simulation metadata")?;
-    let metadata_source_participants = source_participants.clone();
-    // A registry-sourced component driver is a platform ref here too (docs
-    // #21), exactly like `build`/`run` - materialized via `cargo install`
-    // rather than built from source. Only a Path/Git-overridden driver crate
-    // reaches the `build` closure below.
-    let platform_refs = check_artifact_refs_from_resolved(resolved);
+    let CheckedSimulationInput {
+        project_root,
+        world,
+        resolved,
+        candidate_root,
+        source_participants,
+        source_artifacts,
+        offline,
+        run,
+    } = input;
+    let metadata_source_participants = source_participants.to_vec();
+    // Webots substitutes physical drivers out of the graph. Apply that
+    // command-specific selection before registry materialization and metadata
+    // fetching, not after Cargo has already done unnecessary host work.
+    let platform_refs = check_artifact_refs_from_resolved(
+        resolved,
+        phoxal_cli_core::project::layout::DriverSelection::None,
+    );
     let tool_participants = tool_participants_from_resolved(resolved)?;
-    // Materialize every official service, tool, and registry component
-    // driver this check needs metadata from, up front - the same
-    // `cargo install` path `run`/`build` use. This is a metadata read, not
-    // staging: it materializes into a SCRATCH candidate that is never
-    // published, never the live `.phoxal/bundle/` - the real staging pass
-    // (`live_simulate_setup`) runs later and owns publishing. Touching the
-    // live bundle here would violate the stager's atomicity promise for
-    // every prior run still using it while this check runs.
-    let scratch = crate::stage::begin_runtime_layout(project_root, resolved)
-        .context("failed to stage a scratch layout for simulation metadata")?;
+    // Materialize the full selected registry set once into the caller's
+    // unpublished candidate. This candidate is later published as the
+    // simulation runtime layout; there is no scratch staging tree and no
+    // second per-participant materialization pass.
     // A valid Cargo robot shares its normal target directory. Keep metadata
     // checking independent for deliberately incomplete validation fixtures:
     // their later graph error is more useful than failing target discovery.
@@ -102,29 +111,27 @@ pub(crate) fn build_checked_sim_launch_plan(
         profile: crate::build::materialise::MaterializeProfile::Debug,
         target_dir: crate::build::cargo::cargo_target_dir(project_root, offline).ok(),
     };
-    crate::stage::materialize_official_store(
-        scratch.path(),
+    let extra_registry_runtimes = resolved
+        .simulators
+        .iter()
+        .filter(|runtime| runtime.source_path().is_none())
+        .collect::<Vec<_>>();
+    crate::stage::materialize_candidate_store(
+        candidate_root,
         resolved,
+        &extra_registry_runtimes,
         offline,
         None,
         &materialize_settings,
         reporter,
-        |crate_dir, name| {
-            crate::build::cargo::build_source_binary(crate_dir, name, reporter, None, offline)
+        |_crate_dir, name| {
+            source_artifacts
+                .binary_named(name)
+                .map(std::path::PathBuf::from)
         },
     )?;
-    for runtime in crate::validation::component_driver_runtimes_by_ref(resolved).values() {
-        crate::stage::materialize_component_driver(
-            scratch.path(),
-            runtime,
-            offline,
-            None,
-            &materialize_settings,
-            reporter,
-        )?;
-    }
-    let bin_dir = scratch.path().join("bin");
-    let mut official_by_name = resolved
+    let bin_dir = candidate_root.join("bin");
+    let official_by_name = resolved
         .platform_runtimes
         .iter()
         .map(|runtime| {
@@ -137,9 +144,6 @@ pub(crate) fn build_checked_sim_launch_plan(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    official_by_name.extend(crate::validation::component_driver_runtimes_by_ref(
-        resolved,
-    ));
     let tools_by_name = resolved
         .tools
         .iter()
@@ -166,11 +170,11 @@ pub(crate) fn build_checked_sim_launch_plan(
         },
         fetch_participant_report_from_tool,
         |participant| {
-            if participant.kind == SourceParticipantKind::ComponentDriver {
-                return build_participant_report_from_source(participant, offline, reporter)
-                    .map_err(|error| driver_metadata_unavailable(participant, error));
-            }
-            build_participant_report_from_source(participant, offline, reporter)
+            build_participant_report_from_binary(
+                participant,
+                source_artifacts.binary(participant)?,
+                reporter,
+            )
         },
     )?;
 
@@ -179,8 +183,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         &mut checked_participants,
         &resolved.source_manifest.robot.id,
     )?;
-    let official_simulators =
-        official_simulator_participants(project_root, resolved, offline, reporter)?;
+    let official_simulators = official_simulator_participants(candidate_root, resolved)?;
     checked_participants.extend(official_simulators);
     let sim_participants = sim_checked_participants(&checked_participants);
     // The complete simulation surface is the only place this can be asked:
@@ -205,7 +208,7 @@ pub(crate) fn build_checked_sim_launch_plan(
             project_root,
             resolved,
             checked_participants: &sim_participants,
-            source_participants: &source_participants,
+            source_participants,
         }],
         run,
     )?;
@@ -297,11 +300,9 @@ services:
     /// requires a numeric `gain`. Hand-writing the section instead of
     /// depending on the real `phoxal` framework crate keeps the fixture free
     /// of registry/network dependencies while still exercising a REAL `cargo
-    /// build` through `build_participant_report_from_source` - the one leg of
+    /// build` through the selected-source batch - the one leg of
     /// `build_checked_sim_launch_plan` that cannot be swapped for a mock
-    /// closure the way `run_check_with_context`'s other unit tests do,
-    /// because `build_checked_sim_launch_plan` does not take an injectable
-    /// build closure.
+    /// closure the way `run_check_with_context`'s other unit tests do.
     fn write_invalid_config_service_fixture(dir: &Path) -> PathBuf {
         let crate_dir = dir.join("avoid");
         std::fs::create_dir_all(crate_dir.join("src")).expect("create fixture crate dirs");
@@ -407,13 +408,30 @@ services:
         let crate_dir = write_invalid_config_service_fixture(temp.path());
         let simulator_dir = write_simulator_fixture(temp.path());
         let resolved = bundle_plan_with_invalid_service_config(crate_dir, simulator_dir)?;
+        let source_participants =
+            super::super::participants::sim_source_participants(temp.path(), &resolved)?;
+        let source_artifacts = crate::build::cargo::build_selected_source_artifacts(
+            &source_participants,
+            None,
+            crate::build::profile::Profile::Debug,
+            None,
+            false,
+            &crate::SilentReporter,
+        )?;
+        let candidate = crate::stage::begin_runtime_layout(temp.path(), &resolved)?;
+        let world = temp.path().join("world.wbt");
 
         let result = build_checked_sim_launch_plan(
-            temp.path(),
-            &temp.path().join("world.wbt"),
-            &resolved,
-            false,
-            RunIdentity::default(),
+            CheckedSimulationInput {
+                project_root: temp.path(),
+                world: &world,
+                resolved: &resolved,
+                candidate_root: candidate.path(),
+                source_participants: &source_participants,
+                source_artifacts: &source_artifacts,
+                offline: false,
+                run: RunIdentity::default(),
+            },
             &crate::SilentReporter,
         );
 

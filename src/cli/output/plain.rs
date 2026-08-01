@@ -30,6 +30,51 @@ impl phoxal_cli_project::Reporter for Ui {
                 crate::cli::output::diagnostics::phase_finished(id.to_string(), outcome, elapsed);
             }
             phoxal_cli_project::PreparationEvent::ProjectResolved { .. } => {}
+            phoxal_cli_project::PreparationEvent::SourceBuildPlanned { groups, artifacts } => {
+                self.info(format!(
+                    "Cargo preparation: {groups} batch(es), {artifacts} selected binaries"
+                ));
+            }
+            phoxal_cli_project::PreparationEvent::SourceBuildGroupStarted {
+                current,
+                total,
+                artifacts,
+            } => {
+                self.info(format!(
+                    "Cargo batch {current}/{total}: {artifacts} selected binaries"
+                ));
+            }
+            phoxal_cli_project::PreparationEvent::SourceBuildArtifactCompleted {
+                completed,
+                total,
+            } => {
+                self.info(format!("Cargo artifacts: {completed}/{total}"));
+            }
+            phoxal_cli_project::PreparationEvent::SourceBuildGroupFinished {
+                current,
+                total,
+                success,
+            } => self.info(format!(
+                "Cargo batch {current}/{total} {}",
+                if success { "complete" } else { "failed" }
+            )),
+            phoxal_cli_project::PreparationEvent::RegistryInstallGroupStarted {
+                current,
+                total,
+                packages,
+            } => {
+                self.info(format!(
+                    "Cargo install batch {current}/{total}: {packages} exact packages"
+                ));
+            }
+            phoxal_cli_project::PreparationEvent::RegistryInstallGroupFinished {
+                current,
+                total,
+                success,
+            } => {
+                let outcome = if success { "complete" } else { "failed" };
+                self.info(format!("Cargo install batch {current}/{total}: {outcome}"));
+            }
         }
     }
 }

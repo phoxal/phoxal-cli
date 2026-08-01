@@ -10,6 +10,7 @@
 //! has nothing to build and runs in place.
 
 use super::{DriverPolicy, PreparedRun, RunOptions};
+use crate::build::cargo::{SourceArtifacts, build_selected_source_artifacts};
 use crate::build::profile::StagingBuild;
 use crate::resolve::component_driver::component_driver_crate_dir;
 use crate::resolve::project::resolve_with_train;
@@ -18,7 +19,7 @@ use crate::run::participants::{
 };
 use crate::run::report::{driven_instances, report_excluded_drivers, report_undeclared_runtimes};
 use crate::validation::CheckGraphContext;
-use crate::validation::build_participant_report_from_source;
+use crate::validation::build_participant_report_from_binary;
 use crate::validation::check_artifact_refs_from_resolved;
 use crate::validation::extract_participant_report_from_staged_runtime;
 use crate::validation::extract_participant_report_from_staged_tool;
@@ -204,25 +205,50 @@ pub(crate) fn refresh_staging_resolved(
     crate::progress::ensure_active(ui)?;
     let materialize_settings = build.materialize_settings(&project_root, options.offline)?;
 
-    // Materialize every official service, tool, and the infrastructure
-    // router into the candidate `bin/` up front, via `cargo install`
-    // (organization#951 WS4). This is what makes the source check below able
-    // to read every official's embedded metadata straight off disk, and
-    // completes the flat `bin/` store the loader requires.
-    crate::stage::materialize_official_store(
+    let source_participants =
+        source_participants_from_resolved(&project_root, &resolved, component_driver_crate_dir)?;
+    // Driver selection is resolution-visible: an excluded source driver must
+    // be absent from the Cargo command as well as the staged layout. Keep the
+    // full list for source cwd provenance, but plan only selected artifacts.
+    let selected_source_participants =
+        selected_native_source_participants(&source_participants, driver_policy.selection());
+
+    // Compile the complete selected source subset before either checking or
+    // staging sees it. Cargo's JSON artifact path is authoritative.
+    let source_artifacts = build_selected_source_artifacts(
+        &selected_source_participants,
+        build.target(),
+        build.source_profile(),
+        build.prebuilt_target_dir(),
+        options.offline,
+        ui,
+    )?;
+
+    // Registry entries remain Cargo-install-owned. Source overrides consume
+    // the already-built bytes rather than opening another Cargo invocation.
+    let extra_registry_runtimes = resolved
+        .components
+        .iter()
+        .filter(|component| {
+            driver_policy
+                .selection()
+                .includes_instance(&component.instance)
+        })
+        .filter_map(|component| component.driver.as_ref())
+        .filter_map(|driver| driver.registry_runtime.as_ref())
+        .collect::<Vec<_>>();
+    crate::stage::materialize_candidate_store(
         candidate.path(),
         &resolved,
+        &extra_registry_runtimes,
         options.offline,
         build.officials_source(),
         &materialize_settings,
         ui,
-        |crate_dir, name| build.build_user_binary(crate_dir, name, ui, options.offline),
+        |_crate_dir, name| source_artifacts.binary_named(name).map(PathBuf::from),
     )
     .context("failed to materialize official runtimes")?;
     crate::progress::ensure_active(ui)?;
-
-    let source_participants =
-        source_participants_from_resolved(&project_root, &resolved, component_driver_crate_dir)?;
 
     // Source/staging-time validation: build every source participant (for its
     // embedded metadata) and check the source graph before we stage and run.
@@ -243,8 +269,9 @@ pub(crate) fn refresh_staging_resolved(
                     candidate.path(),
                     &resolved.source_manifest,
                     &resolved,
-                    &source_participants,
-                    options.offline,
+                    &selected_source_participants,
+                    &source_artifacts,
+                    driver_policy.selection(),
                     ui,
                 )
             },
@@ -256,13 +283,8 @@ pub(crate) fn refresh_staging_resolved(
     // resolved graph; everything after it reads only the candidate layout.
     stage_complete_bin_store(
         candidate.path(),
-        &resolved,
-        &source_participants,
-        &driver_policy.selection(),
-        options.offline,
-        &build,
-        &materialize_settings,
-        ui,
+        &selected_source_participants,
+        &source_artifacts,
     )?;
     crate::progress::ensure_active(ui)?;
 
@@ -667,11 +689,12 @@ fn run_source_check(
     robot: &phoxal_manifest::source::robot::v0::Manifest,
     resolved: &BundlePlan,
     source_participants: &[phoxal_cli_core::check::source::SourceParticipant],
-    offline: bool,
+    source_artifacts: &SourceArtifacts,
+    drivers: phoxal_cli_core::project::layout::DriverSelection,
     reporter: &dyn crate::Reporter,
 ) -> Result<()> {
     let bin_dir = staged_root.join("bin");
-    let platform_refs = check_artifact_refs_from_resolved(resolved);
+    let platform_refs = check_artifact_refs_from_resolved(resolved, drivers);
     let tool_participants = tool_participants_from_resolved(resolved)?;
     let mut official_by_name = resolved
         .platform_runtimes
@@ -711,12 +734,35 @@ fn run_source_check(
             ))
         },
         fetch_participant_report_from_tool,
-        |participant| build_participant_report_from_source(participant, offline, reporter),
+        |participant| {
+            build_participant_report_from_binary(
+                participant,
+                source_artifacts.binary(participant)?,
+                reporter,
+            )
+        },
     )?;
     if !outcome.is_ok() {
         crate::validation::ensure_check_outcome_ok(&outcome)?;
     }
     Ok(())
+}
+
+fn selected_native_source_participants(
+    participants: &[phoxal_cli_core::check::source::SourceParticipant],
+    drivers: phoxal_cli_core::project::layout::DriverSelection,
+) -> Vec<phoxal_cli_core::check::source::SourceParticipant> {
+    use phoxal_cli_core::check::source::SourceParticipantKind;
+    participants
+        .iter()
+        .filter(|participant| match participant.kind {
+            // A simulator override belongs only to the Webots command.
+            SourceParticipantKind::Simulator => false,
+            SourceParticipantKind::ComponentDriver => drivers.includes_instance(&participant.name),
+            _ => true,
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -761,6 +807,44 @@ robot:
         );
         obj.append_section_data(section, payload.as_bytes(), 1);
         obj.write().expect("synthesize object file")
+    }
+
+    #[test]
+    fn native_source_selection_excludes_simulators_and_unselected_drivers() {
+        use phoxal_cli_core::check::source::SourceParticipant;
+
+        let participants = vec![
+            SourceParticipant::user_service("mission", PathBuf::from("runtimes/mission")),
+            SourceParticipant::component_driver_with_artifact_id(
+                "left_drive",
+                "ddsm115",
+                PathBuf::from("components/ddsm115"),
+            ),
+            SourceParticipant::simulator(
+                "webots-controller",
+                "webots-controller",
+                PathBuf::from("simulators/webots-controller"),
+            ),
+        ];
+
+        let none = selected_native_source_participants(&participants, DriverSelection::None);
+        assert_eq!(
+            none.iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["mission"]
+        );
+        let only_left = selected_native_source_participants(
+            &participants,
+            DriverSelection::Only(["left_drive".to_string()].into_iter().collect()),
+        );
+        assert_eq!(
+            only_left
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["mission", "left_drive"]
+        );
     }
 
     /// Stage a minimal but complete layout - canonical `robot.json` plus a

@@ -45,8 +45,8 @@ mod publish;
 
 pub(crate) use candidate::{begin_runtime_layout, copy_tree_into};
 pub(crate) use participants::{
-    MaterializeSettings, materialize_component_driver, materialize_official_store,
-    stage_named_binary, stage_participant_binary, stage_router_binary, staged_router_binary,
+    MaterializeSettings, materialize_candidate_store, stage_named_binary, stage_participant_binary,
+    staged_router_binary,
 };
 pub(crate) use publish::publish_runtime_layout;
 
@@ -397,7 +397,7 @@ robot:
 
     /// The atomicity promise the module docs make, exercised past the point
     /// [`failed_candidate_preserves_previous_layout`] stops at: a failure
-    /// during binary MATERIALIZATION (`materialize_official_store`, after
+    /// during binary MATERIALIZATION (`materialize_candidate_store`, after
     /// `begin_runtime_layout` already succeeded) must never touch the
     /// previously published, running bundle. Uses the `officials_source`
     /// hard-error path (organization#951 WS4 review, blocker 2) as the
@@ -432,9 +432,10 @@ robot:
         fs::write(&marker_script, "#!/bin/sh\necho first-runnable-bundle\n")?;
         fs::set_permissions(&marker_script, fs::Permissions::from_mode(0o755))?;
         let candidate = begin_runtime_layout(project.path(), &resolved)?;
-        materialize_official_store(
+        materialize_candidate_store(
             candidate.path(),
             &resolved,
+            &[],
             true,
             Some(complete_officials.path()),
             &MaterializeSettings::default(),
@@ -447,15 +448,16 @@ robot:
 
         // Second refresh: `officials_source` is present (as a container run
         // would be) but incomplete - `bin/` is missing `mission` entirely.
-        // `materialize_official_store` must hard error rather than silently
+        // `materialize_candidate_store` must hard error rather than silently
         // falling back to a host-side `cargo install`.
         let incomplete_officials = tempfile::tempdir()?;
         fs::create_dir_all(incomplete_officials.path().join("bin"))?;
         let next_candidate = begin_runtime_layout(project.path(), &resolved)?;
         let candidate_dir = next_candidate.path().to_path_buf();
-        let error = materialize_official_store(
+        let error = materialize_candidate_store(
             next_candidate.path(),
             &resolved,
+            &[],
             true,
             Some(incomplete_officials.path()),
             &MaterializeSettings::default(),
@@ -796,28 +798,6 @@ robot:
         }
     }
 
-    fn router_tool() -> ResolvedTool {
-        official_tool("infrastructure-router", ArtifactKind::Infrastructure)
-    }
-
-    fn official_tool(short: &str, kind: ArtifactKind) -> ResolvedTool {
-        let (dir, prefix) = match kind {
-            ArtifactKind::Tool => ("tool", "tool-"),
-            ArtifactKind::Infrastructure => ("infrastructure", "infrastructure-"),
-            _ => unreachable!("only tools/infrastructure resolve as tools here"),
-        };
-        let artifact = short.strip_prefix(prefix).unwrap_or(short);
-        ResolvedTool {
-            kind,
-            name: short.to_string(),
-            package: format!("phoxal/{dir}-{artifact}"),
-            binary_name: official_binary_name(kind, artifact),
-            path_override: None,
-            train: "0.36.0".to_string(),
-            target: host_target_triple(),
-        }
-    }
-
     /// A source-overridden dormant official is built through `build_override`
     /// and never reaches `cargo install` - this is the one materialization
     /// path unit-testable with no network. The `cargo install` path itself is
@@ -838,9 +818,10 @@ robot:
         let built = project.path().join("target/debug/robot-service-drive");
         fs::create_dir_all(built.parent().unwrap())?;
         fs::write(&built, "OVERRIDE")?;
-        materialize_official_store(
+        materialize_candidate_store(
             &staged,
             &resolved,
+            &[],
             false,
             None,
             &MaterializeSettings::default(),
@@ -860,36 +841,45 @@ robot:
     }
 
     #[test]
-    fn stage_router_binary_links_only_the_router_when_source_overridden() -> Result<()> {
+    fn materialize_source_overridden_tool_uses_the_resolved_tool_name() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
         let mut resolved = bundle_plan()?;
-        resolved.platform_runtimes = vec![platform_runtime("drive", ArtifactKind::Service)];
-        let mut router = router_tool();
-        router.path_override = Some(PathBuf::from("tools/infrastructure-router"));
-        resolved.tools = vec![router];
+        resolved.tools.push(ResolvedTool {
+            kind: ArtifactKind::Tool,
+            name: "tool-joypad".to_string(),
+            package: "phoxal/tool-joypad".to_string(),
+            binary_name: official_binary_name(ArtifactKind::Tool, "joypad"),
+            path_override: Some(PathBuf::from("tools/joypad")),
+            train: "0.36.0".to_string(),
+            target: host_target_triple(),
+        });
         let staged = stage_runtime_layout(project.path(), &resolved)?;
-
-        let built = project.path().join("target/debug/router");
+        let built = project.path().join("target/debug/tool-joypad");
         fs::create_dir_all(built.parent().unwrap())?;
-        fs::write(&built, "ROUTER")?;
-        stage_router_binary(
+        fs::write(&built, "TOOL OVERRIDE")?;
+
+        materialize_candidate_store(
             &staged,
             &resolved,
+            &[],
             false,
+            None,
             &MaterializeSettings::default(),
             &crate::SilentReporter,
-            |_, _| Ok(built.clone()),
+            |crate_dir, name| {
+                assert_eq!(crate_dir, Path::new("tools/joypad"));
+                assert_eq!(name, "tool-joypad");
+                Ok(built.clone())
+            },
         )?;
 
         assert_eq!(
-            fs::read_to_string(staged.join("bin/phoxal-infrastructure-router"))?,
-            "ROUTER"
+            fs::read_to_string(staged.join("bin/phoxal-tool-joypad"))?,
+            "TOOL OVERRIDE"
         );
-        // The router-only step never stages dormant services.
-        assert!(!staged.join("bin/phoxal-service-drive").exists());
         Ok(())
     }
 }

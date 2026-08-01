@@ -7,8 +7,8 @@ pub(crate) mod webots;
 pub(crate) use use_case::prepare_simulation;
 
 pub(crate) use participants::{
-    driver_metadata_unavailable, ensure_exactly_one_simulator, official_simulator_participants,
-    remap_simulator_participant_ids, sim_checked_participants, sim_source_participants,
+    ensure_exactly_one_simulator, official_simulator_participants, remap_simulator_participant_ids,
+    sim_checked_participants,
 };
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SimulateOptions {

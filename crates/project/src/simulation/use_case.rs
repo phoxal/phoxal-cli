@@ -22,59 +22,59 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
         options,
         request.reporter.as_ref(),
     )?;
+    let source_participants =
+        super::participants::sim_source_participants(&resolved.project_root, &resolved.resolved)?;
+    let source_artifacts = {
+        // WEBOTS_HOME is a build-time dependency of the source controller;
+        // keep it out of metadata checking, staging, and spawned processes.
+        let _webots_home = request
+            .webots
+            .home
+            .as_deref()
+            .map(super::webots::controller::WebotsHomeEnvGuard::set);
+        crate::build::cargo::build_selected_source_artifacts(
+            &source_participants,
+            None,
+            crate::build::profile::Profile::Debug,
+            None,
+            request.offline,
+            request.reporter.as_ref(),
+        )?
+    };
+    let candidate = crate::stage::begin_runtime_layout(&resolved.project_root, &resolved.resolved)
+        .context("failed to stage the simulation runtime layout")?;
     let mut plan = crate::progress::run_phase(
         request.reporter.as_ref(),
         crate::PhaseId::new("check"),
         "Checking simulation graph",
         || {
             super::resolve::build_checked_sim_launch_plan(
-                &resolved.project_root,
-                &resolved.world_path,
-                &resolved.resolved,
-                request.offline,
-                request.run,
+                super::resolve::CheckedSimulationInput {
+                    project_root: &resolved.project_root,
+                    world: &resolved.world_path,
+                    resolved: &resolved.resolved,
+                    candidate_root: candidate.path(),
+                    source_participants: &source_participants,
+                    source_artifacts: &source_artifacts,
+                    offline: request.offline,
+                    run: request.run,
+                },
                 request.reporter.as_ref(),
             )
         },
     )?;
     crate::progress::ensure_active(request.reporter.as_ref())?;
-    let source_participants =
-        super::participants::sim_source_participants(&resolved.project_root, &resolved.resolved)?;
-    let candidate = crate::stage::begin_runtime_layout(&resolved.project_root, &resolved.resolved)
-        .context("failed to stage the simulation runtime layout")?;
-    crate::progress::ensure_active(request.reporter.as_ref())?;
     let source_dirs = crate::run::participants::source_dirs_by_participant(&source_participants);
-    let settings = crate::stage::MaterializeSettings::development(
-        crate::build::cargo::cargo_target_dir(&resolved.project_root, request.offline)?,
-    );
     let policy = crate::run::report::DriverPolicy::drivers_off_for_sim();
     let mut participants = crate::run::participants::prepare_robot_participants(
         &plan,
         &resolved.resolved,
         &source_dirs,
+        &source_artifacts,
         candidate.path(),
         &policy,
-        request.offline,
-        &settings,
-        request.reporter.as_ref(),
     )?;
     crate::progress::ensure_active(request.reporter.as_ref())?;
-    crate::stage::stage_router_binary(
-        candidate.path(),
-        &resolved.resolved,
-        request.offline,
-        &settings,
-        request.reporter.as_ref(),
-        |crate_dir, name| {
-            crate::build::cargo::build_source_binary(
-                crate_dir,
-                name,
-                request.reporter.as_ref(),
-                None,
-                request.offline,
-            )
-        },
-    )?;
     let candidate_path = candidate.path().to_path_buf();
     crate::progress::ensure_active(request.reporter.as_ref())?;
     let staged_root = crate::progress::run_phase(
@@ -116,9 +116,9 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
     super::webots::controller::stage_simulator_controller_binaries(
         &resolved.project_root,
         &resolved.resolved,
-        request.offline,
         request.reporter.as_ref(),
-        request.webots.home.as_deref(),
+        &source_artifacts,
+        &staged_root,
     )?;
     let webots_key = ProcessKey::project(WEBOTS_PROCESS_ID);
     let webots_spec = ParticipantSpec {

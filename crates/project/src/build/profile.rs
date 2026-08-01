@@ -56,6 +56,27 @@ impl StagingBuild {
         }
     }
 
+    pub(crate) fn source_profile(&self) -> Profile {
+        match self {
+            Self::HostRuntime => Profile::Debug,
+            Self::NativeBundle { .. } => Profile::Release,
+        }
+    }
+
+    pub(crate) fn prebuilt_target_dir(&self) -> Option<&Path> {
+        match self {
+            Self::HostRuntime
+            | Self::NativeBundle {
+                prebuilt_target_dir: None,
+                ..
+            } => None,
+            Self::NativeBundle {
+                prebuilt_target_dir: Some(target_dir),
+                ..
+            } => Some(target_dir),
+        }
+    }
+
     pub(crate) fn materialize_settings(
         &self,
         project_root: &Path,
@@ -67,50 +88,9 @@ impl StagingBuild {
             Self::NativeBundle { .. } => crate::stage::MaterializeSettings::release(target_dir),
         })
     }
-
-    pub(crate) fn build_user_binary(
-        &self,
-        crate_dir: &Path,
-        preferred_name: &str,
-        reporter: &dyn crate::Reporter,
-        offline: bool,
-    ) -> Result<PathBuf> {
-        match self {
-            Self::HostRuntime => super::cargo::build_source_binary(
-                crate_dir,
-                preferred_name,
-                reporter,
-                None,
-                offline,
-            ),
-            Self::NativeBundle {
-                target,
-                prebuilt_target_dir: None,
-                ..
-            } => super::cargo::build_source_binary_with_profile(
-                crate_dir,
-                preferred_name,
-                reporter,
-                Some(target),
-                Profile::Release,
-                offline,
-            ),
-            Self::NativeBundle {
-                target,
-                prebuilt_target_dir: Some(target_dir),
-                ..
-            } => super::cargo::locate_prebuilt_binary(
-                crate_dir,
-                preferred_name,
-                target_dir,
-                Some(target),
-                Profile::Release,
-            ),
-        }
-    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Profile {
     Debug,
     Release,

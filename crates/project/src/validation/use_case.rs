@@ -7,9 +7,8 @@ use phoxal_cli_core::project::train::{LockedProject, WorkspaceRuntimeKind};
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 
 use crate::validation::{
-    CheckGraphContext, CheckOutcome, RawParticipantReport, build_participant_report_by_building,
-    build_participant_report_from_source_with_diagnostics, ensure_check_outcome_ok,
-    run_check_with_context,
+    CheckGraphContext, CheckOutcome, RawParticipantReport, build_participant_report_from_binary,
+    ensure_check_outcome_ok, run_check_with_context,
 };
 use crate::{ValidateRequest, ValidationComponent, ValidationReport, ValidationSource};
 
@@ -116,18 +115,19 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
             },
         ));
     }
-    let offline = request.offline;
+    let artifacts = crate::build::cargo::build_selected_source_artifacts(
+        &config_participants,
+        None,
+        crate::build::profile::Profile::Debug,
+        None,
+        request.offline,
+        request.reporter.as_ref(),
+    )?;
     let outcome = check_declared_configs(&robot, &config_participants, |participant| {
-        build_participant_report_from_source_with_diagnostics(
+        build_participant_report_from_binary(
             participant,
-            |participant| {
-                build_participant_report_by_building(
-                    participant,
-                    offline,
-                    request.reporter.as_ref(),
-                )
-            },
-            Some(request.reporter.as_ref()),
+            artifacts.binary(participant)?,
+            request.reporter.as_ref(),
         )
     })?;
     ensure_check_outcome_ok(&outcome)?;
@@ -251,10 +251,9 @@ fn declared_config_source_participants(
 /// Build every declared config-bearing participant and validate its
 /// robot.yaml config against its own emitted schema, through the shared check
 /// engine ([`crate::validation::run_check_with_context`]) `build`/`run`/`simulate`
-/// already use - never a second, divergent validator. `build` is the
-/// (expensive, real-compilation) builder for tests to fake; production always
-/// passes a closure that runs a real `cargo build` scoped to one crate (see
-/// [`crate::validate`]).
+/// already use - never a second, divergent validator. `build` is injected so
+/// pure tests can supply reports; production looks up each report in the one
+/// selected-source artifact batch prepared by [`crate::validate`].
 fn check_declared_configs(
     robot: &Robot,
     source_participants: &[SourceParticipant],

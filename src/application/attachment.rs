@@ -704,7 +704,7 @@ mod tests {
         assert!(target.runtime_target().requested_entry.is_none());
         assert_eq!(
             supervisor_socket_path(&target.project)?,
-            target.project.join(".phoxal/supervisor.sock")
+            target.project.join(".phoxal/run/supervisor.sock")
         );
         Ok(())
     }

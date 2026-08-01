@@ -14,6 +14,7 @@ pub const SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/phoxal.service";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePaths {
+    installed: bool,
     pub ownership_root: PathBuf,
     pub state_root: PathBuf,
     pub volatile_root: PathBuf,
@@ -24,6 +25,7 @@ impl RuntimePaths {
     pub fn for_root(root: &Path) -> Self {
         if is_installed_root(root) {
             Self {
+                installed: true,
                 ownership_root: PathBuf::from(ACTIVE_RUNTIME_ROOT),
                 state_root: PathBuf::from(INSTALLED_STATE_ROOT),
                 volatile_root: PathBuf::from(INSTALLED_VOLATILE_ROOT),
@@ -31,9 +33,10 @@ impl RuntimePaths {
         } else {
             let state = root.join(".phoxal");
             Self {
+                installed: false,
                 ownership_root: root.to_path_buf(),
                 state_root: state.clone(),
-                volatile_root: state,
+                volatile_root: state.join("run"),
             }
         }
     }
@@ -55,7 +58,11 @@ impl RuntimePaths {
 
     #[must_use]
     pub fn supervisor_log(&self) -> PathBuf {
-        self.state_root.join("supervisor.log")
+        if self.installed {
+            self.state_root.join("supervisor.log")
+        } else {
+            self.volatile_root.join("supervisor.log")
+        }
     }
 }
 
@@ -69,11 +76,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ordinary_roots_keep_state_and_sockets_project_local() {
+    fn ordinary_roots_keep_state_but_group_transient_files_under_run() {
         let paths = RuntimePaths::for_root(Path::new("/tmp/robot"));
         assert_eq!(paths.ownership_root, Path::new("/tmp/robot"));
         assert_eq!(paths.state_root, Path::new("/tmp/robot/.phoxal"));
-        assert_eq!(paths.volatile_root, paths.state_root);
+        assert_eq!(paths.volatile_root, Path::new("/tmp/robot/.phoxal/run"));
+        assert_eq!(
+            paths.project_lock(),
+            Path::new("/tmp/robot/.phoxal/project.lock")
+        );
+        assert_eq!(
+            paths.supervisor_socket(),
+            Path::new("/tmp/robot/.phoxal/run/supervisor.sock")
+        );
+        assert_eq!(
+            paths.router_socket(),
+            Path::new("/tmp/robot/.phoxal/run/zenoh.sock")
+        );
+        assert_eq!(
+            paths.supervisor_log(),
+            Path::new("/tmp/robot/.phoxal/run/supervisor.log")
+        );
     }
 
     #[test]
@@ -86,6 +109,10 @@ mod tests {
             assert_eq!(paths.ownership_root, Path::new(ACTIVE_RUNTIME_ROOT));
             assert_eq!(paths.state_root, Path::new(INSTALLED_STATE_ROOT));
             assert_eq!(paths.volatile_root, Path::new(INSTALLED_VOLATILE_ROOT));
+            assert_eq!(
+                paths.supervisor_log(),
+                Path::new(INSTALLED_STATE_ROOT).join("supervisor.log")
+            );
         }
     }
 }

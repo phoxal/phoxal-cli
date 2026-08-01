@@ -1,16 +1,17 @@
 //! Participant materialization and flat binary-store staging.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
 use phoxal_cli_core::project::resolver::{
-    BundlePlan, ResolvedPlatformRuntime, ResolvedTool, official_binary_name, tool_participant_id,
+    BundlePlan, ResolvedPlatformRuntime, ResolvedTool, official_binary_name,
 };
 
 use super::publish::remove_if_present;
-use crate::build::materialise::{MaterializeProfile, MaterializeSpec, cargo_install};
+use crate::build::materialise::{MaterializeProfile, MaterializeSpec, cargo_install_batch};
 
 const BIN_DIR: &str = "bin";
 
@@ -115,33 +116,14 @@ pub(crate) fn staged_router_binary(staged_root: &Path) -> PathBuf {
     ))
 }
 
-/// Complete the staged `bin/` into the loader's full required lookup store.
-///
-/// [`stage_participant_binary`] only stages the officials that appear as active
-/// plan participants, but the loader
-/// ([`required_runtimes`](phoxal_cli_core::project::layout::RuntimeLayout::required_runtimes))
-/// requires *every* catalog official plus the infrastructure router: per #945
-/// every official always runs, an official with no active workload simply stays
-/// dormant. This materializes the remainder of that required native set - every
-/// dormant catalog service and the router - into `bin/` under the same
-/// canonical identity names the loader resolves against.
-///
-/// Entries already present (a referenced official, or a source override staged
-/// by [`stage_participant_binary`]) are left in place. A source-overridden
-/// dormant official is built through `build_override`; every other missing
-/// official materializes via `cargo install <package>@<train> --registry
-/// phoxal --locked --root <staged_root>` straight into its final `bin/` path.
-///
-/// `officials_source`, when set, is an already-materialized directory
-/// (`<officials_source>/bin/<name>`) consulted BEFORE `cargo install`: the
-/// container builder installs the always-present catalog set natively
-/// inside the target-native container (see `commands::build::container`)
-/// and passes its output here, so host-side staging never re-installs (or
-/// cross-compiles) what the container already built correctly for the
-/// target.
-pub(crate) fn materialize_official_store(
+/// Complete one unpublished candidate's registry/source-override store in a
+/// single collection context. Platform entries, tools/router, and selected
+/// registry drivers share the same pending install groups before Cargo runs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn materialize_candidate_store(
     staged_root: &Path,
     resolved: &BundlePlan,
+    extra_registry_runtimes: &[&ResolvedPlatformRuntime],
     offline: bool,
     officials_source: Option<&Path>,
     settings: &MaterializeSettings,
@@ -157,6 +139,7 @@ pub(crate) fn materialize_official_store(
         settings,
         reporter,
         build_override: &mut build_override,
+        pending: Vec::new(),
     };
     for runtime in &resolved.platform_runtimes {
         materialize_platform_runtime(&mut context, runtime)?;
@@ -164,37 +147,10 @@ pub(crate) fn materialize_official_store(
     for tool in &resolved.tools {
         materialize_tool(&mut context, tool)?;
     }
-    Ok(())
-}
-
-/// Materialize only the infrastructure router into `bin/`, so it launches
-/// from the normal build layout like every other official. Used by the
-/// Webots path, where the controller reads that same build layout; the
-/// router itself is CLI-supervised identically to a native run.
-pub(crate) fn stage_router_binary(
-    staged_root: &Path,
-    resolved: &BundlePlan,
-    offline: bool,
-    settings: &MaterializeSettings,
-    reporter: &dyn crate::Reporter,
-    mut build_override: impl FnMut(&Path, &str) -> Result<PathBuf>,
-) -> Result<()> {
-    let bin_dir = ensure_bin_dir(staged_root)?;
-    let router = resolved
-        .tools
-        .iter()
-        .find(|tool| tool.kind == phoxal_cli_core::project::catalog::ArtifactKind::Infrastructure)
-        .context("resolved graph is missing the infrastructure router")?;
-    let mut context = MaterializationContext {
-        staged_root,
-        bin_dir: &bin_dir,
-        offline,
-        officials_source: None,
-        settings,
-        reporter,
-        build_override: &mut build_override,
-    };
-    materialize_tool(&mut context, router)
+    for runtime in extra_registry_runtimes {
+        queue_component_driver(&mut context, runtime)?;
+    }
+    context.install_pending()
 }
 
 fn ensure_bin_dir(staged_root: &Path) -> Result<PathBuf> {
@@ -248,6 +204,54 @@ struct MaterializationContext<'a> {
     settings: &'a MaterializeSettings,
     reporter: &'a dyn crate::Reporter,
     build_override: &'a mut dyn FnMut(&Path, &str) -> Result<PathBuf>,
+    pending: Vec<MaterializeSpec>,
+}
+
+impl MaterializationContext<'_> {
+    fn install_pending(&mut self) -> Result<()> {
+        let mut groups = BTreeMap::<
+            (Option<String>, MaterializeProfile, Option<PathBuf>),
+            Vec<MaterializeSpec>,
+        >::new();
+        for spec in std::mem::take(&mut self.pending) {
+            groups
+                .entry((spec.target.clone(), spec.profile, spec.target_dir.clone()))
+                .or_default()
+                .push(spec);
+        }
+        let total = groups.len();
+        for (index, specs) in groups.into_values().enumerate() {
+            let packages = specs
+                .iter()
+                .map(crate::build::materialise::MaterializeSpec::cargo_package_name)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            self.reporter
+                .report(crate::PreparationEvent::RegistryInstallGroupStarted {
+                    current: index + 1,
+                    total,
+                    packages,
+                });
+            if let Err(error) =
+                cargo_install_batch(self.staged_root, &specs, self.offline, self.reporter)
+            {
+                self.reporter
+                    .report(crate::PreparationEvent::RegistryInstallGroupFinished {
+                        current: index + 1,
+                        total,
+                        success: false,
+                    });
+                return Err(error);
+            }
+            self.reporter
+                .report(crate::PreparationEvent::RegistryInstallGroupFinished {
+                    current: index + 1,
+                    total,
+                    success: true,
+                });
+        }
+        Ok(())
+    }
 }
 
 fn materialize_platform_runtime(
@@ -275,13 +279,7 @@ fn materialize_platform_runtime(
         MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
             .with_target(runtime.target.clone()),
     );
-    cargo_install(
-        context.staged_root,
-        &spec,
-        context.offline,
-        context.reporter,
-    )
-    .with_context(|| format!("failed to materialize official runtime {}", runtime.package))?;
+    context.pending.push(spec);
     Ok(())
 }
 
@@ -294,7 +292,10 @@ fn materialize_tool(context: &mut MaterializationContext<'_>, tool: &ResolvedToo
         return Ok(());
     }
     if let Some(crate_dir) = &tool.path_override {
-        let source = (context.build_override)(crate_dir, tool_participant_id(&tool.name))?;
+        // SourceArtifacts is keyed by SourceParticipant::name, which is the
+        // resolved tool name. The stripped participant id is only its emitted
+        // metadata identity and must not become a second artifact-map key.
+        let source = (context.build_override)(crate_dir, &tool.name)?;
         return link_or_copy(&source, &staged);
     }
     if link_from_officials_source(
@@ -309,53 +310,32 @@ fn materialize_tool(context: &mut MaterializationContext<'_>, tool: &ResolvedToo
         MaterializeSpec::new(tool.package.clone(), tool.train.clone())
             .with_target(Some(tool.target.clone())),
     );
-    cargo_install(
-        context.staged_root,
-        &spec,
-        context.offline,
-        context.reporter,
-    )
-    .with_context(|| format!("failed to materialize official runtime {}", tool.package))?;
+    context.pending.push(spec);
     Ok(())
 }
 
-/// Materialize one registry-sourced component driver package straight into
-/// `bin/`, from an already-materialized `officials_source` or `cargo
-/// install`, exactly like a service. A workspace/path-overridden driver is
-/// staged by [`stage_participant_binary`] instead and never reaches this
-/// function - see `run::stage_complete_bin_store`.
-///
-/// Component drivers are robot-specific (only the components a robot
-/// actually declares), so the container builder cannot know them from the
-/// catalog alone - it resolves the robot graph first specifically to learn
-/// them, then installs them alongside the deterministic set (see
-/// `commands::build::container`), so `officials_source` covers them too
-/// whenever a container was involved. With no `officials_source` at all,
-/// this cross-compiles host-side when `runtime.target` differs from the
-/// host, with the same caveat any host cross build carries.
-pub(crate) fn materialize_component_driver(
-    staged_root: &Path,
+fn queue_component_driver(
+    context: &mut MaterializationContext<'_>,
     runtime: &ResolvedPlatformRuntime,
-    offline: bool,
-    officials_source: Option<&Path>,
-    settings: &MaterializeSettings,
-    reporter: &dyn crate::Reporter,
 ) -> Result<()> {
-    let bin_dir = ensure_bin_dir(staged_root)?;
     let binary_name = official_binary_name(runtime.kind, &runtime.name);
-    let staged = bin_dir.join(&binary_name);
-    if staged.is_file() {
+    let staged = context.bin_dir.join(&binary_name);
+    if staged.is_file()
+        || link_from_officials_source(
+            context.officials_source,
+            &runtime.package,
+            &binary_name,
+            &staged,
+        )?
+    {
         return Ok(());
     }
-    if link_from_officials_source(officials_source, &runtime.package, &binary_name, &staged)? {
-        return Ok(());
-    }
-    let spec = settings.apply(
-        MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
-            .with_target(runtime.target.clone()),
+    context.pending.push(
+        context.settings.apply(
+            MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
+                .with_target(runtime.target.clone()),
+        ),
     );
-    cargo_install(staged_root, &spec, offline, reporter)
-        .with_context(|| format!("failed to materialize component driver {}", runtime.package))?;
     Ok(())
 }
 

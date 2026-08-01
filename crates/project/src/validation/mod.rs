@@ -44,7 +44,8 @@ mod use_case;
 
 pub(crate) use participants::{
     PlatformArtifactRef, check_artifact_refs_from_resolved, component_driver_runtimes_by_ref,
-    source_participants_from_resolved, tool_participants_from_resolved,
+    source_participants_from_resolved, source_participants_from_resolved_with_drivers,
+    tool_participants_from_resolved,
 };
 pub(crate) use use_case::validate;
 mod graph;
@@ -59,8 +60,7 @@ pub(crate) use metadata::{
 };
 mod build;
 pub(crate) use build::{
-    build_participant_report_by_building, build_participant_report_from_source,
-    build_participant_report_from_source_with_diagnostics, validate_artifact_identity,
+    build_participant_report_from_binary, validate_artifact_identity,
     validate_source_artifact_identity,
 };
 mod errors;

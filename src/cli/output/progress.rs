@@ -116,6 +116,67 @@ impl phoxal_cli_project::Reporter for BoardReporter {
                 self.board.step_done(StartupStepKind::Project);
                 self.board.step_active(StartupStepKind::PrepareRuntime);
             }
+            phoxal_cli_project::PreparationEvent::SourceBuildPlanned { groups, artifacts } => {
+                self.board.step_detail(
+                    StartupStepKind::PrepareRuntime,
+                    format!("Cargo: {groups} batch(es), {artifacts} selected artifacts"),
+                );
+            }
+            phoxal_cli_project::PreparationEvent::SourceBuildGroupStarted {
+                current,
+                total,
+                artifacts,
+            } => {
+                self.board.step_detail(
+                    StartupStepKind::PrepareRuntime,
+                    format!("Cargo batch {current}/{total}: 0/{artifacts} artifacts"),
+                );
+            }
+            phoxal_cli_project::PreparationEvent::SourceBuildArtifactCompleted {
+                completed,
+                total,
+            } => {
+                self.board.step_detail(
+                    StartupStepKind::PrepareRuntime,
+                    format!("Cargo artifacts: {completed}/{total}"),
+                );
+            }
+            phoxal_cli_project::PreparationEvent::SourceBuildGroupFinished {
+                current,
+                total,
+                success,
+            } => {
+                self.board.step_detail(
+                    StartupStepKind::PrepareRuntime,
+                    format!(
+                        "Cargo batch {current}/{total} {}",
+                        if *success { "complete" } else { "failed" }
+                    ),
+                );
+            }
+            phoxal_cli_project::PreparationEvent::RegistryInstallGroupStarted {
+                current,
+                total,
+                packages,
+            } => {
+                self.board.step_detail(
+                    StartupStepKind::PrepareRuntime,
+                    format!("Cargo install {current}/{total}: {packages} exact packages"),
+                );
+            }
+            phoxal_cli_project::PreparationEvent::RegistryInstallGroupFinished {
+                current,
+                total,
+                success,
+            } => {
+                self.board.step_detail(
+                    StartupStepKind::PrepareRuntime,
+                    format!(
+                        "Cargo install {current}/{total}: {}",
+                        if *success { "complete" } else { "failed" }
+                    ),
+                );
+            }
             phoxal_cli_project::PreparationEvent::PhaseFinished {
                 outcome: PhaseOutcome::Failed { error },
                 ..

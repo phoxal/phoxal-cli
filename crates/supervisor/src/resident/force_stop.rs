@@ -340,9 +340,9 @@ mod tests {
             logical_root: PathBuf::from("/tmp/project"),
             requested_entry: None,
             project_lock: PathBuf::from("/tmp/project/.phoxal/project.lock"),
-            supervisor_socket: PathBuf::from("/tmp/project/.phoxal/supervisor.sock"),
-            zenoh_socket: PathBuf::from("/tmp/project/.phoxal/zenoh.sock"),
-            zenoh_endpoint: "unixsock-stream//tmp/project/.phoxal/zenoh.sock".to_string(),
+            supervisor_socket: PathBuf::from("/tmp/project/.phoxal/run/supervisor.sock"),
+            zenoh_socket: PathBuf::from("/tmp/project/.phoxal/run/zenoh.sock"),
+            zenoh_endpoint: "unixsock-stream//tmp/project/.phoxal/run/zenoh.sock".to_string(),
             authority,
         }
     }
