@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.30.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.30.1) - 2026-08-01
+
+
+### Added
+
+- Batch runtime preparation and progress ([#271](https://github.com/phoxal/phoxal-cli/pull/271))
+
+
 ## [0.30.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.30.0) - 2026-08-01
 
 
