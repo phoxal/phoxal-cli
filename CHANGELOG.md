@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.30.3](https://github.com/phoxal/phoxal-cli/releases/tag/v0.30.3) - 2026-08-01
+
+
+### Fixed
+
+- *(project)* Rebaseline framework train to 0.45.4
+
+
 ## [0.30.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.30.2) - 2026-08-01
 
 
