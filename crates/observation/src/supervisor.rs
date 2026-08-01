@@ -12,7 +12,6 @@ pub struct SupervisorObservation {
     pub simulation: Option<SimulationSessionInfo>,
     pub lifecycle: ProjectLifecycle,
     pub router: String,
-    pub plan_revision: u64,
     pub graph_generation: u64,
     pub startup: StartupStatus,
     /// Why `lifecycle` reached `Failed`; `None` for every other lifecycle.

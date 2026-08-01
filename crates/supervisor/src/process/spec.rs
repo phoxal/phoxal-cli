@@ -61,11 +61,9 @@ impl RequestedStop {
 #[derive(Debug)]
 pub enum SupervisorAction {
     /// Stop and respawn a participant from its own current spec, unchanged -
-    /// the TUI's typed `Effect::Restart`.
-    /// Handled the same way as `Swap` with the participant's own spec cloned
-    /// back in, rather than a new field on `RunningParticipant`, so it reuses
-    /// the exact same stop/spawn/board-note sequence a hot-reload swap
-    /// already goes through.
+    /// the TUI's typed `Effect::Restart`. Implemented through
+    /// `RunningParticipant::swap` with the participant's own spec cloned back
+    /// in, rather than a new field on `RunningParticipant`.
     Restart { key: ProcessKey },
 }
 

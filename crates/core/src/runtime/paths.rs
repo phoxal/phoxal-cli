@@ -57,11 +57,6 @@ impl RuntimePaths {
     pub fn supervisor_log(&self) -> PathBuf {
         self.state_root.join("supervisor.log")
     }
-
-    #[must_use]
-    pub fn plan_content_root(&self) -> PathBuf {
-        self.state_root.join("plans/content")
-    }
 }
 
 #[must_use]

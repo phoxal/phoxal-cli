@@ -1,7 +1,6 @@
 //! Central child launch boundary and crash-containment guardian.
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -427,153 +426,6 @@ pub(crate) fn scrub_environment(command: &mut Command) {
     scrub_std_environment(command.as_std_mut());
 }
 
-pub fn materialize_plan_binaries(
-    project_root: &std::path::Path,
-    revision: &phoxal_cli_core::project::launch_plan::PlanRevision,
-    specs: &mut [crate::ParticipantSpec],
-) -> Result<()> {
-    let content_root =
-        phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project_root).plan_content_root();
-    for spec in specs {
-        if !spec.executable.is_file() {
-            continue;
-        }
-        let bytes = std::fs::read(&spec.executable)
-            .with_context(|| format!("read planned binary {}", spec.executable.display()))?;
-        let identity = content_identity(&bytes);
-        let suffix = spec
-            .executable
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("participant");
-        #[cfg(target_os = "macos")]
-        if let Some(path) = materialize_macos_app_binary(
-            &content_root,
-            revision,
-            &spec.executable,
-            &identity,
-            &bytes,
-        )? {
-            spec.executable = path;
-            continue;
-        }
-        let name = format!("{identity}-{suffix}");
-        let path = revision.publish_content_in(&content_root, &name, &bytes)?;
-        std::fs::set_permissions(&path, std::fs::metadata(&spec.executable)?.permissions())?;
-        spec.executable = path;
-    }
-    Ok(())
-}
-
-fn content_identity(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
-
-#[cfg(target_os = "macos")]
-fn materialize_macos_app_binary(
-    content_root: &std::path::Path,
-    revision: &phoxal_cli_core::project::launch_plan::PlanRevision,
-    executable: &std::path::Path,
-    identity: &str,
-    bytes: &[u8],
-) -> Result<Option<std::path::PathBuf>> {
-    let Some(bundle_root) = executable
-        .ancestors()
-        .find(|path| path.extension().is_some_and(|extension| extension == "app"))
-    else {
-        return Ok(None);
-    };
-    let relative = executable.strip_prefix(bundle_root)?;
-    let mut components = relative.components();
-    if components.next().and_then(|part| part.as_os_str().to_str()) != Some("Contents")
-        || components.next().and_then(|part| part.as_os_str().to_str()) != Some("MacOS")
-        || components.next().is_none()
-        || components.next().is_some()
-    {
-        return Ok(None);
-    }
-
-    let bundle_name = bundle_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("Participant.app");
-    let materialized_root =
-        revision.content_path_in(content_root, &format!("{identity}-{bundle_name}"));
-    let materialized_contents = materialized_root.join("Contents");
-    let materialized_macos = materialized_contents.join("MacOS");
-    std::fs::create_dir_all(&materialized_macos)?;
-
-    let source_contents = bundle_root.join("Contents");
-    for entry in std::fs::read_dir(&source_contents)? {
-        let entry = entry?;
-        if entry.file_name() == "MacOS" {
-            for macos_entry in std::fs::read_dir(entry.path())? {
-                let macos_entry = macos_entry?;
-                let destination = materialized_macos.join(macos_entry.file_name());
-                if macos_entry.path() == executable {
-                    publish_immutable_file(
-                        &destination,
-                        bytes,
-                        std::fs::metadata(executable)?.permissions(),
-                    )?;
-                } else {
-                    publish_immutable_symlink(&destination, &macos_entry.path())?;
-                }
-            }
-        } else {
-            publish_immutable_symlink(
-                &materialized_contents.join(entry.file_name()),
-                &entry.path(),
-            )?;
-        }
-    }
-    Ok(Some(materialized_root.join(relative)))
-}
-
-#[cfg(target_os = "macos")]
-fn publish_immutable_file(
-    path: &std::path::Path,
-    bytes: &[u8],
-    permissions: std::fs::Permissions,
-) -> Result<()> {
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(mut file) => {
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            std::fs::set_permissions(path, permissions)?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            anyhow::ensure!(
-                std::fs::read(path)? == bytes,
-                "immutable plan content collision at {}",
-                path.display()
-            );
-        }
-        Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn publish_immutable_symlink(path: &std::path::Path, target: &std::path::Path) -> Result<()> {
-    match std::os::unix::fs::symlink(target, path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            anyhow::ensure!(
-                std::fs::read_link(path)? == target,
-                "immutable plan symlink collision at {}",
-                path.display()
-            );
-            Ok(())
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
 /// Hidden guardian entry point. EOF means the supervisor and every transient
 /// writer are gone, so all still-registered process groups are killed.
 pub fn maybe_run_guardian() -> Option<std::process::ExitCode> {
@@ -713,12 +565,6 @@ mod tests {
     }
 
     #[test]
-    fn planned_binary_identity_changes_only_with_its_bytes() {
-        assert_eq!(content_identity(b"first"), content_identity(b"first"));
-        assert_ne!(content_identity(b"first"), content_identity(b"second"));
-    }
-
-    #[test]
     fn guardian_confirm_buffers_concurrent_out_of_order_acknowledgements() -> Result<()> {
         let mut control_fds = [0_i32; 2];
         let mut acknowledgement_fds = [0_i32; 2];
@@ -790,64 +636,6 @@ mod tests {
         );
         guardian.confirm(unrelated)?;
         assert!(guardian.pending_acknowledgements.is_empty());
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn app_bundle_binary_keeps_bundle_layout_and_immutable_bytes() -> Result<()> {
-        use phoxal_cli_core::project::launch_plan::{LaunchMode, LaunchPlan, PlanRevision};
-
-        let temp = tempfile::tempdir()?;
-        let bundle = temp.path().join("Source.app");
-        let executable = bundle.join("Contents/MacOS/webots");
-        let resources = bundle.join("Contents/Resources");
-        std::fs::create_dir_all(executable.parent().expect("executable parent"))?;
-        std::fs::create_dir_all(&resources)?;
-        std::fs::write(&executable, b"recorded-webots")?;
-        std::fs::write(resources.join("marker"), b"bundle-resource")?;
-        let revision = PlanRevision::compile(
-            1,
-            LaunchPlan {
-                mode: LaunchMode::Run,
-                robots: Vec::new(),
-            },
-        )?;
-        let identity = hex::encode(Sha256::digest(executable.as_os_str().as_encoded_bytes()));
-
-        let materialized = materialize_macos_app_binary(
-            temp.path(),
-            &revision,
-            &executable,
-            &identity,
-            b"recorded-webots",
-        )?
-        .expect("app binary is recognized");
-        assert_eq!(std::fs::read(&materialized)?, b"recorded-webots");
-        assert_eq!(
-            std::fs::read_link(
-                materialized
-                    .parent()
-                    .expect("MacOS")
-                    .parent()
-                    .expect("Contents")
-                    .join("Resources")
-            )?,
-            resources
-        );
-
-        std::fs::write(&executable, b"overwritten-webots")?;
-        assert!(
-            materialize_macos_app_binary(
-                temp.path(),
-                &revision,
-                &executable,
-                &identity,
-                b"overwritten-webots",
-            )
-            .is_err()
-        );
-        assert_eq!(std::fs::read(materialized)?, b"recorded-webots");
         Ok(())
     }
 }

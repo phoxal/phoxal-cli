@@ -37,7 +37,6 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
             )
         },
     )?;
-    phoxal_cli_core::project::launch_plan::validate_runtime_bounds(&plan)?;
     crate::progress::ensure_active(request.reporter.as_ref())?;
     let source_participants =
         super::participants::sim_source_participants(&resolved.project_root, &resolved.resolved)?;

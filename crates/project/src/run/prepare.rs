@@ -354,7 +354,6 @@ pub(crate) fn prepare_source_run(
     // now-published bytes a second time. Byte-identical, for the same robot,
     // to a plan built from an extracted bundle of this layout.
     let plan = staged.plan.clone();
-    phoxal_cli_core::project::launch_plan::validate_runtime_bounds(&plan)?;
 
     // Explain any policy-excluded drivers as a session-level advisory: they are
     // never plan participants, so this summary is the only signal an operator
@@ -465,8 +464,6 @@ pub(crate) fn prepare_layout_run(
     reporter.report(crate::PreparationEvent::ProjectResolved {
         train: "staged".to_string(),
     });
-    phoxal_cli_core::project::launch_plan::validate_runtime_bounds(&plan)?;
-
     // An extracted bundle / staged layout has no source, so no participant has a
     // crate cwd - the closure always yields `None` (#936, finding 3).
     let participants = build_layout_specs(&plan, &layout, &|_| None)?;

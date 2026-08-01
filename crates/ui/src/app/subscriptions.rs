@@ -400,7 +400,6 @@ mod tests {
                 simulation: None,
                 lifecycle: ProjectLifecycle::Stopped,
                 router: "tcp/127.0.0.1:7447".into(),
-                plan_revision: 1,
                 graph_generation: 1,
                 startup: StartupStatus::default(),
                 failure: None,

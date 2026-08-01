@@ -49,7 +49,6 @@ mod tests {
             simulation: None,
             lifecycle: ProjectLifecycle::Ready,
             router: "unixsock-stream//tmp/router.sock".to_string(),
-            plan_revision: 1,
             graph_generation: 0,
             startup: StartupStatus {
                 steps: vec![StartupStep {
@@ -81,7 +80,6 @@ mod tests {
                 "simulation": null,
                 "lifecycle": "ready",
                 "router": "unixsock-stream//tmp/router.sock",
-                "plan_revision": 1,
                 "graph_generation": 0,
                 "startup": {"steps": [{
                     "kind": "project",
@@ -225,7 +223,6 @@ mod tests {
             simulation: None,
             lifecycle: ProjectLifecycle::Failed,
             router: "r".repeat(limits::MAX_SNAPSHOT_TEXT_BYTES),
-            plan_revision: u64::MAX,
             graph_generation: u64::MAX,
             startup: StartupStatus {
                 steps: (0..limits::MAX_STARTUP_STEPS)
