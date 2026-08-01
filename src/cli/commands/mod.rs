@@ -6,6 +6,7 @@ pub mod install;
 pub mod logs;
 pub mod rollback;
 pub mod run;
+pub mod schema;
 pub mod self_update;
 pub mod service;
 pub mod simulation;
