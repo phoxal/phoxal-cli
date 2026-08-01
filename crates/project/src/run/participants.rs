@@ -12,7 +12,7 @@
 
 use super::report::DriverPolicy;
 use crate::PreparedParticipant;
-use crate::build::cargo::{build_source_binary, device_missing_note, missing_device_path};
+use crate::build::cargo::{SourceArtifacts, device_missing_note, missing_device_path};
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -23,6 +23,7 @@ use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
+#[cfg(test)]
 use phoxal_cli_core::project::layout::DriverSelection;
 use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::resolver::BundlePlan;
@@ -66,51 +67,31 @@ pub(crate) fn source_dirs_by_participant(
 /// keyed by the resolved graph (`BundlePlan`) and its source-participant
 /// records, never by a plan.
 ///
-/// It links: every user service and workspace/path-overridden component driver,
-/// built from its crate; every registry-sourced component driver, via `cargo
-/// install`; and every official service, tool, and the infrastructure
-/// router, via `cargo install` or a source override. After it runs, `bin/`
-/// is the complete lookup store an extracted bundle would carry - the loader
-/// resolves every required runtime from it with no source present.
+/// It links every source-built user service and workspace/path-overridden
+/// component driver. Registry packages and source-overridden officials are
+/// materialized together by `stage::materialize_candidate_store` before this
+/// source-only pass. After both passes, `bin/` is the complete lookup store an
+/// extracted bundle would carry - the loader resolves every required runtime
+/// from it with no source present.
 ///
-/// `drivers` gates the component-driver work exactly as the plan constructor
-/// does (#936): a driver the run excludes (drivers off, or an instance outside a
-/// `--driver` subset) is not built or linked here, so `--drivers off` never
-/// force-builds a driver crate the run will not launch.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn stage_complete_bin_store(
     staged_root: &Path,
-    resolved: &BundlePlan,
     source_participants: &[SourceParticipant],
-    drivers: &DriverSelection,
-    offline: bool,
-    build: &crate::build::profile::StagingBuild,
-    materialize_settings: &crate::stage::MaterializeSettings,
-    ui: &dyn crate::Reporter,
+    source_artifacts: &SourceArtifacts,
 ) -> Result<()> {
     let mut staged_names = BTreeSet::new();
     // Source-built user services and workspace/path-overridden component
     // drivers. Official-service/tool/simulator source overrides are
-    // materialized by `materialize_official_store` below (it owns the
-    // cargo-install-vs-override resolution for the official set), so they are
-    // skipped here.
+    // materialized by the candidate-wide planner, so they are skipped here.
     for participant in source_participants {
         let binary_name = match participant.kind {
             SourceParticipantKind::UserService | SourceParticipantKind::UserTool => {
                 participant.name.clone()
             }
-            SourceParticipantKind::ComponentDriver => {
-                // An excluded driver instance is never built: its binary is not
-                // required, so force-building the crate would be wasted work the
-                // run will not launch (and, on a foreign host, may not compile).
-                if !drivers.includes_instance(&participant.name) {
-                    continue;
-                }
-                official_binary_name(
-                    ArtifactKind::ComponentDriver,
-                    &participant.expected_artifact_id,
-                )
-            }
+            SourceParticipantKind::ComponentDriver => official_binary_name(
+                ArtifactKind::ComponentDriver,
+                &participant.expected_artifact_id,
+            ),
             SourceParticipantKind::OfficialService
             | SourceParticipantKind::Tool
             | SourceParticipantKind::Simulator => continue,
@@ -118,57 +99,9 @@ pub(crate) fn stage_complete_bin_store(
         if !staged_names.insert(binary_name.clone()) {
             continue;
         }
-        let built =
-            build.build_user_binary(&participant.crate_dir, &participant.name, ui, offline)?;
-        crate::stage::stage_named_binary(staged_root, &binary_name, &built)?;
+        let built = source_artifacts.binary(participant)?;
+        crate::stage::stage_named_binary(staged_root, &binary_name, built)?;
     }
-    // Registry-provided component drivers: one binary per driven component
-    // id, materialized straight into `bin/` via `cargo install`. A
-    // workspace/path-overridden driver for the same component id was already
-    // staged above (its binary name is in `staged_names`), so it is not
-    // re-materialized here.
-    for component in &resolved.components {
-        if !component.has_driver {
-            continue;
-        }
-        // Skip a driver whose instance the policy excludes; a sibling instance
-        // that is selected still materializes the shared binary through its
-        // own row.
-        if !drivers.includes_instance(&component.instance) {
-            continue;
-        }
-        let binary_name =
-            official_binary_name(ArtifactKind::ComponentDriver, &component.source_name);
-        if !staged_names.insert(binary_name.clone()) {
-            continue;
-        }
-        let Some(runtime) = component
-            .driver
-            .as_ref()
-            .and_then(|driver| driver.registry_runtime.as_ref())
-        else {
-            continue;
-        };
-        crate::stage::materialize_component_driver(
-            staged_root,
-            runtime,
-            offline,
-            build.officials_source(),
-            materialize_settings,
-            ui,
-        )?;
-    }
-    // Every official service, tool, and the infrastructure router.
-    crate::stage::materialize_official_store(
-        staged_root,
-        resolved,
-        offline,
-        build.officials_source(),
-        materialize_settings,
-        ui,
-        |crate_dir, name| build.build_user_binary(crate_dir, name, ui, offline),
-    )
-    .context("failed to complete the staged bin store with the full official runtime set")?;
     Ok(())
 }
 
@@ -294,16 +227,13 @@ fn layout_device_missing_note(
     )))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_robot_participants(
     plan: &LaunchPlan,
     resolved: &BundlePlan,
     source_dirs: &BTreeMap<String, PathBuf>,
+    source_artifacts: &SourceArtifacts,
     staged_root: &Path,
     driver_policy: &DriverPolicy,
-    offline: bool,
-    materialize_settings: &crate::stage::MaterializeSettings,
-    ui: &dyn crate::Reporter,
 ) -> Result<Vec<PreparedParticipant>> {
     let mut prepared = Vec::new();
     let official_by_name = official_runtimes_by_name(resolved);
@@ -358,9 +288,7 @@ pub(crate) fn prepare_robot_participants(
                 resolved,
                 &official_by_name,
                 source_dirs,
-                offline,
-                materialize_settings,
-                ui,
+                source_artifacts,
             )?;
             let executable = stage_and_inspect(staged_root, participant, &source)?;
             let cwd = source_cwd(participant, resolved, source_dirs);
@@ -431,33 +359,40 @@ fn official_runtimes_by_name(resolved: &BundlePlan) -> BTreeMap<&str, &ResolvedP
 /// record: a user service and a workspace-built component driver build
 /// through `cargo` from their crate directory; an official artifact, tool, or
 /// registry-provided driver materializes via `cargo install`, straight into
-/// `staged_root/bin/`. Every path hard-fails - there is no graceful
-/// `None`/pending note - naming the required identity.
-#[allow(clippy::too_many_arguments)]
+/// `staged_root/bin/`. The candidate-wide materialization pass has already
+/// completed before this function runs; every registry path therefore only
+/// reads that candidate and hard-fails if its required entry is absent.
 fn resolve_participant_source(
     staged_root: &Path,
     participant: &ParticipantLaunchRecord,
     resolved: &BundlePlan,
     official_by_name: &BTreeMap<&str, &ResolvedPlatformRuntime>,
     source_dirs: &BTreeMap<String, PathBuf>,
-    offline: bool,
-    materialize_settings: &crate::stage::MaterializeSettings,
-    ui: &dyn crate::Reporter,
+    source_artifacts: &SourceArtifacts,
 ) -> Result<PathBuf> {
     let id = &participant.launch.participant_id;
+    let prepared = staged_root
+        .join("bin")
+        .join(participant.execution.binary_name());
+    if prepared.is_file() {
+        // Candidate-wide materialization and native source staging are the
+        // only mutation owners. Execution preparation reuses that exact entry
+        // instead of removing and relinking an already-prepared override.
+        return Ok(prepared);
+    }
     match &participant.execution {
         ParticipantExecution::UserService { .. } | ParticipantExecution::UserTool { .. } => {
-            let crate_dir = source_dirs.get(id).ok_or_else(|| {
+            source_dirs.get(id).ok_or_else(|| {
                 anyhow!("staged plan is missing the source crate directory for user runtime {id}")
             })?;
-            build_source_binary(crate_dir, id, ui, None, offline)
+            source_artifacts.binary_named(id).map(PathBuf::from)
         }
         ParticipantExecution::ComponentDriver { .. } => {
             // A workspace-built driver has a crate directory in the staging
             // record; a registry-provided one does not and materializes via
             // `cargo install`, keyed by its component id.
-            if let Some(crate_dir) = source_dirs.get(id) {
-                return build_source_binary(crate_dir, id, ui, None, offline);
+            if source_dirs.contains_key(id) {
+                return source_artifacts.binary_named(id).map(PathBuf::from);
             }
             let runtime = official_by_name
                 .get(participant.artifact_id.as_str())
@@ -467,23 +402,16 @@ fn resolve_participant_source(
                         participant.artifact_id
                     )
                 })?;
-            // This resolution path (single-participant execution, used only
-            // by simulation) never runs through the container builder, so
-            // there is no pre-materialized officials directory to check.
-            crate::stage::materialize_component_driver(
-                staged_root,
-                runtime,
-                offline,
-                None,
-                materialize_settings,
-                ui,
-            )?;
-            Ok(staged_root.join("bin").join(
-                phoxal_cli_core::project::resolver::official_binary_name(
-                    runtime.kind,
-                    &runtime.name,
-                ),
-            ))
+            let staged = staged_root
+                .join("bin")
+                .join(official_binary_name(runtime.kind, &runtime.name));
+            anyhow::ensure!(
+                staged.is_file(),
+                "candidate-wide preparation did not materialize component driver '{}' at {}",
+                runtime.name,
+                staged.display()
+            );
+            Ok(staged)
         }
         ParticipantExecution::OfficialTool { .. } => {
             let tool = resolved
@@ -493,23 +421,17 @@ fn resolve_participant_source(
                 .ok_or_else(|| {
                     anyhow!("resolved graph is missing tool {}", participant.artifact_id)
                 })?;
-            if let Some(crate_dir) = &tool.path_override {
-                return build_source_binary(
-                    crate_dir,
-                    phoxal_cli_core::project::resolver::tool_participant_id(&tool.name),
-                    ui,
-                    None,
-                    offline,
-                );
+            if tool.path_override.is_some() {
+                return source_artifacts.binary_named(&tool.name).map(PathBuf::from);
             }
-            let spec = materialize_settings.apply(
-                crate::build::materialise::MaterializeSpec::new(
-                    tool.package.clone(),
-                    tool.train.clone(),
-                )
-                .with_target(Some(tool.target.clone())),
+            let staged = staged_root.join("bin").join(&tool.binary_name);
+            anyhow::ensure!(
+                staged.is_file(),
+                "candidate-wide preparation did not materialize tool '{}' at {}",
+                tool.name,
+                staged.display()
             );
-            crate::build::materialise::cargo_install(staged_root, &spec, offline, ui)
+            Ok(staged)
         }
         ParticipantExecution::OfficialArtifact { .. } => {
             let runtime = official_by_name
@@ -520,17 +442,21 @@ fn resolve_participant_source(
                         participant.artifact_id
                     )
                 })?;
-            if let Some(crate_dir) = &runtime.path_override {
-                return build_source_binary(crate_dir, &runtime.name, ui, None, offline);
+            if runtime.path_override.is_some() {
+                return source_artifacts
+                    .binary_named(&runtime.name)
+                    .map(PathBuf::from);
             }
-            let spec = materialize_settings.apply(
-                crate::build::materialise::MaterializeSpec::new(
-                    runtime.package.clone(),
-                    runtime.train.clone(),
-                )
-                .with_target(runtime.target.clone()),
+            let staged = staged_root
+                .join("bin")
+                .join(official_binary_name(runtime.kind, &runtime.name));
+            anyhow::ensure!(
+                staged.is_file(),
+                "candidate-wide preparation did not materialize official artifact '{}' at {}",
+                runtime.name,
+                staged.display()
             );
-            crate::build::materialise::cargo_install(staged_root, &spec, offline, ui)
+            Ok(staged)
         }
     }
 }

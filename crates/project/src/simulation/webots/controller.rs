@@ -18,6 +18,7 @@ use phoxal_cli_core::project::launch_plan::{
 };
 use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
+use phoxal_cli_core::project::resolver::official_binary_name;
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -27,20 +28,20 @@ use std::path::Path;
 pub(crate) fn stage_simulator_controller_binaries(
     project_root: &Path,
     resolved: &BundlePlan,
-    offline: bool,
     ui: &dyn crate::Reporter,
-    webots_home: Option<&Path>,
+    source_artifacts: &crate::build::cargo::SourceArtifacts,
+    prepared_root: &Path,
 ) -> Result<()> {
     let runtime = resolved_controller_runtime(&resolved.simulators)?;
-    stage_controller_runtime_with_home(project_root, runtime, offline, ui, webots_home)
+    stage_controller_runtime_with_home(project_root, runtime, ui, source_artifacts, prepared_root)
 }
 
 fn stage_controller_runtime_with_home(
     project_root: &Path,
     runtime: &ResolvedPlatformRuntime,
-    offline: bool,
     ui: &dyn crate::Reporter,
-    webots_home: Option<&Path>,
+    source_artifacts: &crate::build::cargo::SourceArtifacts,
+    prepared_root: &Path,
 ) -> Result<()> {
     let controller_name =
         webots_controller_name_for_simulator_artifact(&runtime.name).ok_or_else(|| {
@@ -52,42 +53,31 @@ fn stage_controller_runtime_with_home(
         })?;
     let simulation_root = simulation_root_dir(project_root);
     let resolved_binary = if let Some(crate_dir) = runtime.source_path() {
-        let preferred_name = format!("phoxal-simulator-{}", runtime.name);
-        let _env_guard = webots_home.map(WebotsHomeEnvGuard::set);
+        let preferred_name = official_binary_name(runtime.kind, &runtime.name);
         // Simulation is an interactive development path, so source and
         // registry controller variants both use Cargo's debug profile.
-        let built = crate::build::cargo::build_source_binary_with_profile(
-            crate_dir,
-            &preferred_name,
-            ui,
-            None,
-            crate::build::profile::Profile::Debug,
-            offline,
-        )
-        .with_context(|| {
-            format!(
-                "failed to build path-overridden simulator '{}' from {}",
-                runtime.name,
-                crate_dir.display()
-            )
-        })?;
-        crate::stage::stage_named_binary(&simulation_root, &preferred_name, &built)?
-    } else {
-        let target_dir = crate::build::cargo::cargo_target_dir(project_root, offline)?;
-        let spec = crate::build::materialise::MaterializeSpec::new(
-            runtime.package.clone(),
-            runtime.train.clone(),
-        )
-        .with_target(runtime.target.clone())
-        .with_profile(crate::build::materialise::MaterializeProfile::Debug)
-        .with_target_dir(target_dir);
-        crate::build::materialise::cargo_install(&simulation_root, &spec, offline, ui)
+        let built = source_artifacts
+            .binary_named(&runtime.name)
+            .map(std::path::PathBuf::from)
             .with_context(|| {
                 format!(
-                    "failed to materialize official simulator '{}'",
-                    runtime.name
+                    "failed to resolve prepared simulator '{}' from {}",
+                    runtime.name,
+                    crate_dir.display()
                 )
-            })?
+            })?;
+        crate::stage::stage_named_binary(&simulation_root, &preferred_name, &built)?
+    } else {
+        let prepared = prepared_root
+            .join("bin")
+            .join(official_binary_name(runtime.kind, &runtime.name));
+        anyhow::ensure!(
+            prepared.is_file(),
+            "candidate-wide preparation did not materialize simulator controller '{}' at {}",
+            runtime.name,
+            prepared.display()
+        );
+        prepared
     };
     let staged_dir = root::controller_dir(controller_name)?;
     std::fs::create_dir_all(&staged_dir).with_context(|| {
@@ -170,17 +160,17 @@ pub(crate) fn webots_controller_name_for_simulator_artifact(
     }
 }
 
-/// RAII guard that sets `WEBOTS_HOME` for the duration of a `build_source_binary`
-/// call and restores the exact previous value afterwards.
+/// RAII guard that sets `WEBOTS_HOME` for the duration of selected source builds
+/// and restores the exact previous value afterwards.
 pub(crate) struct WebotsHomeEnvGuard {
     previous: Option<OsString>,
 }
 
 impl WebotsHomeEnvGuard {
-    fn set(home: &Path) -> Self {
+    pub(crate) fn set(home: &Path) -> Self {
         let previous = std::env::var_os("WEBOTS_HOME");
-        // SAFETY: this mutation is scoped to the synchronous controller build;
-        // the previous process value is retained and restored by Drop.
+        // SAFETY: preparation is synchronous while this guard is alive; its
+        // caller scopes the process-wide mutation to the source Cargo build.
         unsafe {
             std::env::set_var("WEBOTS_HOME", home);
         }
@@ -296,13 +286,17 @@ version = "0.1.0"
         )?;
         let mut runtime = controller_runtime();
         runtime.path_override = Some(source.clone());
+        let prepared = project.path().join("prepared-controller");
+        std::fs::write(&prepared, b"fixture")?;
+        let artifacts =
+            crate::build::cargo::SourceArtifacts::for_test(runtime.name.clone(), prepared);
         root::wipe_and_recreate()?;
         stage_controller_runtime_with_home(
             project.path(),
             &runtime,
-            false,
             &crate::SilentReporter,
-            None,
+            &artifacts,
+            project.path(),
         )?;
         let staged = root::controller_dir(crate::simulation::prepare::WEBOTS_CONTROLLER_NAME)?
             .join(crate::simulation::prepare::WEBOTS_CONTROLLER_NAME);

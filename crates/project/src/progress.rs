@@ -23,6 +23,34 @@ pub enum PreparationEvent {
     ProjectResolved {
         train: String,
     },
+    SourceBuildPlanned {
+        groups: usize,
+        artifacts: usize,
+    },
+    SourceBuildGroupStarted {
+        current: usize,
+        total: usize,
+        artifacts: usize,
+    },
+    SourceBuildArtifactCompleted {
+        completed: usize,
+        total: usize,
+    },
+    SourceBuildGroupFinished {
+        current: usize,
+        total: usize,
+        success: bool,
+    },
+    RegistryInstallGroupStarted {
+        current: usize,
+        total: usize,
+        packages: usize,
+    },
+    RegistryInstallGroupFinished {
+        current: usize,
+        total: usize,
+        success: bool,
+    },
 }
 
 pub trait Reporter: Send + Sync {

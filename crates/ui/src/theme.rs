@@ -103,17 +103,50 @@ fn env_var(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
+/// Detect whether terminal text may use Unicode glyphs independently from
+/// color capability. `NO_COLOR` never implies ASCII; an explicit C/POSIX
+/// locale or `TERM=dumb` does.
+#[must_use]
+pub fn detect_unicode_support(
+    term: Option<&str>,
+    lc_all: Option<&str>,
+    lc_ctype: Option<&str>,
+    lang: Option<&str>,
+) -> bool {
+    if term == Some("dumb") {
+        return false;
+    }
+    let locale = lc_all.or(lc_ctype).or(lang);
+    !matches!(locale, Some("C") | Some("POSIX"))
+}
+
+/// Resolve the current terminal's glyph capability. Kept separate from
+/// [`Theme`] so colorless Unicode terminals still retain readable symbols.
+#[must_use]
+pub fn terminal_supports_unicode() -> bool {
+    detect_unicode_support(
+        env_var("TERM").as_deref(),
+        env_var("LC_ALL").as_deref(),
+        env_var("LC_CTYPE").as_deref(),
+        env_var("LANG").as_deref(),
+    )
+}
+
 /// The shared theme: a resolved [`ColorCapability`] plus the helpers every
 /// output path renders through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     capability: ColorCapability,
+    unicode: bool,
 }
 
 impl Theme {
     #[must_use]
     pub const fn new(capability: ColorCapability) -> Self {
-        Self { capability }
+        Self {
+            capability,
+            unicode: true,
+        }
     }
 
     /// Detect the theme for stderr from the invocation's already-computed
@@ -123,17 +156,25 @@ impl Theme {
         if !interactive {
             return Self::new(ColorCapability::None);
         }
-        Self::new(detect_color_capability(
-            std::io::stderr().is_terminal(),
-            env_var("NO_COLOR").as_deref(),
-            env_var("COLORTERM").as_deref(),
-            env_var("TERM").as_deref(),
-        ))
+        Self {
+            capability: detect_color_capability(
+                std::io::stderr().is_terminal(),
+                env_var("NO_COLOR").as_deref(),
+                env_var("COLORTERM").as_deref(),
+                env_var("TERM").as_deref(),
+            ),
+            unicode: terminal_supports_unicode(),
+        }
     }
 
     #[must_use]
     pub const fn capability(self) -> ColorCapability {
         self.capability
+    }
+
+    #[must_use]
+    pub const fn supports_unicode(self) -> bool {
+        self.unicode
     }
 
     /// Paint `text` in `role`'s color, degraded to this theme's capability.
@@ -299,6 +340,28 @@ mod tests {
             detect_color_capability(true, None, None, None),
             ColorCapability::Ansi16
         );
+    }
+
+    #[test]
+    fn unicode_detection_is_independent_from_color_and_respects_ascii_environments() {
+        assert!(detect_unicode_support(
+            Some("xterm-256color"),
+            None,
+            None,
+            Some("en_US.UTF-8")
+        ));
+        assert!(!detect_unicode_support(
+            Some("xterm-256color"),
+            Some("C"),
+            None,
+            Some("en_US.UTF-8")
+        ));
+        assert!(!detect_unicode_support(
+            Some("dumb"),
+            None,
+            None,
+            Some("en_US.UTF-8")
+        ));
     }
 
     #[test]

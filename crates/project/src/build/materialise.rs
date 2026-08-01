@@ -16,7 +16,7 @@
 //! archiving step excludes dotfiles instead of trading that away.
 //!
 //! `target` cross-compiles with `--target <triple>` when it differs from the
-//! host, exactly like [`crate::build::cargo::build_source_binary`] does for
+//! host, exactly like the selected-source batch builder does for
 //! workspace-owned crates - the two mechanisms carry the identical
 //! cross-compilation caveat (a missing cross toolchain or a native
 //! dependency that cannot cross-link fails here too). The container builder
@@ -24,6 +24,7 @@
 //! running these same commands *inside* the target-native container instead
 //! of cross-compiling them from the host - see `commands::build::container`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -48,7 +49,7 @@ pub struct MaterializeSpec {
 /// Cargo's two install profiles. Interactive staging uses debug builds so
 /// source and registry participants share one development profile; deployable
 /// bundles use Cargo's default release profile throughout.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MaterializeProfile {
     Debug,
     #[default]
@@ -102,38 +103,69 @@ impl MaterializeSpec {
     }
 }
 
-/// `cargo install <package>@<train> --registry phoxal --locked --root <root>`,
-/// the most standard invocation the task's own acceptance criteria call for.
-/// Binaries are always harvested from `<root>/bin/<name>` afterward, never
-/// from the `executable` path a `--message-format json` run would report:
-/// `cargo install` MOVES the built binary into `<root>/bin`, so that path is
-/// stale by the time it would be read.
-pub fn cargo_install(
+/// Install a compatible exact-version registry group with one Cargo process.
+/// The caller groups by target/profile/target-directory; this function rejects
+/// an accidental mixed group rather than silently changing a package's build
+/// semantics. It verifies every final `bin/` entry before returning.
+pub fn cargo_install_batch(
     root: &Path,
-    spec: &MaterializeSpec,
+    specs: &[MaterializeSpec],
     offline: bool,
     reporter: &dyn crate::Reporter,
-) -> Result<PathBuf> {
-    let package = spec.cargo_package_name();
+) -> Result<Vec<PathBuf>> {
+    ensure!(
+        !specs.is_empty(),
+        "cannot materialize an empty registry batch"
+    );
+    let first = &specs[0];
+    ensure!(
+        specs.iter().all(|spec| {
+            spec.target == first.target
+                && spec.profile == first.profile
+                && spec.target_dir == first.target_dir
+        }),
+        "registry batch mixes target, profile, or target-directory settings"
+    );
+    let mut packages = BTreeMap::new();
+    for spec in specs {
+        let package = spec.cargo_package_name();
+        if let Some(previous) = packages.insert(package.clone(), spec.train.clone()) {
+            ensure!(
+                previous == spec.train,
+                "registry batch selects {package} at conflicting trains {previous} and {}",
+                spec.train
+            );
+        }
+    }
     let args = build_install_args(
-        std::iter::once((package.as_str(), spec.train.as_str())),
-        spec.target.as_deref(),
-        spec.profile,
+        packages
+            .iter()
+            .map(|(package, train)| (package.as_str(), train.as_str())),
+        first.target.as_deref(),
+        first.profile,
         offline,
     );
     let mut command = Command::new("cargo");
     command.arg("install").args(&args);
-    if let Some(target_dir) = &spec.target_dir {
+    if let Some(target_dir) = &first.target_dir {
         command.arg("--target-dir").arg(target_dir);
     }
     command.arg("--root").arg(root);
+    let operands = packages
+        .iter()
+        .map(|(package, train)| format!("{package}@{train}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     crate::progress::run_phase(
         reporter,
-        crate::PhaseId::new(format!("materialize-{}", package.replace('/', "-"))),
-        format!("Materializing {package}"),
-        || run_cargo_install(&mut command, &package, reporter),
+        crate::PhaseId::new("materialize-registry-batch"),
+        format!("Materializing registry batch ({} packages)", packages.len()),
+        || run_cargo_install(&mut command, &operands, reporter),
     )?;
-    harvest_binary(root, &package)
+    packages
+        .keys()
+        .map(|package| harvest_binary(root, package))
+        .collect()
 }
 
 /// The exact `cargo install` arguments after `install` and before `--root
@@ -142,7 +174,7 @@ pub fn cargo_install(
 /// line embedded in a container/remote invocation. Cross-compiles with
 /// `--target <triple>` only when `target` is set AND differs from the host -
 /// an explicit host-triple target is the plain native build, matching
-/// [`crate::build::cargo::build_source_binary`]'s identical check.
+/// the selected-source batch builder's identical check.
 #[must_use]
 pub fn build_install_args<'a>(
     packages: impl IntoIterator<Item = (&'a str, &'a str)>,

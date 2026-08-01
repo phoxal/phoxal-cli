@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::io::{BufRead, Read};
 use std::path::Path;
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,34 +17,13 @@ enum CapturedStream {
     Stderr,
 }
 
+type CapturedChild = Arc<Mutex<Option<Child>>>;
+
 pub(crate) fn command_status_captured(
     command: &mut Command,
     reporter: &dyn Reporter,
 ) -> Result<ExitStatus> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let child = Arc::new(Mutex::new(Some(
-        command.spawn().context("failed to spawn command")?,
-    )));
-    let pipes = {
-        let mut child = child
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        child
-            .as_mut()
-            .context("captured child was already reaped")
-            .and_then(|child| {
-                Ok((
-                    child.stdout.take().context("child stdout was not piped")?,
-                    child.stderr.take().context("child stderr was not piped")?,
-                ))
-            })
-    };
-    let (stdout, stderr) = pipes?;
+    let (child, stdout, stderr) = spawn_captured(command, "failed to spawn command")?;
     let status = std::thread::scope(|scope| {
         let stdout_task = scope.spawn(|| forward_lines(stdout, CapturedStream::Stdout, reporter));
         let stderr_task = scope.spawn(|| forward_lines(stderr, CapturedStream::Stderr, reporter));
@@ -57,6 +36,50 @@ pub(crate) fn command_status_captured(
     let status = status?;
     stdout.map_err(|_| anyhow::anyhow!("stdout reader thread panicked"))??;
     let stderr = stderr.map_err(|_| anyhow::anyhow!("stderr reader thread panicked"))??;
+    if !status.success() {
+        for line in stderr {
+            reporter.error(line);
+        }
+    }
+    Ok(status)
+}
+
+/// Run a command whose stdout is a line-oriented machine stream while keeping
+/// stderr draining concurrently. The callback executes as each stdout line is
+/// received, so Cargo artifact progress is observable during compilation
+/// without risking a stdout/stderr pipe deadlock.
+pub(crate) fn command_status_streaming_stdout(
+    command: &mut Command,
+    reporter: &dyn Reporter,
+    mut stdout_line: impl FnMut(&str) -> Result<()> + Send,
+) -> Result<ExitStatus> {
+    let (child, stdout, stderr) = spawn_captured(command, "failed to spawn command")?;
+    let (status, stdout_result, stderr_result) = std::thread::scope(|scope| {
+        let stdout_task = scope.spawn(|| -> Result<()> {
+            let mut callback_error = None;
+            for line in std::io::BufReader::new(stdout).lines() {
+                let line = line.context("failed to read command stdout")?;
+                // Keep draining after the first parser failure. Returning here
+                // can leave Cargo blocked on a full stdout pipe while the
+                // parent waits to reap it.
+                if callback_error.is_none()
+                    && let Err(error) = stdout_line(&line)
+                {
+                    callback_error = Some(error);
+                }
+            }
+            match callback_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        });
+        let stderr_task = scope.spawn(|| forward_lines(stderr, CapturedStream::Stderr, reporter));
+        let status = wait_for_child(&child, Some(reporter));
+        (status, stdout_task.join(), stderr_task.join())
+    });
+    let status = status?;
+    stdout_result.map_err(|_| anyhow::anyhow!("stdout reader thread panicked"))??;
+    let stderr = stderr_result.map_err(|_| anyhow::anyhow!("stderr reader thread panicked"))??;
     if !status.success() {
         for line in stderr {
             reporter.error(line);
@@ -100,32 +123,8 @@ pub fn run_output(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let child = Arc::new(Mutex::new(Some(
-        command
-            .spawn()
-            .with_context(|| format!("failed to run `{executable}`"))?,
-    )));
-    let pipes = {
-        let mut child = child
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        child
-            .as_mut()
-            .context("captured child was already reaped")
-            .and_then(|child| {
-                Ok((
-                    child.stdout.take().context("child stdout was not piped")?,
-                    child.stderr.take().context("child stderr was not piped")?,
-                ))
-            })
-    };
-    let (stdout, stderr) = pipes?;
+    let (child, stdout, stderr) =
+        spawn_captured(&mut command, &format!("failed to run `{executable}`"))?;
     let stdout_task = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         let result = std::io::BufReader::new(stdout).read_to_end(&mut bytes);
@@ -153,10 +152,37 @@ pub fn run_output(
     })
 }
 
-fn wait_for_child(
-    child: &Arc<Mutex<Option<std::process::Child>>>,
-    reporter: Option<&dyn Reporter>,
-) -> Result<ExitStatus> {
+fn spawn_captured(
+    command: &mut Command,
+    spawn_context: &str,
+) -> Result<(CapturedChild, ChildStdout, ChildStderr)> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let child = Arc::new(Mutex::new(Some(
+        command.spawn().context(spawn_context.to_owned())?,
+    )));
+    let (stdout, stderr) = {
+        let mut child = child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        child
+            .as_mut()
+            .context("captured child was already reaped")
+            .and_then(|child| {
+                Ok((
+                    child.stdout.take().context("child stdout was not piped")?,
+                    child.stderr.take().context("child stderr was not piped")?,
+                ))
+            })
+    }?;
+    Ok((child, stdout, stderr))
+}
+
+fn wait_for_child(child: &CapturedChild, reporter: Option<&dyn Reporter>) -> Result<ExitStatus> {
     loop {
         {
             let mut child = child
@@ -281,6 +307,54 @@ mod tests {
             started.elapsed() < Duration::from_secs(3),
             "cancelled command tree was not terminated promptly"
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_callback_error_still_drains_and_reaps_the_command() {
+        let reporter = RecordingReporter::default();
+        let marker = tempfile::NamedTempFile::new().expect("marker path");
+        let marker_path = marker.path().to_path_buf();
+        drop(marker);
+        let mut command = Command::new("/bin/sh");
+        command.env("MARKER", &marker_path);
+        command.args([
+            "-c",
+            "i=0; while [ \"$i\" -lt 20000 ]; do echo line-$i; i=$((i+1)); done; : > \"$MARKER\"",
+        ]);
+        let started = Instant::now();
+        let error = command_status_streaming_stdout(&mut command, &reporter, |_| {
+            bail!("intentional parser failure")
+        })
+        .expect_err("callback failure must be returned after the pipes are drained");
+        assert!(error.to_string().contains("intentional parser failure"));
+        assert!(
+            marker_path.is_file(),
+            "the callback error returned before stdout was drained and the child reached its post-output marker"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "callback failure left the child blocked behind an undrained stdout pipe"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_cancellation_terminates_the_command_process_group() -> Result<()> {
+        let reporter = Arc::new(RecordingReporter::default());
+        let canceller = Arc::clone(&reporter);
+        let cancel = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            canceller.cancelled.store(true, Ordering::Release);
+        });
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let started = Instant::now();
+        let status = command_status_streaming_stdout(&mut command, reporter.as_ref(), |_| Ok(()))?;
+        cancel.join().expect("cancellation thread");
+        assert!(!status.success());
+        assert!(started.elapsed() < Duration::from_secs(3));
         Ok(())
     }
 }

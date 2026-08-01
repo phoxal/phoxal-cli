@@ -141,7 +141,7 @@ mod tests {
         let project = Path::new("/tmp/phoxal-project");
         assert_eq!(
             supervisor_socket_path(project).unwrap(),
-            project.join(".phoxal/supervisor.sock")
+            project.join(".phoxal/run/supervisor.sock")
         );
         let long = PathBuf::from(format!("/tmp/{}", "x".repeat(256)));
         assert!(

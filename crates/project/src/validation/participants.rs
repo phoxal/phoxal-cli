@@ -94,11 +94,10 @@ pub(crate) fn platform_artifact_refs_from_resolved(
 /// (`left_drive`/`right_drive` both resolving
 /// `phoxal/component-ddsm115`). A Path/Git-sourced driver is a source
 /// participant instead (see `source_participants_from_resolved`) and is not
-/// included here. Reused by every path that validates the graph like a
-/// service (`build`, `run`); `simulate` also fetches through this
-/// same function but discards a driver participant from its final launch set
-/// after validating its contracts (drivers are sim-substituted, never
-/// launched).
+/// included here. Reused by native paths that validate the graph like a
+/// service (`build`, `run`). Simulation filters these refs before preparation
+/// because physical drivers are substituted out there and must not be fetched
+/// merely to discard them afterward.
 pub(crate) fn component_driver_platform_refs_from_resolved(
     resolved: &BundlePlan,
 ) -> Vec<PlatformArtifactRef> {
@@ -160,9 +159,21 @@ pub(crate) fn component_driver_runtimes_by_ref(
         .collect()
 }
 
-pub(crate) fn check_artifact_refs_from_resolved(resolved: &BundlePlan) -> Vec<PlatformArtifactRef> {
+pub(crate) fn check_artifact_refs_from_resolved(
+    resolved: &BundlePlan,
+    drivers: phoxal_cli_core::project::layout::DriverSelection,
+) -> Vec<PlatformArtifactRef> {
     let mut refs = platform_artifact_refs_from_resolved(resolved);
-    refs.extend(component_driver_platform_refs_from_resolved(resolved));
+    refs.extend(
+        component_driver_platform_refs_from_resolved(resolved)
+            .into_iter()
+            .filter_map(|mut reference| {
+                reference
+                    .instances
+                    .retain(|instance| drivers.includes_instance(instance));
+                (!reference.instances.is_empty()).then_some(reference)
+            }),
+    );
     refs.extend(
         resolved
             .tools
@@ -183,6 +194,20 @@ pub(crate) fn check_artifact_refs_from_resolved(resolved: &BundlePlan) -> Vec<Pl
 pub(crate) fn source_participants_from_resolved(
     project_root: &Path,
     resolved: &BundlePlan,
+    locate_component_crate: impl FnMut(&ResolvedComponent, &Path) -> Result<PathBuf>,
+) -> Result<Vec<SourceParticipant>> {
+    source_participants_from_resolved_with_drivers(
+        project_root,
+        resolved,
+        true,
+        locate_component_crate,
+    )
+}
+
+pub(crate) fn source_participants_from_resolved_with_drivers(
+    project_root: &Path,
+    resolved: &BundlePlan,
+    include_component_drivers: bool,
     mut locate_component_crate: impl FnMut(&ResolvedComponent, &Path) -> Result<PathBuf>,
 ) -> Result<Vec<SourceParticipant>> {
     let mut participants = resolved
@@ -219,10 +244,11 @@ pub(crate) fn source_participants_from_resolved(
     // materialized via `cargo install` and validated like a service. Only a
     // Path/Git (fork/dev-override) driver builds from source here.
     for component in resolved.components.iter().filter(|component| {
-        component
-            .driver
-            .as_ref()
-            .is_some_and(|driver| !matches!(driver.source, ResolvedComponentSource::Registry))
+        include_component_drivers
+            && component
+                .driver
+                .as_ref()
+                .is_some_and(|driver| !matches!(driver.source, ResolvedComponentSource::Registry))
     }) {
         let crate_dir = if let Some(path) = component.driver_path_override() {
             path.to_path_buf()

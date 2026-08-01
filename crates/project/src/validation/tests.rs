@@ -1,6 +1,5 @@
 //! Tests for this module.
 
-use super::build::build_participant_report_from_source_with_diagnostics;
 use super::participants::{
     component_driver_platform_refs_from_resolved, platform_artifact_refs_from_resolved,
 };
@@ -993,37 +992,6 @@ fn user_service_with_no_producer_is_a_legal_graph() -> Result<()> {
 }
 
 #[test]
-fn build_participant_report_from_source_never_caches_across_calls() -> Result<()> {
-    // Two back-to-back calls for the same crate dir each invoke the fake build
-    // closure; source inspection does not retain state between calls.
-    let temp = tempfile::tempdir()?;
-    let crate_dir = fixture_crate_dir(&temp, "sibling");
-    let participant = SourceParticipant::user_service("sibling", crate_dir.clone());
-
-    let mut build_count = 0;
-    let first = build_participant_report_from_source_with_diagnostics(
-        &participant,
-        |_| {
-            build_count += 1;
-            Ok(raw("sibling"))
-        },
-        None,
-    )?;
-    let second = build_participant_report_from_source_with_diagnostics(
-        &participant,
-        |_| {
-            build_count += 1;
-            Ok(raw("sibling"))
-        },
-        None,
-    )?;
-
-    assert_eq!(build_count, 2, "every call must rebuild, nothing is cached");
-    assert_eq!(first, second);
-    Ok(())
-}
-
-#[test]
 fn component_driver_and_platform_participants_coexist_in_a_healthy_graph() -> Result<()> {
     // A component driver and a platform publisher both check clean. The
     // driver still appears under its concrete instance id (`left_drive`),
@@ -1178,6 +1146,20 @@ fn components_without_drivers_are_not_built() -> Result<()> {
 
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
     assert_eq!(built, vec![PathBuf::from("components/ddsm115")]);
+
+    // Simulation uses the same resolved plan but deliberately substitutes
+    // physical components. The selector must not merely filter an already
+    // built list: its component locator is unreachable for this real
+    // path-sourced driver.
+    let simulation_sources = source_participants_from_resolved_with_drivers(
+        temp.path(),
+        &resolved,
+        false,
+        |_component, _project_root| {
+            panic!("simulation must not try to locate physical component drivers")
+        },
+    )?;
+    assert!(simulation_sources.is_empty(), "{simulation_sources:?}");
     Ok(())
 }
 
@@ -1279,6 +1261,27 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
         instances,
         vec!["left_drive".to_string(), "right_drive".to_string()]
     );
+
+    let off = check_artifact_refs_from_resolved(
+        &resolved,
+        phoxal_cli_core::project::layout::DriverSelection::None,
+    );
+    assert!(
+        off.iter()
+            .all(|reference| reference.kind != ArtifactKind::ComponentDriver),
+        "--drivers off must not fetch a registry driver during checking"
+    );
+    let subset = check_artifact_refs_from_resolved(
+        &resolved,
+        phoxal_cli_core::project::layout::DriverSelection::Only(
+            ["left_drive".to_string()].into_iter().collect(),
+        ),
+    );
+    let selected = subset
+        .iter()
+        .find(|reference| reference.kind == ArtifactKind::ComponentDriver)
+        .expect("the selected registry driver remains checkable");
+    assert_eq!(selected.instances, ["left_drive"]);
 
     let source_participants =
         source_participants_from_resolved(temp.path(), &resolved, |_component, _project_root| {
@@ -1646,15 +1649,6 @@ fn user_service_config_uses_full_json_schema_keywords() -> Result<()> {
         "{errors:?}"
     );
     Ok(())
-}
-
-/// Writes a marker file so the tempdir hashes distinctly under
-/// `hash_tree` (an empty directory always hashes to the SHA-256 of empty
-/// input, so two unrelated empty fixture crates would otherwise collide
-/// on the same source-tree hash and thus the same cache path).
-fn fixture_crate_dir(temp: &tempfile::TempDir, marker: &str) -> PathBuf {
-    std::fs::write(temp.path().join("Cargo.toml"), marker).expect("write fixture marker");
-    temp.path().to_path_buf()
 }
 
 fn raw(id: &str) -> RawParticipantReport {

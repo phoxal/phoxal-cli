@@ -79,8 +79,7 @@ pub(crate) fn fetch_participant_report_from_tool(
 
 /// Builds a [`RawParticipantReport`] from a binary's extracted [`ParticipantMeta`] plus
 /// the artifact identity the caller already expects - the shared tail of
-/// [`fetch_participant_report_from_tool`] and
-/// [`build_participant_report_by_building`](super::build::build_participant_report_by_building).
+/// [`fetch_participant_report_from_tool`] and selected-source artifact inspection.
 ///
 /// The embedded metadata carries the participant's declared identity, kind,
 /// class, and config schema. The caller's expectations are claims made

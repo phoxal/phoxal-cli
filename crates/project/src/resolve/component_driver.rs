@@ -7,8 +7,8 @@ use phoxal_cli_core::project::resolver::ResolvedComponent;
 /// Locate the on-disk source directory for a component instance's resolved
 /// `component_driver` package: a workspace/path-overridden crate the CLI
 /// builds. Only reached for a `Path`-sourced driver - a registry-sourced
-/// driver materializes straight to a `bin/` binary via `cargo install` and
-/// never needs a directory (see `crate::stage::materialize_component_driver`).
+/// driver is materialized by the candidate-wide staging planner and never
+/// needs a directory.
 /// Errors if the instance has no resolved driver package (a driverless
 /// instance, or one whose `driver:` block failed to resolve - callers only
 /// reach this for instances known to have a driver).

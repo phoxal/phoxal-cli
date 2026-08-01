@@ -1268,7 +1268,7 @@ mod readiness_tests {
             "/tmp/project".to_string(),
             "v0.test",
             phoxal_cli_core::identity::ExecutionId::mint(),
-            "unixsock-stream//tmp/project/.phoxal/zenoh.sock",
+            "unixsock-stream//tmp/project/.phoxal/run/zenoh.sock",
         );
         // A freshly configured board is Starting - still pending.
         assert_eq!(

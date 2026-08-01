@@ -84,9 +84,9 @@ mod tests {
         assert_eq!(target.project_lock, root.join(".phoxal/project.lock"));
         assert_eq!(
             target.supervisor_socket,
-            root.join(".phoxal/supervisor.sock")
+            root.join(".phoxal/run/supervisor.sock")
         );
-        assert_eq!(target.zenoh_socket, root.join(".phoxal/zenoh.sock"));
+        assert_eq!(target.zenoh_socket, root.join(".phoxal/run/zenoh.sock"));
         assert_eq!(target.authority, ResidentAuthority::DetachedSession);
         Ok(())
     }
