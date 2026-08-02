@@ -14,7 +14,7 @@ use phoxal_cli_supervisor::ProjectOperation;
 use phoxal_cli_supervisor::SupervisionStage;
 use phoxal_cli_supervisor::SupervisorOptions;
 use phoxal_cli_supervisor::SupervisorState;
-use phoxal_cli_supervisor::start_liveliness_observer;
+use phoxal_cli_supervisor::start_supervisor_session;
 use phoxal_cli_supervisor::{EmbeddedRouter, start_embedded_router, supervise_until_shutdown};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -102,6 +102,9 @@ pub(crate) struct PreparedRun {
     pub(crate) specs: Vec<ParticipantSpec>,
     pub(crate) robot_targets: Vec<RobotFeedTarget>,
     pub(crate) router: phoxal_cli_project::PreparedRouter,
+    /// The runtime layout this run was staged into. The supervisor serves
+    /// declared assets from below it (organization#978).
+    pub(crate) staged_root: std::path::PathBuf,
 }
 
 /// Resources assembled after preparation but before the controller enters
@@ -945,6 +948,7 @@ async fn prepare_run(
         board,
         specs,
         router: prepared.router,
+        staged_root: prepared.staged_root,
     })
 }
 
@@ -1258,14 +1262,28 @@ pub(crate) async fn live_run_setup(
     report_launch_commands(&prepared.plan, &prepared.specs, &ui)?;
 
     let execution = run.execution();
+    // The supervisor stages this root, so it is the authority for it. Discovery
+    // failing is not fatal: a bundle may legitimately declare no assets, and a
+    // malformed tree should not stop a robot from running - it makes asset
+    // queries answer `Missing` instead.
+    let assets = phoxal_model::AssetResolver::discover(
+        prepared
+            .staged_root
+            .join(phoxal_cli_core::project::layout::ASSETS_DIR),
+    )
+    .unwrap_or_else(|error| {
+        tracing::warn!("serving no declared assets: {error}");
+        phoxal_model::AssetResolver::default()
+    });
     let mut background_tasks = AbortTasks::default();
     background_tasks.extend(prepared.robot_targets.iter().map(|target| {
-        start_liveliness_observer(
+        start_supervisor_session(
             target.scope.namespace.clone(),
             target.scope.robot_id.clone(),
             connect.clone(),
             execution,
             prepared.board.clone(),
+            assets.clone(),
         )
     }));
 

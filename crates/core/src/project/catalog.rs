@@ -150,10 +150,6 @@ pub const NATIVE: &[OfficialRuntime] = &[
         kind: ArtifactKind::Tool,
     },
     OfficialRuntime {
-        package: "phoxal/service-asset",
-        kind: ArtifactKind::Service,
-    },
-    OfficialRuntime {
         package: "phoxal/service-behavior",
         kind: ArtifactKind::Service,
     },
