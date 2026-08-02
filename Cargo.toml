@@ -60,11 +60,11 @@ toml = "0.9.8"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 webots-proto = "0.2.0"
-phoxal-api = "=0.46.0"
-phoxal-bus = "=0.46.0"
-phoxal-manifest = "=0.46.0"
-phoxal-model = "=0.46.0"
-phoxal-runtime-contract = "=0.46.0"
+phoxal-api = "=0.47.0"
+phoxal-bus = "=0.47.0"
+phoxal-manifest = "=0.47.0"
+phoxal-model = "=0.47.0"
+phoxal-runtime-contract = "=0.47.0"
 phoxal-cli-client = { path = "crates/client" }
 phoxal-cli-core = { path = "crates/core" }
 phoxal-cli-observation = { path = "crates/observation" }
@@ -133,12 +133,3 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
-
-# TEMPORARY local overlay: develop against framework `feat/router-watch`
-# before it releases. Remove this block and bump the pins above before the PR.
-[patch.crates-io]
-phoxal-api = { path = "../../../../framework/.claude/worktrees/router-watch/phoxal-api" }
-phoxal-bus = { path = "../../../../framework/.claude/worktrees/router-watch/phoxal-bus" }
-phoxal-manifest = { path = "../../../../framework/.claude/worktrees/router-watch/phoxal-manifest" }
-phoxal-model = { path = "../../../../framework/.claude/worktrees/router-watch/phoxal-model" }
-phoxal-runtime-contract = { path = "../../../../framework/.claude/worktrees/router-watch/phoxal-runtime-contract" }
