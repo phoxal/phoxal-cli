@@ -12,7 +12,9 @@ getrandom = { workspace = true }
 libc = { workspace = true }
 # `router` opens the embedded Zenoh router in this process (organization#978).
 # The supervisor is the only crate in the workspace that enables it.
+phoxal-api = { workspace = true }
 phoxal-bus = { workspace = true, features = ["router"] }
+phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
 phoxal-cli-core = { workspace = true }
 phoxal-cli-protocol = { workspace = true }

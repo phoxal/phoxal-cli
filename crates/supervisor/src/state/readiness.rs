@@ -6,40 +6,54 @@ use phoxal_bus::{Bus, BusConfig, ParticipantLivelinessEvent, ParticipantLiveline
 use phoxal_cli_core::identity::{ExecutionId, ProducerId};
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::runtime::{ParticipantInstanceKey, RobotKey};
+use phoxal_model::AssetResolver;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-const LIVELINESS_OBSERVER_ID: &str = "phoxal-cli-liveliness-observer";
+/// The supervisor's own participant id on the robot bus. It observes
+/// Liveliness and answers the contracts the supervisor owns; it declares no
+/// Liveliness token of its own and is not a graph participant.
+const SUPERVISOR_SESSION_ID: &str = "phoxal-cli-liveliness-observer";
 
 #[cfg(test)]
 use crate::ProcessState;
 
-/// Observe every planned participant's stable Zenoh Liveliness key on one
-/// robot bus. Callers register the finite participant set on the board before
-/// starting this observer; traffic for any other key is deliberately ignored.
-/// History is enabled by the framework wrapper, so participants that completed
-/// setup before this observer connected are discovered immediately.
-pub fn start_liveliness_observer(
+/// Open the supervisor's own session on one robot bus.
+///
+/// It carries everything the supervisor itself does on that bus: observing
+/// every planned participant's stable Zenoh Liveliness key, and answering the
+/// contracts the supervisor owns (`supervisor/asset/get`). One session per
+/// robot target rather than one per concern - each absorbed contract otherwise
+/// adds another connection to the same router for no benefit
+/// (organization#978).
+///
+/// Callers register the finite participant set on the board before starting
+/// this; Liveliness traffic for any other key is deliberately ignored. History
+/// is enabled by the framework wrapper, so participants that completed setup
+/// before this session connected are discovered immediately.
+pub fn start_supervisor_session(
     namespace: String,
     robot_id: String,
     connect: String,
     execution: ExecutionId,
     board: SupervisorState,
+    assets: AssetResolver,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            match liveliness_observer_loop(
+            match supervisor_session_loop(
                 namespace.clone(),
                 robot_id.clone(),
                 connect.clone(),
                 execution,
                 board.clone(),
+                assets.clone(),
             )
             .await
             {
                 Ok(()) => break,
                 Err(error) => {
-                    tracing::debug!("liveliness observer waiting for router: {error:#}");
+                    tracing::debug!("supervisor session waiting for router: {error:#}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
@@ -47,17 +61,18 @@ pub fn start_liveliness_observer(
     })
 }
 
-pub(crate) async fn liveliness_observer_loop(
+pub(crate) async fn supervisor_session_loop(
     namespace: String,
     robot_id: String,
     connect: String,
     execution: ExecutionId,
     board: SupervisorState,
+    assets: AssetResolver,
 ) -> Result<()> {
     let bus = Bus::open(BusConfig {
         namespace: namespace.clone(),
         robot_id: robot_id.clone(),
-        participant: LIVELINESS_OBSERVER_ID.to_string(),
+        participant: SUPERVISOR_SESSION_ID.to_string(),
         execution,
         producer: ProducerId::mint(),
         connect_endpoints: vec![connect],
@@ -73,8 +88,10 @@ pub(crate) async fn liveliness_observer_loop(
     // Once declared, the Bus session and Zenoh subscriber own transparent
     // transport reconnection. The outer loop above retries only initial open
     // or declaration failures; there is no application-level heartbeat loop.
-    std::future::pending::<()>().await;
-    Ok(())
+    //
+    // Serving assets is what parks this task: it returns only when the bus
+    // closes, which is also the one condition that used to end the wait here.
+    super::assets::serve_assets(&bus, &assets).await
 }
 
 fn apply_liveliness_event(
@@ -89,7 +106,7 @@ fn apply_liveliness_event(
     // can receive an uncompensated self-Lost after duplicate-key
     // reconciliation. This observer does not normally declare a token, but
     // filtering its own id keeps that invariant explicit.
-    if id == LIVELINESS_OBSERVER_ID {
+    if id == SUPERVISOR_SESSION_ID {
         return;
     }
     board.record_instance_presence(
@@ -173,7 +190,7 @@ mod tests {
         let board = SupervisorState::new();
         let key = phoxal_cli_core::runtime::ProcessKey::robot(
             phoxal_cli_core::runtime::RobotKey::new("dev", "rover"),
-            LIVELINESS_OBSERVER_ID,
+            SUPERVISOR_SESSION_ID,
         );
         board.register_planned(
             &key,
@@ -184,7 +201,7 @@ mod tests {
             &board,
             "dev",
             "rover",
-            event(LIVELINESS_OBSERVER_ID, ParticipantLivelinessStatus::Alive),
+            event(SUPERVISOR_SESSION_ID, ParticipantLivelinessStatus::Alive),
         );
         assert_eq!(
             board.supervisor_snapshot().processes[&key].status.actual,

@@ -76,7 +76,7 @@ mod setup {
     use crate::cli::output::OutputContext;
     use phoxal_cli_supervisor::{
         RequestedStop, SupervisionStage, SupervisorAction, SupervisorOptions, SupervisorState,
-        start_liveliness_observer,
+        start_supervisor_session,
     };
 
     pub(crate) struct LiveSimSetup {
@@ -176,14 +176,28 @@ mod setup {
         ui.info(format!("router ready on {connect}"));
         crate::application::run::report_launch_commands(&prepared.plan, &specs, &ui)?;
 
+        // The supervisor stages this root, so it is the authority for it. Discovery
+        // failing is not fatal: a bundle may legitimately declare no assets, and a
+        // malformed tree should not stop a robot from running - it makes asset
+        // queries answer `Missing` instead.
+        let assets = phoxal_model::AssetResolver::discover(
+            prepared
+                .staged_root
+                .join(phoxal_cli_core::project::layout::ASSETS_DIR),
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!("serving no declared assets: {error}");
+            phoxal_model::AssetResolver::default()
+        });
         let mut background_tasks = crate::application::run::AbortTasks::default();
         background_tasks.extend(prepared.plan.robots.iter().map(|robot| {
-            start_liveliness_observer(
+            start_supervisor_session(
                 robot.namespace.clone(),
                 robot.id.clone(),
                 connect.clone(),
                 run.execution(),
                 board.clone(),
+                assets.clone(),
             )
         }));
         let (_action_tx, action_rx) = action_channel.unwrap_or_else(|| mpsc::channel(16));

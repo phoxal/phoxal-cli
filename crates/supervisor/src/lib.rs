@@ -70,4 +70,4 @@ pub use process::stages::{SupervisionStage, stages_for_run, stages_for_simulatio
 pub use process::supervise::supervise_until_shutdown;
 pub use router::{EmbeddedRouter, start_embedded_router};
 pub use state::SupervisorState;
-pub use state::readiness::{default_connect_endpoint, start_liveliness_observer};
+pub use state::readiness::{default_connect_endpoint, start_supervisor_session};
