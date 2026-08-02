@@ -273,11 +273,6 @@ mod tests {
             ("phoxal/service-drive", ArtifactKind::Service, "drive"),
             ("phoxal/tool-bus", ArtifactKind::Tool, "bus"),
             (
-                "phoxal/infrastructure-router",
-                ArtifactKind::Infrastructure,
-                "router",
-            ),
-            (
                 "phoxal/component-ddsm115",
                 ArtifactKind::ComponentDriver,
                 "ddsm115",

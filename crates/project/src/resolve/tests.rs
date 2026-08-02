@@ -374,12 +374,13 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
         .find(|tool| tool.package == "phoxal/tool-bus")
         .expect("bus is a catalog tool");
     assert_eq!(bus.binary_name, "phoxal-tool-bus");
-    let router = resolved
-        .tools
-        .iter()
-        .find(|tool| tool.package == "phoxal/infrastructure-router")
-        .expect("the infrastructure router is always resolved");
-    assert_eq!(router.binary_name, "phoxal-infrastructure-router");
+    assert!(
+        !resolved
+            .tools
+            .iter()
+            .any(|tool| tool.package.contains("router")),
+        "the router runs inside the supervisor and is never a resolved artifact"
+    );
     Ok(())
 }
 

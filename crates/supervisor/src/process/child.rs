@@ -390,10 +390,6 @@ impl ManagedChild {
         status
     }
 
-    pub(crate) async fn kill(&mut self) -> std::io::Result<()> {
-        self.inner.kill().await
-    }
-
     fn unregister(&mut self) {
         if let Some(pgid) = self.pgid.take()
             && let Err(error) = with_guardian(|guardian| guardian.record(b'-', pgid))

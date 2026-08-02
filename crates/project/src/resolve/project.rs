@@ -149,12 +149,6 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
         .filter(|official| official.kind == ArtifactKind::Tool)
         .map(|official| tool_from_official(official, &train, &tool_target))
         .collect::<Vec<_>>();
-    tools.extend(
-        catalog::NATIVE
-            .iter()
-            .filter(|official| official.kind == ArtifactKind::Infrastructure)
-            .map(|official| tool_from_official(official, &train, &tool_target)),
-    );
 
     let workspace = apply_workspace_runtimes(
         robot,
@@ -232,7 +226,6 @@ fn short_name(package: &str, kind: ArtifactKind) -> String {
         ArtifactKind::Service => "phoxal/service-",
         ArtifactKind::Tool => "phoxal/tool-",
         ArtifactKind::Simulator => "phoxal/simulator-",
-        ArtifactKind::Infrastructure => "phoxal/infrastructure-",
         ArtifactKind::ComponentDriver => "phoxal/component-",
     };
     package.strip_prefix(prefix).unwrap_or(package).to_string()

@@ -111,70 +111,6 @@ impl SupervisorState {
             .contains(instance)
     }
 
-    pub(crate) fn begin_recovery_epoch(
-        &self,
-        spawned: &[(ProcessKey, Option<String>)],
-        wait_only: &[ProcessKey],
-    ) -> u64 {
-        let mut readiness = self
-            .exact_instances
-            .lock()
-            .expect("exact readiness mutex poisoned");
-        readiness.enabled = false;
-        readiness.instances.clear();
-        drop(readiness);
-
-        let generation = {
-            let mut snapshot = self
-                .snapshot
-                .lock()
-                .expect("supervisor state mutex poisoned");
-            for key in spawned.iter().map(|(key, _)| key).chain(wait_only) {
-                if let Some(entry) = snapshot.processes.get_mut(key) {
-                    entry.status.actual = ProcessState::Starting;
-                    entry.status.pid = None;
-                    entry.status.producer = None;
-                    entry.status.restart_count_in_generation = 0;
-                }
-            }
-            snapshot.graph_generation = snapshot.graph_generation.saturating_add(1);
-            snapshot.lifecycle = ProjectLifecycle::Starting;
-            if let Some(graph) = snapshot
-                .startup
-                .steps
-                .iter_mut()
-                .find(|step| step.kind == StartupStepKind::Graph)
-            {
-                graph.state = StartupStepState::Active;
-                graph.detail = Some("recovering".to_string());
-                graph.elapsed_ms = None;
-            }
-            snapshot.revision = snapshot.revision.saturating_add(1);
-            let generation = snapshot.graph_generation;
-            self.publisher.send_replace(snapshot.clone());
-            generation
-        };
-        self.startup_started
-            .lock()
-            .expect("startup timing mutex poisoned")
-            .insert(StartupStepKind::Graph, Instant::now());
-        let mut stderr = self
-            .captured_stderr
-            .lock()
-            .expect("captured stderr mutex poisoned");
-        for key in spawned.iter().map(|(key, _)| key).chain(wait_only) {
-            stderr.remove(key);
-        }
-        generation
-    }
-
-    pub(crate) fn enable_presence_for_recovery(&self) {
-        self.exact_instances
-            .lock()
-            .expect("exact readiness mutex poisoned")
-            .enabled = true;
-    }
-
     pub fn upsert_process(
         &self,
         key: ProcessKey,
@@ -850,50 +786,6 @@ mod tests {
         ] {
             assert_eq!(failure_kind(Some(detail)), expected, "{detail}");
         }
-    }
-
-    #[test]
-    fn graph_recovery_fences_old_readiness_and_publishes_a_new_generation() {
-        let state = SupervisorState::new();
-        state.plan_startup_steps();
-        state.step_done(StartupStepKind::Graph);
-        let robot = RobotKey::new("lab", "rover");
-        let key = ProcessKey::robot(robot.clone(), "mission");
-        state.upsert_process(
-            key.clone(),
-            ParticipantKind::Service,
-            ProcessState::Ready,
-            StartupRequirement::Required,
-        );
-        state.set_pid(&key, Some(42));
-        state.set_producer(&key, producer(7));
-        let revision = state.supervisor_snapshot().revision;
-
-        assert_eq!(state.begin_recovery_epoch(&[(key.clone(), None)], &[]), 1);
-        let recovered = state.supervisor_snapshot();
-        assert!(recovered.revision > revision);
-        assert_eq!(recovered.graph_generation, 1);
-        assert_eq!(recovered.lifecycle, ProjectLifecycle::Starting);
-        let graph = startup_step(&recovered, StartupStepKind::Graph).unwrap();
-        assert_eq!(graph.state, StartupStepState::Active);
-        assert_eq!(graph.detail.as_deref(), Some("recovering"));
-        assert_eq!(graph.elapsed_ms, None);
-        assert_eq!(
-            recovered.processes[&key].status.actual,
-            ProcessState::Starting
-        );
-        assert_eq!(recovered.processes[&key].status.pid, None);
-        assert_eq!(recovered.processes[&key].status.producer, None);
-
-        state.record_instance_presence(
-            ParticipantInstanceKey {
-                robot,
-                participant: "mission".to_string(),
-                producer: producer(7),
-            },
-            true,
-        );
-        assert_eq!(state.process_state(&key), Some(ProcessState::Starting));
     }
 
     #[test]

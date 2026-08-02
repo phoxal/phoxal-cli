@@ -133,3 +133,13 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
+
+# TEMPORARY local overlay: develop the embedded-router cutover against the
+# framework's merged `main` before v0.46.0 publishes. Remove this block and bump
+# the `=0.45.5` pins above to `=0.46.0` before opening the PR.
+[patch.crates-io]
+phoxal-api = { path = "../../../../framework/phoxal-api" }
+phoxal-bus = { path = "../../../../framework/phoxal-bus" }
+phoxal-manifest = { path = "../../../../framework/phoxal-manifest" }
+phoxal-model = { path = "../../../../framework/phoxal-model" }
+phoxal-runtime-contract = { path = "../../../../framework/phoxal-runtime-contract" }

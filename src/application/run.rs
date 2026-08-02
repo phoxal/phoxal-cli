@@ -15,7 +15,7 @@ use phoxal_cli_supervisor::SupervisionStage;
 use phoxal_cli_supervisor::SupervisorOptions;
 use phoxal_cli_supervisor::SupervisorState;
 use phoxal_cli_supervisor::start_liveliness_observer;
-use phoxal_cli_supervisor::{InfrastructureRouter, start_infrastructure_router};
+use phoxal_cli_supervisor::{EmbeddedRouter, start_embedded_router, supervise_until_shutdown};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -108,7 +108,7 @@ pub(crate) struct PreparedRun {
 /// supervision. Keeping this whole phase behind `drive_setup` means raw-mode
 /// Ctrl-C remains polled until the supervisor loop takes ownership.
 pub(crate) struct LiveRunSetup {
-    pub(crate) router: InfrastructureRouter,
+    pub(crate) router: EmbeddedRouter,
     pub(crate) board: SupervisorState,
     pub(crate) stages: Vec<SupervisionStage>,
     pub(crate) supervisor_options: SupervisorOptions,
@@ -725,7 +725,16 @@ async fn resident_supervision_inner(
     if let Some(notify) = notify {
         background_tasks.push(spawn_readiness_notify(notify, board.clone()));
     }
-    let mut supervise = tokio::spawn(router.supervise(stages, board.clone(), supervisor_options));
+    // The router is this process's own state, so supervision is just the graph
+    // now: no outer loop watching a router child, and no recovery epoch to
+    // rebuild the graph after one exits (organization#978). Hold the router
+    // across supervision and close it afterwards, so participants lose their
+    // links to a router that is already done with them rather than mid-teardown.
+    let mut supervise = tokio::spawn(supervise_until_shutdown(
+        stages,
+        board.clone(),
+        supervisor_options,
+    ));
     let outcome = tokio::select! {
         result = &mut supervise => result?,
         signal = resident_shutdown_signal() => {
@@ -734,6 +743,9 @@ async fn resident_supervision_inner(
             supervise.await?
         }
     };
+    if let Err(error) = router.close().await {
+        tracing::warn!("{error:#}");
+    }
     // `SupervisorState::fail` is first-cause-wins on its own (it only ever
     // sets `failure` from `None`), so this unconditionally records the
     // outcome without checking the current lifecycle first - the store owns
@@ -827,7 +839,7 @@ async fn finish_cancelled_preparation<T>(
 }
 
 struct ResidentSetup {
-    router: InfrastructureRouter,
+    router: EmbeddedRouter,
     board: SupervisorState,
     stages: Vec<SupervisionStage>,
     supervisor_options: SupervisorOptions,
@@ -907,12 +919,6 @@ async fn prepare_run(
         prepared.train.clone(),
         run.execution(),
         prepared.router.endpoint.clone(),
-    );
-    board.upsert_process(
-        phoxal_cli_core::runtime::ProcessKey::project("infrastructure-router"),
-        phoxal_cli_core::runtime::ParticipantKind::Tool,
-        phoxal_cli_core::runtime::ProcessState::Starting,
-        phoxal_cli_core::runtime::StartupRequirement::Required,
     );
     for participant in &prepared.participants {
         let state = process_state(participant.initial_state);
@@ -1220,37 +1226,30 @@ pub(crate) async fn live_run_setup(
         phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
         "starting router",
     );
-    let router = match start_infrastructure_router(
-        prepared.router.binary.clone(),
-        prepared.router.config.clone(),
-        prepared.router.endpoint.clone(),
-    )
-    .await
-    {
-        Ok(router) => router,
-        Err(error) => {
-            prepared.board.step_failed(
-                phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
-                format!("{error:#}"),
-            );
-            return Err(error);
-        }
-    };
+    let router =
+        match start_embedded_router(connect.clone(), prepared.router.config.as_deref()).await {
+            Ok(router) => router,
+            Err(error) => {
+                prepared.board.step_failed(
+                    phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
+                    format!("{error:#}"),
+                );
+                return Err(error);
+            }
+        };
     prepared.board.step_detail(
         phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
         format!("router {connect}"),
     );
+    // The endpoint is a live fact clients and Webots need. The router itself is
+    // no longer a board row: it is this process, so a separate "ready" process
+    // state for it could only ever restate that the supervisor is running.
     prepared.board.set_router_endpoint(connect.clone());
-    prepared.board.set_state(
-        phoxal_cli_core::runtime::ProcessKey::project("infrastructure-router"),
-        phoxal_cli_core::runtime::ProcessState::Ready,
-        None,
-    );
     ui.info(format!(
         "launch plan resolved: {} robot(s)",
         prepared.plan.robots.len()
     ));
-    ui.info(format!("infrastructure router ready on {connect}"));
+    ui.info(format!("router ready on {connect}"));
     report_launch_commands(&prepared.plan, &prepared.specs, &ui)?;
 
     let execution = run.execution();

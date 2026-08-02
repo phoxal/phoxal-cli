@@ -32,8 +32,7 @@ pub fn stages_for_run(
             StartupStepKind::Infrastructure,
             infrastructure,
             timeout,
-        )
-        .with_extra_ready_ids([ProcessKey::project("infrastructure-router")]),
+        ),
         SupervisionStage::new(
             "starting robot graph",
             StartupStepKind::Graph,
@@ -65,8 +64,7 @@ pub fn stages_for_simulation(
             StartupStepKind::Infrastructure,
             infrastructure,
             timeout,
-        )
-        .with_extra_ready_ids([ProcessKey::project("infrastructure-router")]),
+        ),
         SupervisionStage::new(
             "starting robot graph",
             StartupStepKind::Graph,
@@ -85,10 +83,10 @@ pub struct SupervisionStage {
     pub label: String,
     pub step: StartupStepKind,
     pub specs: Vec<ParticipantSpec>,
-    /// Board ids that must be observed `Ready` before the next stage spawns.
-    /// Defaults to every spawned spec's own id that is a bus participant
-    /// (see [`Self::new`]); extend with [`Self::with_extra_ready_ids`] for a
-    /// wait-only id that has no `ParticipantSpec` of its own.
+    /// Board ids that must be observed `Ready` before the next stage spawns:
+    /// every spawned spec's own id that is a bus participant (see
+    /// [`Self::new`]). There are no wait-only ids - the embedded router is the
+    /// supervisor's own state, not a board row to wait on (organization#978).
     pub ready_ids: Vec<ProcessKey>,
     /// Spawned processes whose terminal failure aborts this stage.
     pub failure_ids: Vec<ProcessKey>,
@@ -128,14 +126,6 @@ impl SupervisionStage {
             optional_ids,
             timeout,
         }
-    }
-
-    #[must_use]
-    pub fn with_extra_ready_ids(mut self, ids: impl IntoIterator<Item = ProcessKey>) -> Self {
-        let ids = ids.into_iter().collect::<Vec<_>>();
-        self.ready_ids.extend(ids.iter().cloned());
-        self.failure_ids.extend(ids);
-        self
     }
 }
 

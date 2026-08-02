@@ -42,7 +42,6 @@ impl PlatformArtifactRef {
             ArtifactKind::ComponentDriver => "official driver",
             ArtifactKind::Tool => "official tool",
             ArtifactKind::Simulator => "official simulator",
-            ArtifactKind::Infrastructure => "official infrastructure",
         }
     }
 }

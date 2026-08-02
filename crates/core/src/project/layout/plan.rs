@@ -112,11 +112,6 @@ impl RuntimeLayout {
         let required = layout.required_runtimes(&options.drivers);
         let mut selected = BTreeMap::new();
         for runtime in &required {
-            // Infrastructure (the router) is resolved by the CLI itself and is
-            // never a plan participant, so it needs no inspection here.
-            if runtime.kind == RequiredRuntimeKind::Infrastructure {
-                continue;
-            }
             selected.insert(
                 runtime.binary_name.clone(),
                 layout.inspect_for(runtime, inspection)?,
@@ -154,10 +149,6 @@ impl RuntimeLayout {
 
         for required in self.required_runtimes(&options.drivers) {
             match required.kind {
-                // The router is CLI-resolved infrastructure, never a plan
-                // participant (it is registered as a project-scoped process by
-                // the supervisor directly).
-                RequiredRuntimeKind::Infrastructure => {}
                 RequiredRuntimeKind::OfficialService => {
                     let participant_id = required.identity.clone();
                     participants.push(cli_managed_record(
@@ -470,7 +461,6 @@ services:
             RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => "service",
             RequiredRuntimeKind::OfficialTool | RequiredRuntimeKind::UserTool => "tool",
             RequiredRuntimeKind::ComponentDriver => "driver",
-            RequiredRuntimeKind::Infrastructure => "tool",
         }
     }
 
@@ -490,9 +480,6 @@ services:
         let bin = root.join("bin");
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {
-            if required.kind == RequiredRuntimeKind::Infrastructure {
-                continue;
-            }
             let payload = payloads
                 .iter()
                 .find(|(name, _)| *name == required.binary_name)

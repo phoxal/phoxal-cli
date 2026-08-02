@@ -732,11 +732,6 @@ services:
 
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {
-            if required.kind
-                == phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure
-            {
-                continue;
-            }
             std::fs::write(
                 bin.join(&required.binary_name),
                 synthesize_binary_with_id(
@@ -751,9 +746,6 @@ services:
                         | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserTool => "tool",
                         phoxal_cli_core::project::layout::RequiredRuntimeKind::ComponentDriver => {
                             "driver"
-                        }
-                        phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure => {
-                            unreachable!("infrastructure skipped above")
                         }
                     },
                 ),
@@ -811,11 +803,6 @@ services:
 
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {
-            if required.kind
-                == phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure
-            {
-                continue;
-            }
             std::fs::write(
                 bin.join(&required.binary_name),
                 synthesize_binary_with_id(
@@ -830,9 +817,6 @@ services:
                         | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserTool => "tool",
                         phoxal_cli_core::project::layout::RequiredRuntimeKind::ComponentDriver => {
                             "driver"
-                        }
-                        phoxal_cli_core::project::layout::RequiredRuntimeKind::Infrastructure => {
-                            unreachable!("infrastructure skipped above")
                         }
                     },
                 ),

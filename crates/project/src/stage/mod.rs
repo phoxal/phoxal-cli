@@ -46,7 +46,6 @@ mod publish;
 pub(crate) use candidate::{begin_runtime_layout, copy_tree_into};
 pub(crate) use participants::{
     MaterializeSettings, materialize_candidate_store, stage_named_binary, stage_participant_binary,
-    staged_router_binary,
 };
 pub(crate) use publish::publish_runtime_layout;
 

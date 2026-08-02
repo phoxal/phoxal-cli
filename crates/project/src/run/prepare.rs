@@ -546,7 +546,6 @@ pub(crate) fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecutio
         )?,
     };
     let router = PreparedRouter {
-        binary: crate::stage::staged_router_binary(&prepared.staged_root),
         config: prepared.router_config,
         endpoint: request.target.zenoh_endpoint.clone(),
     };
@@ -877,9 +876,6 @@ robot:
         let bin = root.join("bin");
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {
-            if required.kind == RequiredRuntimeKind::Infrastructure {
-                continue;
-            }
             std::fs::write(
                 bin.join(&required.binary_name),
                 synthesize_binary_with_id(
@@ -890,9 +886,6 @@ robot:
                         }
                         RequiredRuntimeKind::OfficialTool | RequiredRuntimeKind::UserTool => "tool",
                         RequiredRuntimeKind::ComponentDriver => "driver",
-                        RequiredRuntimeKind::Infrastructure => {
-                            unreachable!("infrastructure skipped above")
-                        }
                     },
                 ),
             )?;
