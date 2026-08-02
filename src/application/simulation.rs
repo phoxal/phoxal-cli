@@ -80,7 +80,7 @@ mod setup {
     };
 
     pub(crate) struct LiveSimSetup {
-        pub(crate) router: phoxal_cli_supervisor::InfrastructureRouter,
+        pub(crate) router: phoxal_cli_supervisor::EmbeddedRouter,
         pub(crate) board: SupervisorState,
         pub(crate) stages: Vec<SupervisionStage>,
         pub(crate) supervisor_options: SupervisorOptions,
@@ -110,12 +110,6 @@ mod setup {
             run.execution(),
             prepared.router.endpoint.clone(),
         );
-        board.upsert_process(
-            phoxal_cli_core::runtime::ProcessKey::project("infrastructure-router"),
-            phoxal_cli_core::runtime::ParticipantKind::Tool,
-            phoxal_cli_core::runtime::ProcessState::Starting,
-            phoxal_cli_core::runtime::StartupRequirement::Required,
-        );
         for participant in &prepared.participants {
             let state = crate::application::run::process_state(participant.initial_state);
             board.upsert_process(
@@ -136,10 +130,9 @@ mod setup {
             phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
             "starting router",
         );
-        let router = match phoxal_cli_supervisor::start_infrastructure_router(
-            prepared.router.binary.clone(),
-            prepared.router.config.clone(),
-            prepared.router.endpoint.clone(),
+        let router = match phoxal_cli_supervisor::start_embedded_router(
+            connect.clone(),
+            prepared.router.config.as_deref(),
         )
         .await
         {
@@ -157,11 +150,6 @@ mod setup {
             format!("router {connect}"),
         );
         board.set_router_endpoint(connect.clone());
-        board.set_state(
-            phoxal_cli_core::runtime::ProcessKey::project("infrastructure-router"),
-            phoxal_cli_core::runtime::ProcessState::Ready,
-            None,
-        );
         board.set_simulation_info("webots", simulation.world.display().to_string());
         ui.info(format!(
             "Webots profile: webots; world: {}; project: {}",
@@ -184,7 +172,7 @@ mod setup {
             "simulation launch plan resolved: {} robot(s)",
             prepared.plan.robots.len()
         ));
-        ui.info(format!("infrastructure router ready on {connect}"));
+        ui.info(format!("router ready on {connect}"));
         crate::application::run::report_launch_commands(&prepared.plan, &specs, &ui)?;
 
         let mut background_tasks = crate::application::run::AbortTasks::default();

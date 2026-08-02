@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 // Four bytes per character preserves the observation crate's 4,096-character
 // routed-log bound even for maximum-width UTF-8 input.
 const MAX_CAPTURED_LINE_BYTES: usize = 16 * 1024;
-const ROUTER_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A readiness/stage-wait budget for one supervised session.
 ///
@@ -69,6 +68,6 @@ pub use process::spec::{
 };
 pub use process::stages::{SupervisionStage, stages_for_run, stages_for_simulation};
 pub use process::supervise::supervise_until_shutdown;
-pub use router::{InfrastructureRouter, start_infrastructure_router};
+pub use router::{EmbeddedRouter, start_embedded_router};
 pub use state::SupervisorState;
 pub use state::readiness::{default_connect_endpoint, start_liveliness_observer};

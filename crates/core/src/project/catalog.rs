@@ -1,6 +1,6 @@
 //! CLI-owned official runtime catalog.
 //!
-//! Official services, tools, and the infrastructure router are never
+//! Official services and tools are never
 //! discovered from a network inventory: they are compiled into this CLI
 //! release. `robot.yaml` declares USER services/tools and component
 //! instances; the official set comes from here alone (organization#951 WS4).
@@ -102,7 +102,6 @@ pub enum ArtifactKind {
     ComponentDriver,
     Tool,
     Simulator,
-    Infrastructure,
 }
 
 impl ArtifactKind {
@@ -113,7 +112,6 @@ impl ArtifactKind {
             Self::ComponentDriver => "driver",
             Self::Tool => "tool",
             Self::Simulator => "simulator",
-            Self::Infrastructure => "infrastructure",
         }
     }
 }
@@ -131,10 +129,6 @@ pub struct OfficialRuntime {
 }
 
 pub const NATIVE: &[OfficialRuntime] = &[
-    OfficialRuntime {
-        package: "phoxal/infrastructure-router",
-        kind: ArtifactKind::Infrastructure,
-    },
     OfficialRuntime {
         package: "phoxal/tool-bus",
         kind: ArtifactKind::Tool,

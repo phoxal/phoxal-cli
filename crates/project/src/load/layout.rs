@@ -133,9 +133,7 @@ services:
     fn required_kind(kind: RequiredRuntimeKind) -> &'static str {
         match kind {
             RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => "service",
-            RequiredRuntimeKind::OfficialTool
-            | RequiredRuntimeKind::UserTool
-            | RequiredRuntimeKind::Infrastructure => "tool",
+            RequiredRuntimeKind::OfficialTool | RequiredRuntimeKind::UserTool => "tool",
             RequiredRuntimeKind::ComponentDriver => "driver",
         }
     }
@@ -165,9 +163,6 @@ services:
         let bin = root.join("bin");
         let layout = RuntimeLayout::open(root)?;
         for required in layout.required_runtimes(&DriverSelection::All) {
-            if required.kind == RequiredRuntimeKind::Infrastructure {
-                continue;
-            }
             let payload = if required.binary_name == "mission" {
                 metadata("mission", "service", mission_schema)?
             } else {
@@ -319,9 +314,6 @@ services:
         let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
         let arch = phoxal_cli_core::check::participant_metadata::host_architecture();
         for required in layout.required_runtimes(&DriverSelection::All) {
-            if required.kind == RequiredRuntimeKind::Infrastructure {
-                continue;
-            }
             let payload = match required.binary_name.as_str() {
                 "lidar-viz" => metadata("lidar-viz", "tool", tool_schema)?,
                 "mission" => metadata("mission", "service", r#"{"type":"object"}"#)?,
@@ -368,9 +360,6 @@ services:
         let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
         let arch = phoxal_cli_core::check::participant_metadata::host_architecture();
         for required in layout.required_runtimes(&DriverSelection::All) {
-            if required.kind == RequiredRuntimeKind::Infrastructure {
-                continue;
-            }
             let payload = match required.kind {
                 RequiredRuntimeKind::ComponentDriver => {
                     metadata(&required.identity, "driver", driver_schema)?

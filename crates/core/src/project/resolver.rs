@@ -14,19 +14,16 @@ const ROBOT_FILE: &str = "robot.yaml";
 pub fn tool_participant_id(tool_name: &str) -> &str {
     tool_name
         .strip_prefix("phoxal/tool-")
-        .or_else(|| tool_name.strip_prefix("phoxal/infrastructure-"))
         .or_else(|| tool_name.strip_prefix("tool-"))
-        .or_else(|| tool_name.strip_prefix("infrastructure-"))
         .unwrap_or(tool_name)
 }
 
 pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
     match kind {
         ArtifactKind::ComponentDriver => format!("phoxal-component-{name}"),
-        ArtifactKind::Service
-        | ArtifactKind::Tool
-        | ArtifactKind::Simulator
-        | ArtifactKind::Infrastructure => format!("phoxal-{kind}-{name}"),
+        ArtifactKind::Service | ArtifactKind::Tool | ArtifactKind::Simulator => {
+            format!("phoxal-{kind}-{name}")
+        }
     }
 }
 
@@ -209,8 +206,8 @@ impl ResolvedComponentDriver {
     }
 }
 
-/// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`, or
-/// `infrastructure-router`). `name` is the short,
+/// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`). `name`
+/// is the short,
 /// launch-safe kind-qualified id used for participant ids, systemd unit
 /// names and env var keys; `package` is the
 /// canonical provider-qualified identity (`phoxal/tool-bus`) used for
@@ -233,7 +230,6 @@ pub enum ResolvedPathOverrideKind {
     Service,
     Tool,
     Simulator,
-    Infrastructure,
 }
 
 impl ResolvedPathOverrideKind {
@@ -243,7 +239,6 @@ impl ResolvedPathOverrideKind {
             Self::Service => "service",
             Self::Tool => "tool",
             Self::Simulator => "simulator",
-            Self::Infrastructure => "infrastructure",
         }
     }
 }
@@ -331,11 +326,6 @@ mod tests {
         assert_eq!(tool_participant_id("phoxal/tool-router"), "router");
         assert_eq!(tool_participant_id("tool-router"), "router");
         assert_eq!(tool_participant_id("router"), "router");
-        assert_eq!(
-            tool_participant_id("phoxal/infrastructure-router"),
-            "router"
-        );
-        assert_eq!(tool_participant_id("infrastructure-router"), "router");
     }
 
     #[test]

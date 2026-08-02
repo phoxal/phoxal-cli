@@ -1,8 +1,8 @@
 //! `cargo install` materialization of official runtimes (organization#951 WS4).
 //!
-//! Cargo owns download, integrity, and compilation of every official service,
-//! tool, the infrastructure router, and every component driver package -
-//! against the static registry `sparse+https://phoxal.github.io/registry/`.
+//! Cargo owns download, integrity, and compilation of every official service
+//! and tool and every component driver package, against the static registry
+//! `sparse+https://phoxal.github.io/registry/`.
 //! There is no vendored artifact store and no suite/tarball download anymore:
 //! `cargo install` resolves, fetches, verifies, and builds each package, and
 //! Cargo's own build-directory locking covers its own cache.
@@ -272,11 +272,6 @@ mod tests {
         let cases = [
             ("phoxal/service-drive", ArtifactKind::Service, "drive"),
             ("phoxal/tool-bus", ArtifactKind::Tool, "bus"),
-            (
-                "phoxal/infrastructure-router",
-                ArtifactKind::Infrastructure,
-                "router",
-            ),
             (
                 "phoxal/component-ddsm115",
                 ArtifactKind::ComponentDriver,

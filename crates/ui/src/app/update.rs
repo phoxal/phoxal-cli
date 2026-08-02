@@ -1180,7 +1180,7 @@ mod tests {
     #[test]
     fn log_source_filter_separates_runtime_participants_from_tools() {
         let runtime_key = ProcessKey::project("drive");
-        let tool_key = ProcessKey::project("infrastructure-router");
+        let tool_key = ProcessKey::project("log");
         let processes = BTreeMap::from([
             (
                 runtime_key.clone(),
@@ -1212,7 +1212,7 @@ mod tests {
         ));
         assert!(log_matches_source(
             LogSourceFilter::Tools,
-            &row("infrastructure-router"),
+            &row("log"),
             &processes
         ));
         assert!(

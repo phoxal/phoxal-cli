@@ -15,7 +15,7 @@ use super::commands::{
     version = version::long_version(),
     about = "Build, check, and simulate Phoxal robot projects.",
     long_about = "Build, check, and simulate Phoxal robot projects.\n\n\
-                  phoxal reads robot.yaml and materializes official services, tools, the infrastructure router, and component drivers with `cargo install` against the phoxal registry, pinned exactly to the Cargo.lock-selected framework train, then drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes."
+                  phoxal reads robot.yaml and materializes official services, tools, and component drivers with `cargo install` against the phoxal registry, pinned exactly to the Cargo.lock-selected framework train, then drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes."
 )]
 pub struct Cli {
     #[arg(

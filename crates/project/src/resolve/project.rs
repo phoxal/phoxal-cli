@@ -19,7 +19,7 @@ use phoxal_cli_core::project::resolver::{
 
 /// Resolve a robot manifest against the CLI-internal official catalog
 /// (organization#951 WS4): no suite fetch, no vendored artifact store. Every
-/// official service, tool, the infrastructure router, and every component
+/// official service, tool, and every component
 /// driver package materializes later via `cargo install` at exactly the
 /// locked framework train; component assets resolve directly from authored
 /// directories or the checked sparse package cache, so the manifest compiler
@@ -149,12 +149,6 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
         .filter(|official| official.kind == ArtifactKind::Tool)
         .map(|official| tool_from_official(official, &train, &tool_target))
         .collect::<Vec<_>>();
-    tools.extend(
-        catalog::NATIVE
-            .iter()
-            .filter(|official| official.kind == ArtifactKind::Infrastructure)
-            .map(|official| tool_from_official(official, &train, &tool_target)),
-    );
 
     let workspace = apply_workspace_runtimes(
         robot,
@@ -232,7 +226,6 @@ fn short_name(package: &str, kind: ArtifactKind) -> String {
         ArtifactKind::Service => "phoxal/service-",
         ArtifactKind::Tool => "phoxal/tool-",
         ArtifactKind::Simulator => "phoxal/simulator-",
-        ArtifactKind::Infrastructure => "phoxal/infrastructure-",
         ArtifactKind::ComponentDriver => "phoxal/component-",
     };
     package.strip_prefix(prefix).unwrap_or(package).to_string()

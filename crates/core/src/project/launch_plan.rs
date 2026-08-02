@@ -106,8 +106,9 @@ pub(crate) fn validate_runtime_bounds(plan: &LaunchPlan) -> Result<()> {
         .iter()
         .map(|robot| robot.participants.len())
         .sum::<usize>()
-        // Infrastructure router plus bounded supervisor-owned helpers.
-        .saturating_add(4);
+        // Bounded supervisor-owned helpers. The comms router is not counted:
+        // it runs inside the supervisor process (organization#978).
+        .saturating_add(3);
     anyhow::ensure!(
         process_count <= crate::runtime::MAX_SUPERVISED_PROCESSES,
         "execution plan has {process_count} supervised processes; runtime supports at most {}",
@@ -705,9 +706,9 @@ mod tests {
             }],
         };
 
-        validate_runtime_bounds(&plan(36)).expect("40-process reference graph should fit");
+        validate_runtime_bounds(&plan(37)).expect("40-process reference graph should fit");
         let error =
-            validate_runtime_bounds(&plan(37)).expect_err("41 processes must remain bounded");
+            validate_runtime_bounds(&plan(38)).expect_err("41 processes must remain bounded");
         let message = error.to_string();
         assert!(message.contains("has 41 supervised processes"), "{error:#}");
         assert!(message.contains("runtime supports at most 40"), "{error:#}");
@@ -716,7 +717,7 @@ mod tests {
     #[test]
     fn launch_plan_constructor_enforces_runtime_process_bound() -> anyhow::Result<()> {
         let mut resolved = empty_bundle_plan("testbot")?;
-        resolved.tools = (0..37)
+        resolved.tools = (0..38)
             .map(|index| tool(&format!("tool-{index}")))
             .collect();
 

@@ -97,7 +97,6 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
     }
     crate::run::prepare::repoint_plan_bundle_roots(&mut plan, &candidate_path, &staged_root);
     let router = PreparedRouter {
-        binary: crate::stage::staged_router_binary(&staged_root),
         config: crate::run::prepare::resolve_layout_router_config(&staged_root)?,
         endpoint: request.target.zenoh_endpoint.clone(),
     };

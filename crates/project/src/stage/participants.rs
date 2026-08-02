@@ -105,19 +105,8 @@ pub(crate) fn stage_named_binary(
     Ok(staged)
 }
 
-/// The canonical `bin/` path the infrastructure router is staged under. The
-/// router launches from this staged entry at run time - like every other
-/// official runtime it is resolved through the layout's flat `bin/` store.
-#[must_use]
-pub(crate) fn staged_router_binary(staged_root: &Path) -> PathBuf {
-    staged_root.join(BIN_DIR).join(official_binary_name(
-        phoxal_cli_core::project::catalog::ArtifactKind::Infrastructure,
-        "router",
-    ))
-}
-
 /// Complete one unpublished candidate's registry/source-override store in a
-/// single collection context. Platform entries, tools/router, and selected
+/// single collection context. Platform entries, tools, and selected
 /// registry drivers share the same pending install groups before Cargo runs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_candidate_store(
@@ -283,7 +272,7 @@ fn materialize_platform_runtime(
     Ok(())
 }
 
-/// Materialize one official tool (or the infrastructure router) into its
+/// Materialize one official tool into its
 /// canonical `bin/` entry, from a source override, an already-materialized
 /// `officials_source`, or `cargo install`.
 fn materialize_tool(context: &mut MaterializationContext<'_>, tool: &ResolvedTool) -> Result<()> {

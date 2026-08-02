@@ -103,13 +103,13 @@ impl DriverSelection {
 
 /// The role a required runtime plays. Drives board classification and which
 /// runtimes the CLI supervisor launches (services/tools/drivers) versus which
-/// the simulator owns (simulators) or the CLI resolves on its own (the
-/// infrastructure router).
+/// the simulator owns (simulators). The comms router is not here at all: it
+/// runs inside the supervisor process and has no staged binary
+/// (organization#978).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequiredRuntimeKind {
     OfficialService,
     OfficialTool,
-    Infrastructure,
     UserService,
     /// A compiled additional user tool.
     UserTool,
@@ -232,7 +232,6 @@ impl RuntimeLayout {
             let kind = match official.kind {
                 ArtifactKind::Service => RequiredRuntimeKind::OfficialService,
                 ArtifactKind::Tool => RequiredRuntimeKind::OfficialTool,
-                ArtifactKind::Infrastructure => RequiredRuntimeKind::Infrastructure,
                 // The catalog's native set carries no simulators; the webots
                 // additions are not requested here (see the doc above), so a
                 // simulator entry can never appear. Guard structurally anyway.
@@ -374,9 +373,9 @@ impl RuntimeLayout {
             RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => {
                 phoxal_runtime_contract::ParticipantKind::Service
             }
-            RequiredRuntimeKind::OfficialTool
-            | RequiredRuntimeKind::Infrastructure
-            | RequiredRuntimeKind::UserTool => phoxal_runtime_contract::ParticipantKind::Tool,
+            RequiredRuntimeKind::OfficialTool | RequiredRuntimeKind::UserTool => {
+                phoxal_runtime_contract::ParticipantKind::Tool
+            }
             RequiredRuntimeKind::ComponentDriver => {
                 phoxal_runtime_contract::ParticipantKind::Driver
             }
@@ -443,14 +442,12 @@ fn validate_bundle_asset(root: &Path, relative: &str, label: &str) -> Result<()>
 }
 
 /// The short (kind-stripped) name of one catalog official, e.g.
-/// `phoxal/service-drive` -> `drive`, `phoxal/tool-bus` -> `bus`,
-/// `phoxal/infrastructure-router` -> `router`.
+/// `phoxal/service-drive` -> `drive`, `phoxal/tool-bus` -> `bus`.
 fn official_short_name(official: &OfficialRuntime) -> String {
     let prefix = match official.kind {
         ArtifactKind::Service => "phoxal/service-",
         ArtifactKind::Tool => "phoxal/tool-",
         ArtifactKind::Simulator => "phoxal/simulator-",
-        ArtifactKind::Infrastructure => "phoxal/infrastructure-",
         ArtifactKind::ComponentDriver => "phoxal/component-",
     };
     official
