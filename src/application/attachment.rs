@@ -62,7 +62,6 @@ async fn drive(
         supervisor_commands,
         input_commands,
         logs,
-        bus,
         runtimes,
     } = ports;
     let (ingress_tx, ingress_rx) = mpsc::channel(UI_INGRESS_CAPACITY);
@@ -96,7 +95,6 @@ async fn drive(
         supervisor: supervisor_commands,
         input: input_commands,
         logs,
-        bus,
         runtimes,
     };
     let effect_slots = std::sync::Arc::new(Semaphore::new(EFFECT_CAPACITY));
@@ -270,7 +268,6 @@ struct EffectPorts {
     supervisor: phoxal_cli_client::SupervisorCommands,
     input: phoxal_cli_client::InputCommands,
     logs: phoxal_cli_client::LogReader,
-    bus: phoxal_cli_client::BusReader,
     runtimes: phoxal_cli_client::RuntimeReader,
 }
 
@@ -311,10 +308,7 @@ fn spawn_effect(
         });
         return;
     }
-    if matches!(
-        effect,
-        Effect::ReadLogs(_) | Effect::ReadBus(_) | Effect::ReadRuntimes(_)
-    ) {
+    if matches!(effect, Effect::ReadLogs(_) | Effect::ReadRuntimes(_)) {
         let ports = ports.clone();
         let ingress = ingress.clone();
         tasks.spawn(async move {
@@ -371,7 +365,6 @@ async fn route_effect(effect: Effect, ports: &EffectPorts) -> Option<SessionInpu
         Effect::InputEnable(enabled) => ports.input.set_enabled(enabled).await.map(|()| None),
         Effect::InputRescan => ports.input.rescan().await.map(|()| None),
         Effect::ReadLogs(query) => Ok(Some(SessionInput::Logs(ports.logs.read(query).await))),
-        Effect::ReadBus(query) => Ok(Some(SessionInput::Bus(ports.bus.read(query).await))),
         Effect::ReadRuntimes(query) => Ok(Some(SessionInput::Runtimes(
             ports.runtimes.read(query).await,
         ))),

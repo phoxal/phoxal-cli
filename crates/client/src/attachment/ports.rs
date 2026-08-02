@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 
 use crate::ports::input::InputCommand;
-use crate::ports::{AttachmentEvents, BusReader, InputCommands, LogReader, RuntimeReader};
+use crate::ports::{AttachmentEvents, InputCommands, LogReader, RuntimeReader};
 use crate::state::Stores;
 use crate::supervisor::SupervisorCommands;
 
@@ -10,7 +10,6 @@ pub struct AttachmentPorts {
     pub supervisor_commands: SupervisorCommands,
     pub input_commands: InputCommands,
     pub logs: LogReader,
-    pub bus: BusReader,
     pub runtimes: RuntimeReader,
 }
 
@@ -29,9 +28,6 @@ impl AttachmentPorts {
             },
             logs: LogReader {
                 store: stores.logs.clone(),
-            },
-            bus: BusReader {
-                store: stores.bus.clone(),
             },
             runtimes: RuntimeReader {
                 store: stores.runtimes.clone(),

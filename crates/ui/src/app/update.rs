@@ -1,29 +1,26 @@
 //! Pure Elm-style update function.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use phoxal_cli_core::runtime::{ParticipantKind, ProcessScope, ProjectLifecycle};
 use phoxal_cli_observation::{
-    AttachmentEvent, BusQuery, BusRead, BusRow, LogAnchor, LogFilters, LogQuery, LogRead, LogRow,
-    ProcessObservation, ProcessTable, QueryToken, RobotScope, RuntimeQuery, RuntimeRead,
-    RuntimeRow, StoreChanged, StoreRevision, WindowDirection,
+    AttachmentEvent, LogAnchor, LogFilters, LogQuery, LogRead, LogRow, ProcessObservation,
+    ProcessTable, QueryToken, RobotScope, RuntimeQuery, RuntimeRead, RuntimeRow, StoreChanged,
+    StoreRevision, WindowDirection,
 };
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
-use crate::components::bus::BusSort;
 use crate::components::input::InputModel;
 use crate::components::logs::{Editing, LogSourceFilter};
 
 use super::effect::{AttachmentOutcome, DeviceId, Effect};
-use super::id::{BusPanelId, InputPanelId, LogsPanelId, ModalId, PageId, PanelId, RuntimesPanelId};
-use super::message::{BusMsg, LogsMsg, Msg, NavigationMsg, RuntimesMsg};
+use super::id::{InputPanelId, LogsPanelId, ModalId, PageId, PanelId, RuntimesPanelId};
+use super::message::{LogsMsg, Msg, NavigationMsg, RuntimesMsg};
 use super::model::AppModel;
 use super::route::{FocusRoute, cycle_panel};
 
 const LOG_WINDOW_LIMIT: usize = 2_000;
-const BUS_WINDOW_LIMIT: usize = 16_384;
 const RUNTIME_WINDOW_LIMIT: usize = 4_096;
 
 pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
@@ -38,7 +35,6 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
         Msg::Client(event) => update_client(model, event),
         Msg::Navigate(message) => update_navigation(model, message),
         Msg::Logs(LogsMsg::Window(window)) => accept_logs(model, window),
-        Msg::Bus(BusMsg::Window(window)) => accept_bus(model, window),
         Msg::Runtimes(RuntimesMsg::Window(window)) => accept_runtimes(model, window),
     };
     if !wake {
@@ -104,16 +100,6 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
                 Vec::new()
             }
         }
-        AttachmentEvent::DeviceChanged {
-            epoch,
-            values: devices,
-        } => {
-            if model.epoch != Some(epoch) {
-                return Vec::new();
-            }
-            model.overview.devices = Some(devices);
-            Vec::new()
-        }
         AttachmentEvent::InputChanged {
             epoch,
             values: input,
@@ -142,7 +128,6 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
             Vec::new()
         }
         AttachmentEvent::LogsChanged(changed) => invalidate_logs(model, changed),
-        AttachmentEvent::BusChanged(changed) => invalidate_bus(model, changed),
         AttachmentEvent::RuntimesChanged(changed) => invalidate_runtimes(model, changed),
     }
 }
@@ -152,10 +137,6 @@ fn reset_queries(model: &mut AppModel) {
     model.logs.known_revision = StoreRevision(0);
     model.logs.dirty_revision = None;
     model.logs.in_flight = None;
-    model.bus.rows.clear();
-    model.bus.known_revision = StoreRevision(0);
-    model.bus.dirty_revision = None;
-    model.bus.in_flight = None;
     model.runtimes.rows.clear();
     model.runtimes.known_revision = StoreRevision(0);
     model.runtimes.dirty_revision = None;
@@ -193,16 +174,6 @@ pub(crate) fn process_is_runtime(process: &ProcessObservation) -> bool {
         process.kind,
         ParticipantKind::Service | ParticipantKind::Driver
     ) && (process.user_service || !is_known_internal_id(&process.key.id))
-}
-
-fn participant_is_internal(participant: &str, processes: &ProcessTable) -> bool {
-    processes
-        .iter()
-        .find(|(key, _)| key.id == participant || key.to_string() == participant)
-        .map_or_else(
-            || is_known_internal_id(participant),
-            |(_, process)| !process_is_runtime(process),
-        )
 }
 
 fn is_known_internal_id(id: &str) -> bool {
@@ -305,89 +276,6 @@ fn log_matches_source(source: LogSourceFilter, row: &LogRow, processes: &Process
     }
 }
 
-fn invalidate_bus(model: &mut AppModel, changed: StoreChanged) -> Vec<Effect> {
-    if model.epoch != Some(changed.epoch) {
-        return Vec::new();
-    }
-    model.bus.dirty_revision = Some(newest(model.bus.dirty_revision, changed.revision));
-    issue_bus_if_idle(model).into_iter().collect()
-}
-
-fn issue_bus_if_idle(model: &mut AppModel) -> Option<Effect> {
-    let epoch = model.epoch?;
-    if model.bus.in_flight.is_some() {
-        return None;
-    }
-    let revision = model.bus.dirty_revision.take()?;
-    model.bus.next_token = model.bus.next_token.wrapping_add(1);
-    let token = QueryToken(model.bus.next_token);
-    model.bus.in_flight = Some((epoch, revision, token));
-    Some(Effect::ReadBus(BusRead {
-        epoch,
-        observed_revision: revision,
-        token,
-        body: BusQuery {
-            topic: non_empty(&model.bus.filter),
-            direction: WindowDirection::Forward,
-            limit: BUS_WINDOW_LIMIT,
-        },
-    }))
-}
-
-fn accept_bus(model: &mut AppModel, window: phoxal_cli_observation::BusWindow) -> Vec<Effect> {
-    let Some((epoch, observed_revision, token)) = model.bus.in_flight else {
-        return Vec::new();
-    };
-    if window.epoch != epoch || window.revision < observed_revision || window.token != token {
-        model.bus.in_flight = None;
-        model.bus.dirty_revision = Some(newest(model.bus.dirty_revision, observed_revision));
-        return issue_bus_if_idle(model).into_iter().collect();
-    }
-    let mut newest_rows = BTreeMap::<(RobotScope, String, String), BusRow>::new();
-    for row in window.rows.iter().filter(|row| {
-        (row.aggregate_overflow || !row.topic.is_empty())
-            && (model.bus.show_internal
-                || row.aggregate_overflow
-                || !participant_is_internal(&row.participant, &model.overview.processes))
-    }) {
-        let key = (
-            row.scope.clone(),
-            row.topic.clone(),
-            row.participant.clone(),
-        );
-        if newest_rows
-            .get(&key)
-            .is_none_or(|current| row.observed_at >= current.observed_at)
-        {
-            newest_rows.insert(key, row.clone());
-        }
-    }
-    model.bus.rows = newest_rows.into_values().collect();
-    sort_bus(model);
-    model.bus.known_revision = window.revision;
-    model.bus.in_flight = None;
-    issue_bus_if_idle(model).into_iter().collect()
-}
-
-fn sort_bus(model: &mut AppModel) {
-    match model.bus.sort {
-        BusSort::Rate => model.bus.rows.sort_by(|left, right| {
-            right
-                .rate_hz
-                .partial_cmp(&left.rate_hz)
-                .unwrap_or(Ordering::Equal)
-        }),
-        BusSort::Topic => model
-            .bus
-            .rows
-            .sort_by(|left, right| left.topic.cmp(&right.topic)),
-        BusSort::Producer => model
-            .bus
-            .rows
-            .sort_by(|left, right| left.participant.cmp(&right.participant)),
-    }
-}
-
 fn invalidate_runtimes(model: &mut AppModel, changed: StoreChanged) -> Vec<Effect> {
     if model.epoch != Some(changed.epoch) {
         return Vec::new();
@@ -475,7 +363,7 @@ fn handle_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
         return handle_modal_key(model, key);
     }
     if let FocusRoute::Content { panel } = model.route.clone()
-        && (model.logs.editing.is_some() || model.bus.editing)
+        && model.logs.editing.is_some()
     {
         return handle_content_key(model, panel, key);
     }
@@ -572,7 +460,6 @@ fn page_for_digit(digit: char) -> Option<PageId> {
         '1' => Some(PageId::Overview),
         '2' => Some(PageId::Runtimes),
         '3' => Some(PageId::Logs),
-        '4' => Some(PageId::Bus),
         '5' => Some(PageId::Input),
         _ => None,
     }
@@ -596,7 +483,6 @@ fn handle_content_key(model: &mut AppModel, panel: PanelId, key: KeyEvent) -> Ve
     match panel {
         PanelId::Runtimes(panel) => handle_runtimes_key(model, panel, key),
         PanelId::Logs(panel) => handle_logs_key(model, panel, key),
-        PanelId::Bus(panel) => handle_bus_key(model, panel, key),
         PanelId::Input(panel) => handle_input_key(model, panel, key),
     }
 }
@@ -797,72 +683,6 @@ fn refresh_logs(model: &mut AppModel) -> Vec<Effect> {
     issue_logs_if_idle(model).into_iter().collect()
 }
 
-fn handle_bus_key(model: &mut AppModel, panel: BusPanelId, key: KeyEvent) -> Vec<Effect> {
-    if panel == BusPanelId::Controls && model.bus.editing {
-        match key.code {
-            Key::Esc | Key::Enter => model.bus.editing = false,
-            Key::Backspace => {
-                model.bus.filter.pop();
-            }
-            Key::Char(character)
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                model.bus.filter.push(character);
-            }
-            _ => {}
-        }
-        return refresh_bus(model);
-    }
-    match panel {
-        BusPanelId::Controls => match key.code {
-            Key::Left | Key::BackTab => {
-                model.bus.control_candidate =
-                    model.bus.control_candidate.checked_sub(1).unwrap_or(2);
-            }
-            Key::Right | Key::Tab => {
-                model.bus.control_candidate = (model.bus.control_candidate + 1) % 3;
-            }
-            Key::Char('/') => {
-                model.bus.control_candidate = 0;
-                model.bus.editing = true;
-            }
-            Key::Char('s') => {
-                model.bus.sort = model.bus.sort.cycle();
-                sort_bus(model);
-            }
-            Key::Char('a') => {
-                model.bus.show_internal = !model.bus.show_internal;
-                return refresh_bus(model);
-            }
-            Key::Enter => match model.bus.control_candidate {
-                0 => model.bus.editing = true,
-                1 => {
-                    model.bus.sort = model.bus.sort.cycle();
-                    sort_bus(model);
-                }
-                2 => {
-                    model.bus.show_internal = !model.bus.show_internal;
-                    return refresh_bus(model);
-                }
-                _ => {}
-            },
-            _ => {}
-        },
-        BusPanelId::Topics => match key.code {
-            Key::Up => model.bus.scroll = model.bus.scroll.saturating_sub(1),
-            Key::Down => model.bus.scroll = model.bus.scroll.saturating_add(1),
-            _ => {}
-        },
-    }
-    Vec::new()
-}
-
-fn refresh_bus(model: &mut AppModel) -> Vec<Effect> {
-    model.bus.dirty_revision = Some(model.bus.known_revision);
-    issue_bus_if_idle(model).into_iter().collect()
-}
-
 fn handle_input_key(model: &mut AppModel, panel: InputPanelId, key: KeyEvent) -> Vec<Effect> {
     if panel != InputPanelId::Devices {
         return Vec::new();
@@ -975,10 +795,9 @@ mod tests {
         ProcessStatus, RobotKey, StartupRequirement, StartupStatus,
     };
     use phoxal_cli_observation::{
-        AttachmentEpoch, AttachmentEvent, BusRow, BusWindow, Freshness, InputObservation,
-        JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, LogSeverity, LogSource, LogWindow,
-        ObservationWindow, ProcessObservation, RobotScope, RuntimePerformanceSample, RuntimeRow,
-        RuntimeWindow, SupervisorObservation,
+        AttachmentEpoch, AttachmentEvent, Freshness, InputObservation, JoypadDevice,
+        JoypadDeviceStatus, JoypadDevicesSample, LogSeverity, LogSource, LogWindow,
+        ObservationWindow, ProcessObservation, SupervisorObservation,
     };
 
     use super::*;
@@ -1080,27 +899,6 @@ mod tests {
             assert_eq!(recovery.len(), 1);
             assert!(model.logs.in_flight.is_some());
         }
-    }
-
-    #[test]
-    fn stale_epoch_latest_state_is_rejected() {
-        let current = epoch();
-        let stale = AttachmentEpoch {
-            graph_generation: current.graph_generation.saturating_sub(1),
-            ..current
-        };
-        let mut model = AppModel {
-            epoch: Some(current),
-            ..AppModel::default()
-        };
-        update(
-            &mut model,
-            Msg::Client(AttachmentEvent::DeviceChanged {
-                epoch: stale,
-                values: Arc::new(phoxal_cli_observation::DeviceObservation::default()),
-            }),
-        );
-        assert!(model.overview.devices.is_none());
     }
 
     #[test]
@@ -1533,77 +1331,6 @@ mod tests {
     }
 
     #[test]
-    fn bus_and_runtime_windows_keep_only_the_latest_scoped_row() {
-        let scope = RobotScope {
-            namespace: "lab".to_string(),
-            robot_id: "rover".to_string(),
-        };
-        let mut model = AppModel {
-            epoch: Some(epoch()),
-            ..AppModel::default()
-        };
-        model.bus.in_flight = Some((epoch(), StoreRevision(2), QueryToken(1)));
-        let now = Instant::now();
-        update(
-            &mut model,
-            Msg::Bus(BusMsg::Window(BusWindow {
-                epoch: epoch(),
-                revision: StoreRevision(2),
-                token: QueryToken(1),
-                rows: Arc::from([
-                    bus_row(&scope, now, "drive", "v1/state", 1),
-                    bus_row(
-                        &scope,
-                        now + std::time::Duration::from_secs(1),
-                        "drive",
-                        "v1/state",
-                        2,
-                    ),
-                ]),
-            })),
-        );
-        assert_eq!(model.bus.rows.len(), 1);
-        assert_eq!(model.bus.rows[0].count, 2);
-
-        model.bus.in_flight = Some((epoch(), StoreRevision(3), QueryToken(3)));
-        let mut overflow = bus_row(
-            &scope,
-            now + std::time::Duration::from_secs(2),
-            "supervisor",
-            "",
-            3,
-        );
-        overflow.aggregate_overflow = true;
-        update(
-            &mut model,
-            Msg::Bus(BusMsg::Window(BusWindow {
-                epoch: epoch(),
-                revision: StoreRevision(3),
-                token: QueryToken(3),
-                rows: Arc::from([overflow]),
-            })),
-        );
-        assert_eq!(model.bus.rows.len(), 1);
-        assert!(model.bus.rows[0].aggregate_overflow);
-
-        model.runtimes.in_flight = Some((epoch(), StoreRevision(2), QueryToken(2)));
-        update(
-            &mut model,
-            Msg::Runtimes(RuntimesMsg::Window(RuntimeWindow {
-                epoch: epoch(),
-                revision: StoreRevision(2),
-                token: QueryToken(2),
-                rows: Arc::from([
-                    runtime_row(&scope, "drive", 9),
-                    runtime_row(&scope, "drive", 1),
-                ]),
-            })),
-        );
-        assert_eq!(model.runtimes.rows.len(), 1);
-        assert_eq!(model.runtimes.rows[0].sample.sequence, 1);
-    }
-
-    #[test]
     fn runtime_detail_queries_use_bare_id_and_clear_on_escape() {
         let key = ProcessKey::robot(RobotKey::new("lab", "rover"), "drive");
         let mut model = AppModel {
@@ -1633,36 +1360,6 @@ mod tests {
             panic!("expected widened runtime read");
         };
         assert_eq!(read.body.participant, None);
-    }
-
-    #[test]
-    fn bus_controls_are_local_and_filter_editing_consumes_keys() {
-        let mut model = AppModel {
-            route: FocusRoute::Content {
-                panel: PanelId::Bus(BusPanelId::Controls),
-            },
-            ..AppModel::default()
-        };
-        update(
-            &mut model,
-            Msg::Navigate(NavigationMsg::Key(Key::Char('/').into())),
-        );
-        update(
-            &mut model,
-            Msg::Navigate(NavigationMsg::Key(Key::Char('s').into())),
-        );
-        assert_eq!(model.bus.filter, "s");
-        assert_eq!(model.bus.sort, BusSort::Rate);
-        update(
-            &mut model,
-            Msg::Navigate(NavigationMsg::Key(Key::Enter.into())),
-        );
-        update(
-            &mut model,
-            Msg::Navigate(NavigationMsg::Key(Key::Char('s').into())),
-        );
-        assert_eq!(model.bus.sort, BusSort::Topic);
-        assert_eq!(model.logs.text, "");
     }
 
     #[test]
@@ -1769,43 +1466,6 @@ mod tests {
             Msg::Navigate(NavigationMsg::Refresh { clear: true }),
         );
         assert!(model.clear_requested);
-    }
-
-    fn bus_row(
-        scope: &RobotScope,
-        observed_at: Instant,
-        participant: &str,
-        topic: &str,
-        count: u64,
-    ) -> BusRow {
-        BusRow {
-            scope: scope.clone(),
-            observed_at,
-            topic: topic.to_string(),
-            participant: participant.to_string(),
-            rate_hz: count as f32,
-            count,
-            aggregate_overflow: false,
-            topics_truncated: 0,
-            throughput_msg_s: count as f32,
-            window_ns: 1,
-        }
-    }
-
-    fn runtime_row(scope: &RobotScope, participant: &str, sequence: u64) -> RuntimeRow {
-        RuntimeRow {
-            scope: scope.clone(),
-            sample: RuntimePerformanceSample {
-                sequence,
-                participant_id: participant.to_string(),
-                truncated: 0,
-                window_ns: 1,
-                step: None,
-                topics: Arc::new(Vec::new()),
-                overflow: None,
-            },
-            capacity_evictions: 0,
-        }
     }
 
     fn supervisor(lifecycle: ProjectLifecycle) -> SupervisorObservation {

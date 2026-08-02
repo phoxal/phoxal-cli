@@ -1,6 +1,5 @@
 //! Typed tui-realm components. Components render and emit messages; they do no I/O.
 
-pub mod bus;
 pub mod chrome;
 pub mod input;
 pub mod logs;
@@ -12,11 +11,11 @@ pub mod shared;
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{Instant, SystemTime};
+    use std::time::SystemTime;
 
     use phoxal_cli_observation::{
-        BusRow, InputObservation, JoypadDevice, JoypadDevicesSample, LogRow, LogSeverity,
-        LogSource, RobotScope, RuntimePerformanceSample, RuntimeRow,
+        InputObservation, JoypadDevice, JoypadDevicesSample, LogRow, LogSeverity, LogSource,
+        RobotScope, RuntimePerformanceSample, RuntimeRow,
     };
     use tuirealm::ratatui::Terminal;
     use tuirealm::ratatui::backend::TestBackend;
@@ -41,9 +40,6 @@ mod tests {
                     }
                     PageId::Logs => {
                         super::logs::render(frame, Rect::new(0, 0, 100, 32), &model, theme)
-                    }
-                    PageId::Bus => {
-                        super::bus::render(frame, Rect::new(0, 0, 100, 32), &model, theme)
                     }
                     PageId::Input => {
                         super::input::render(frame, Rect::new(0, 0, 100, 32), &model, theme)
@@ -71,18 +67,6 @@ mod tests {
             text: "log-token".to_string(),
             event_time: SystemTime::UNIX_EPOCH,
             scope: None,
-        });
-        model.bus.rows.push(BusRow {
-            scope: scope.clone(),
-            observed_at: Instant::now(),
-            topic: "bus-token".to_string(),
-            participant: "drive".to_string(),
-            rate_hz: 1.0,
-            count: 1,
-            aggregate_overflow: false,
-            topics_truncated: 4,
-            throughput_msg_s: 12.5,
-            window_ns: 1_000_000_000,
         });
         model.runtimes.rows.push(RuntimeRow {
             scope,
@@ -113,7 +97,6 @@ mod tests {
             (PageId::Overview, "visible-diagnostic"),
             (PageId::Runtimes, "runtime-token"),
             (PageId::Logs, "log-token"),
-            (PageId::Bus, "bus-token"),
             (PageId::Input, "PadToken"),
         ] {
             terminal.clear().expect("clear test terminal");
@@ -128,9 +111,6 @@ mod tests {
                     PageId::Logs => {
                         super::logs::render(frame, Rect::new(0, 0, 100, 32), &model, theme)
                     }
-                    PageId::Bus => {
-                        super::bus::render(frame, Rect::new(0, 0, 100, 32), &model, theme)
-                    }
                     PageId::Input => {
                         super::input::render(frame, Rect::new(0, 0, 100, 32), &model, theme)
                     }
@@ -144,10 +124,6 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect::<String>();
             assert!(contents.contains(expected), "{page:?} missed {expected}");
-            if page == PageId::Bus {
-                assert!(contents.contains("traffic:12.5"));
-                assert!(contents.contains("capped:+4"));
-            }
         }
     }
 }

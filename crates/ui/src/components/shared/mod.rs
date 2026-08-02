@@ -82,7 +82,6 @@ render_region!(TabsRegion, crate::components::chrome::render_tabs);
 render_region!(OverviewRegion, crate::components::overview::render);
 render_region!(RuntimesRegion, crate::components::runtimes::render);
 render_region!(LogsRegion, crate::components::logs::render);
-render_region!(BusRegion, crate::components::bus::render);
 render_region!(InputRegion, crate::components::input::render);
 render_region!(ModalRegion, crate::components::modal::render);
 render_region!(FooterRegion, crate::components::chrome::render_footer);

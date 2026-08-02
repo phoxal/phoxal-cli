@@ -2,7 +2,7 @@
 
 use phoxal_cli_core::identity::ProducerId;
 use phoxal_cli_core::runtime::ProcessKey;
-use phoxal_cli_observation::{BusRead, LogRead, RuntimeRead};
+use phoxal_cli_observation::{LogRead, RuntimeRead};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +19,6 @@ pub enum Effect {
     InputEnable(bool),
     InputRescan,
     ReadLogs(LogRead),
-    ReadBus(BusRead),
     ReadRuntimes(RuntimeRead),
 }
 

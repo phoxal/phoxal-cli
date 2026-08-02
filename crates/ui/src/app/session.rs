@@ -26,7 +26,7 @@ use tuirealm::state::State;
 
 use crate::Theme;
 use crate::components::shared::{
-    BusRegion, FooterRegion, HeaderRegion, InputRegion, LogsRegion, ModalRegion, OverviewRegion,
+    FooterRegion, HeaderRegion, InputRegion, LogsRegion, ModalRegion, OverviewRegion,
     RenderComponent, RenderRegion, RuntimesRegion, TabsRegion,
 };
 use crate::terminal::{TerminalGuard, install_panic_hook};
@@ -254,7 +254,7 @@ fn dispatch(model: &Rc<RefCell<AppModel>>, effects: &EffectSenders, message: Msg
 fn is_guaranteed(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::ReadLogs(_) | Effect::ReadBus(_) | Effect::ReadRuntimes(_) | Effect::StopProject
+        Effect::ReadLogs(_) | Effect::ReadRuntimes(_) | Effect::StopProject
     )
 }
 
@@ -270,7 +270,6 @@ fn mount_components(
     mount_region::<OverviewRegion>(application, ComponentId::Overview, model, theme)?;
     mount_region::<RuntimesRegion>(application, ComponentId::Runtimes, model, theme)?;
     mount_region::<LogsRegion>(application, ComponentId::Logs, model, theme)?;
-    mount_region::<BusRegion>(application, ComponentId::Bus, model, theme)?;
     mount_region::<InputRegion>(application, ComponentId::InputPage, model, theme)?;
     mount_region::<ModalRegion>(application, ComponentId::Modal, model, theme)?;
     mount_region::<FooterRegion>(application, ComponentId::Footer, model, theme)?;
@@ -296,7 +295,6 @@ const fn component_for_page(page: PageId) -> ComponentId {
         PageId::Overview => ComponentId::Overview,
         PageId::Runtimes => ComponentId::Runtimes,
         PageId::Logs => ComponentId::Logs,
-        PageId::Bus => ComponentId::Bus,
         PageId::Input => ComponentId::InputPage,
     }
 }

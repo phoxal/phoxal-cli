@@ -6,18 +6,11 @@ pub enum PageId {
     Overview,
     Runtimes,
     Logs,
-    Bus,
     Input,
 }
 
 impl PageId {
-    pub const ALL: [Self; 5] = [
-        Self::Overview,
-        Self::Runtimes,
-        Self::Logs,
-        Self::Bus,
-        Self::Input,
-    ];
+    pub const ALL: [Self; 4] = [Self::Overview, Self::Runtimes, Self::Logs, Self::Input];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -25,7 +18,6 @@ impl PageId {
             Self::Overview => "Overview",
             Self::Runtimes => "Runtimes",
             Self::Logs => "Logs",
-            Self::Bus => "Bus",
             Self::Input => "Input",
         }
     }
@@ -51,12 +43,6 @@ pub enum LogsPanelId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BusPanelId {
-    Controls,
-    Topics,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InputPanelId {
     Devices,
     Motion,
@@ -66,7 +52,6 @@ pub enum InputPanelId {
 pub enum PanelId {
     Runtimes(RuntimesPanelId),
     Logs(LogsPanelId),
-    Bus(BusPanelId),
     Input(InputPanelId),
 }
 
@@ -76,7 +61,6 @@ impl PanelId {
         match self {
             Self::Runtimes(_) => PageId::Runtimes,
             Self::Logs(_) => PageId::Logs,
-            Self::Bus(_) => PageId::Bus,
             Self::Input(_) => PageId::Input,
         }
     }
@@ -97,7 +81,6 @@ pub(crate) enum ComponentId {
     Overview,
     Runtimes,
     Logs,
-    Bus,
     InputPage,
     Modal,
     Footer,

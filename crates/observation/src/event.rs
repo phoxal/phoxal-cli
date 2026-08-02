@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{
-    AttachmentEpoch, DeviceObservation, InputObservation, ProcessTable, SourceHealth, StoreChanged,
+    AttachmentEpoch, InputObservation, ProcessTable, SourceHealth, StoreChanged,
     SupervisorObservation,
 };
 pub use phoxal_cli_core::runtime::{PhaseId, PhaseOutcome};
@@ -33,10 +33,6 @@ pub enum AttachmentEvent {
         epoch: AttachmentEpoch,
         values: Arc<ProcessTable>,
     },
-    DeviceChanged {
-        epoch: AttachmentEpoch,
-        values: Arc<DeviceObservation>,
-    },
     InputChanged {
         epoch: AttachmentEpoch,
         values: Arc<InputObservation>,
@@ -46,7 +42,6 @@ pub enum AttachmentEvent {
         values: Arc<SourceHealth>,
     },
     LogsChanged(StoreChanged),
-    BusChanged(StoreChanged),
     RuntimesChanged(StoreChanged),
     FreshnessChanged {
         epoch: AttachmentEpoch,

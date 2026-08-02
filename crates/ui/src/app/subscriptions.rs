@@ -22,16 +22,13 @@ enum Slot {
     Connection = 0,
     Supervisor = 1,
     Processes = 2,
-    Device = 3,
-    Input = 4,
-    Health = 5,
-    Freshness = 6,
-    LogsChanged = 7,
-    BusChanged = 8,
-    RuntimesChanged = 9,
-    LogsReply = 10,
-    BusReply = 11,
-    RuntimesReply = 12,
+    Input = 3,
+    Health = 4,
+    Freshness = 5,
+    LogsChanged = 6,
+    RuntimesChanged = 7,
+    LogsReply = 8,
+    RuntimesReply = 9,
 }
 
 const SLOT_COUNT: usize = Slot::RuntimesReply as usize + 1;
@@ -150,15 +147,12 @@ fn slot_for(input: &SessionInput) -> Option<Slot> {
         SessionInput::Client(AttachmentEvent::ConnectionChanged(_)) => Some(Slot::Connection),
         SessionInput::Client(AttachmentEvent::SupervisorChanged(_)) => Some(Slot::Supervisor),
         SessionInput::Client(AttachmentEvent::ProcessesChanged { .. }) => Some(Slot::Processes),
-        SessionInput::Client(AttachmentEvent::DeviceChanged { .. }) => Some(Slot::Device),
         SessionInput::Client(AttachmentEvent::InputChanged { .. }) => Some(Slot::Input),
         SessionInput::Client(AttachmentEvent::SourceHealthChanged { .. }) => Some(Slot::Health),
         SessionInput::Client(AttachmentEvent::FreshnessChanged { .. }) => Some(Slot::Freshness),
         SessionInput::Client(AttachmentEvent::LogsChanged(_)) => Some(Slot::LogsChanged),
-        SessionInput::Client(AttachmentEvent::BusChanged(_)) => Some(Slot::BusChanged),
         SessionInput::Client(AttachmentEvent::RuntimesChanged(_)) => Some(Slot::RuntimesChanged),
         SessionInput::Logs(_) => Some(Slot::LogsReply),
-        SessionInput::Bus(_) => Some(Slot::BusReply),
         SessionInput::Runtimes(_) => Some(Slot::RuntimesReply),
         SessionInput::Client(AttachmentEvent::EpochChanged(_))
         | SessionInput::Diagnostic(_)
@@ -173,18 +167,14 @@ fn input_epoch(input: &SessionInput) -> Option<AttachmentEpoch> {
     match input {
         SessionInput::Client(
             AttachmentEvent::ProcessesChanged { epoch, .. }
-            | AttachmentEvent::DeviceChanged { epoch, .. }
             | AttachmentEvent::InputChanged { epoch, .. }
             | AttachmentEvent::SourceHealthChanged { epoch, .. },
         ) => Some(*epoch),
         SessionInput::Client(
-            AttachmentEvent::LogsChanged(changed)
-            | AttachmentEvent::BusChanged(changed)
-            | AttachmentEvent::RuntimesChanged(changed),
+            AttachmentEvent::LogsChanged(changed) | AttachmentEvent::RuntimesChanged(changed),
         ) => Some(changed.epoch),
         SessionInput::Client(AttachmentEvent::FreshnessChanged { epoch, .. }) => Some(*epoch),
         SessionInput::Logs(window) => Some(window.epoch),
-        SessionInput::Bus(window) => Some(window.epoch),
         SessionInput::Runtimes(window) => Some(window.epoch),
         _ => None,
     }
