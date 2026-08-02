@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.31.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.31.2) - 2026-08-02
+
+
+### Added
+
+- *(supervisor)* Serve declared assets instead of launching a service for it ([#283](https://github.com/phoxal/phoxal-cli/pull/283))
+
+
 ## [0.31.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.31.1) - 2026-08-02
 
 
