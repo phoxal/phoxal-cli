@@ -14,9 +14,7 @@ const ROBOT_FILE: &str = "robot.yaml";
 pub fn tool_participant_id(tool_name: &str) -> &str {
     tool_name
         .strip_prefix("phoxal/tool-")
-        .or_else(|| tool_name.strip_prefix("phoxal/infrastructure-"))
         .or_else(|| tool_name.strip_prefix("tool-"))
-        .or_else(|| tool_name.strip_prefix("infrastructure-"))
         .unwrap_or(tool_name)
 }
 
@@ -208,8 +206,8 @@ impl ResolvedComponentDriver {
     }
 }
 
-/// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`).
-/// `name` is the short,
+/// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`). `name`
+/// is the short,
 /// launch-safe kind-qualified id used for participant ids, systemd unit
 /// names and env var keys; `package` is the
 /// canonical provider-qualified identity (`phoxal/tool-bus`) used for

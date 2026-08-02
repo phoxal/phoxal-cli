@@ -43,11 +43,12 @@ pub async fn supervise_until_shutdown(
     let mut stage_queue: VecDeque<SupervisionStage> = stages.into();
     let token = options.token.clone();
 
-    // Spawn every leading stage that has nothing to wait for back-to-back
-    // (uncommon in practice - every real stage waits on at least the router
-    // or Liveliness - but keeps a zero-wait stage from stalling a whole
-    // startup on an empty `select!` branch), then park on the first stage
-    // that actually gates the next one.
+    // Spawn every leading stage that has nothing to wait for back-to-back,
+    // then park on the first stage that actually gates the next one. A
+    // zero-wait stage is uncommon today, since every real stage waits on its
+    // participants' Liveliness - but the Infrastructure stage empties as its
+    // tools are removed, so this keeps that case from stalling the whole
+    // startup on an empty `select!` branch.
     let mut pending_stage = spawn_until_pending(&mut running, &board, &mut stage_queue).await;
     maybe_publish_startup_outcome(&board, &options, &pending_stage).await;
 

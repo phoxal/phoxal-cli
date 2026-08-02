@@ -106,7 +106,7 @@ pub(crate) fn stage_named_binary(
 }
 
 /// Complete one unpublished candidate's registry/source-override store in a
-/// single collection context. Platform entries, tools/router, and selected
+/// single collection context. Platform entries, tools, and selected
 /// registry drivers share the same pending install groups before Cargo runs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_candidate_store(
@@ -272,7 +272,7 @@ fn materialize_platform_runtime(
     Ok(())
 }
 
-/// Materialize one official tool (or the infrastructure router) into its
+/// Materialize one official tool into its
 /// canonical `bin/` entry, from a source override, an already-materialized
 /// `officials_source`, or `cargo install`.
 fn materialize_tool(context: &mut MaterializationContext<'_>, tool: &ResolvedTool) -> Result<()> {

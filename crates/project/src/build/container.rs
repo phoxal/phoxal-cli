@@ -10,10 +10,9 @@
 //!
 //! ## Officials materialize inside the container too (organization#951 WS4)
 //!
-//! The deterministic, robot-independent catalog set (every official service,
-//! tool, and the infrastructure router - "every official always runs" per
-//! #945) is installed with one multi-package `cargo install` in the SAME
-//! container invocation,
+//! The deterministic, robot-independent catalog set (every official service
+//! and tool - "every official always runs" per #945) is installed with one
+//! multi-package `cargo install` in the SAME container invocation,
 //! not host-side: the container already runs natively on the target
 //! architecture ([`platform_for_triple`]), which is exactly the property that
 //! makes cross-compiling from the host risky for a package with any native

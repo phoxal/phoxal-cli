@@ -172,7 +172,7 @@ mod setup {
             "simulation launch plan resolved: {} robot(s)",
             prepared.plan.robots.len()
         ));
-        ui.info(format!("infrastructure router ready on {connect}"));
+        ui.info(format!("router ready on {connect}"));
         crate::application::run::report_launch_commands(&prepared.plan, &specs, &ui)?;
 
         let mut background_tasks = crate::application::run::AbortTasks::default();

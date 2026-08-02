@@ -786,13 +786,14 @@ services:
                 RuntimeFailurePolicy::StopProject
             );
         }
-        // The router is CLI infrastructure, never a plan participant.
+        // The router runs inside the supervisor, so it can never appear as a
+        // plan participant (organization#978).
         assert!(
             !robot
                 .participants
                 .iter()
                 .any(|participant| participant.artifact_id.contains("router")),
-            "the infrastructure router is not a plan participant"
+            "the router is not a plan participant"
         );
 
         // A layout-built plan names only `bin/` binaries - no absolute or source

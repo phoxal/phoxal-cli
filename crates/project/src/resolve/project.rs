@@ -19,7 +19,7 @@ use phoxal_cli_core::project::resolver::{
 
 /// Resolve a robot manifest against the CLI-internal official catalog
 /// (organization#951 WS4): no suite fetch, no vendored artifact store. Every
-/// official service, tool, the infrastructure router, and every component
+/// official service, tool, and every component
 /// driver package materializes later via `cargo install` at exactly the
 /// locked framework train; component assets resolve directly from authored
 /// directories or the checked sparse package cache, so the manifest compiler
