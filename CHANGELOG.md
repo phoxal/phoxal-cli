@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.31.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.31.0) - 2026-08-02
+
+
+### Refactored
+
+- *(supervisor)* Run the Zenoh router inside the supervisor process ([#279](https://github.com/phoxal/phoxal-cli/pull/279)) [**breaking**]
+
+
 ## [0.30.4](https://github.com/phoxal/phoxal-cli/releases/tag/v0.30.4) - 2026-08-01
 
 
