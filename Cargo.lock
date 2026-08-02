@@ -3022,9 +3022,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-api"
-version = "0.48.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1469678999e0dbd45284787a8ec96600b8a5221ca00a723e769694277352898a"
+checksum = "a8e306841661430ac233d5966758fd8ae7c837a0ff869481986e01dc03d76d44"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -3034,9 +3034,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bus"
-version = "0.48.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40be3a20ee20a254057d7de010592d5e7b00087146b7ce9f48eaabc13034dc37"
+checksum = "164cd3c8816a657a5e394e733f9153f893808f57e54c17932513aee5c4a10306"
 dependencies = [
  "libc",
  "phoxal-runtime-contract",
@@ -3205,9 +3205,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.48.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbee892f24228d8f4fa652705e285ee2afcfb126302e8061667845b9fc249a16"
+checksum = "f6f10cb4a123fea49ffa182e12f9a6a447ab13fbccdba7f3677c7a8d3d7ab856"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3218,9 +3218,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-manifest"
-version = "0.48.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63e51285b32586c9a162e91fedf97bd7ca2b8f61c9a25ad4e79ed4f80b430bb5"
+checksum = "490b084bf95235f66265010cc450127e4413a4e52c9be587c735b2ee4c257fd5"
 dependencies = [
  "anyhow",
  "phoxal-model",
@@ -3236,9 +3236,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-model"
-version = "0.48.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3416b1a7aa896dedf3507320eba9c4ad4de360401294f041ab35b67638a5a7d8"
+checksum = "524bb4699dccbf8d4986743fb07d70050181929c58db264a3a4afdf6320b8ec1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3247,9 +3247,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-runtime-contract"
-version = "0.48.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5cbe18075c4ee1d29d70499ec2b5470c617073a4e15a27615f3f174ee9371e9"
+checksum = "a0e71ff377d6f44dbf3d342969f3499153f4084d36e4a903277a88fdd441881e"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
