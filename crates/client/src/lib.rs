@@ -12,7 +12,7 @@ pub use attachment::{
     Attachment, AttachmentPorts, AttachmentRuntime, attach_with_supervisor,
     validate_requested_entry,
 };
-pub use ports::{AttachmentEvents, BusReader, InputCommands, LogReader, RuntimeReader};
+pub use ports::{AttachmentEvents, InputCommands, LogReader, RuntimeReader};
 pub use supervisor::{
     ConnectionObservation, SupervisorCommands, SupervisorFeed, is_connection_unavailable,
 };

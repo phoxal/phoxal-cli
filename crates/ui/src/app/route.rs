@@ -1,6 +1,6 @@
 //! Structural panel-first focus routes.
 
-use super::id::{BusPanelId, InputPanelId, LogsPanelId, ModalId, PageId, PanelId, RuntimesPanelId};
+use super::id::{InputPanelId, LogsPanelId, ModalId, PageId, PanelId, RuntimesPanelId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FocusRoute {
@@ -64,7 +64,6 @@ pub const fn first_panel(page: PageId) -> Option<PanelId> {
         PageId::Overview => None,
         PageId::Runtimes => Some(PanelId::Runtimes(RuntimesPanelId::Processes)),
         PageId::Logs => Some(PanelId::Logs(LogsPanelId::Filters)),
-        PageId::Bus => Some(PanelId::Bus(BusPanelId::Controls)),
         PageId::Input => Some(PanelId::Input(InputPanelId::Devices)),
     }
 }
@@ -80,10 +79,6 @@ pub fn cycle_panel(page: PageId, current: Option<PanelId>, delta: isize) -> Opti
         PageId::Logs => &[
             PanelId::Logs(LogsPanelId::Filters),
             PanelId::Logs(LogsPanelId::Stream),
-        ],
-        PageId::Bus => &[
-            PanelId::Bus(BusPanelId::Controls),
-            PanelId::Bus(BusPanelId::Topics),
         ],
         PageId::Input => &[
             PanelId::Input(InputPanelId::Devices),
@@ -109,7 +104,6 @@ mod tests {
         for panel in [
             PanelId::Runtimes(RuntimesPanelId::Processes),
             PanelId::Logs(LogsPanelId::Stream),
-            PanelId::Bus(BusPanelId::Topics),
             PanelId::Input(InputPanelId::Devices),
         ] {
             let route = FocusRoute::Content { panel };

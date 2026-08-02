@@ -95,18 +95,11 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         .source_health
         .as_ref()
         .map_or(0, |health| health.ingress_dropped);
-    let devices = model
-        .overview
-        .devices
-        .as_ref()
-        .map_or(0, |devices| devices.robots.len());
     let health_text = if stale.is_empty() && source_states.is_empty() {
-        format!(
-            "All observed sources are fresh\nRobot devices: {devices}\nEpoch history shed: {ingress_dropped}"
-        )
+        format!("All observed sources are fresh\nEpoch history shed: {ingress_dropped}")
     } else {
         format!(
-            "Stale: {}\nRobot devices: {devices}\nEpoch history shed: {ingress_dropped}\n{}",
+            "Stale: {}\nEpoch history shed: {ingress_dropped}\n{}",
             stale.join(", "),
             source_states.join("\n")
         )

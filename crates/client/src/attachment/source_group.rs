@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use phoxal_cli_core::runtime::{ProcessScope, RobotKey};
 use phoxal_cli_observation::{
-    AttachmentEpoch, AttachmentEvent, BusRow, MotionObservation, RuntimeRow, SourceHealth,
-    SourceStatus, StoreChanged,
+    AttachmentEpoch, AttachmentEvent, MotionObservation, RuntimeRow, SourceHealth, SourceStatus,
+    StoreChanged,
 };
 use phoxal_cli_protocol::SupervisorSnapshotV0;
 use tokio::sync::mpsc;
@@ -43,7 +43,7 @@ impl SourceGroup {
         let telemetry = TelemetryBackend::with_updates(telemetry_mailbox.clone());
         let mut initial_health = SourceHealth::default();
         for (robot, _) in transports.iter() {
-            for source in ["liveliness", "logs", "device", "bus", "runtimes"] {
+            for source in ["liveliness", "logs", "runtimes"] {
                 initial_health.sources.insert(
                     format!("{source}:{}/{}", robot.namespace, robot.robot_id),
                     SourceStatus::Connecting,
@@ -56,9 +56,6 @@ impl SourceGroup {
         initial_health
             .sources
             .insert("motion".to_string(), SourceStatus::Connecting);
-        initial_health
-            .sources
-            .insert("clock".to_string(), SourceStatus::Connecting);
         let health = Arc::new(tokio::sync::RwLock::new(initial_health.clone()));
         let _ = events.try_send(AttachmentEvent::SourceHealthChanged {
             epoch,
@@ -156,22 +153,6 @@ impl SourceGroup {
                 namespace: robot.namespace.clone(),
                 robot_id: robot.robot_id.clone(),
             };
-            spawn_device(
-                &mut tasks,
-                bus.clone(),
-                scope.clone(),
-                telemetry.clone(),
-                cancellation.clone(),
-                reopen_tx.clone(),
-            );
-            spawn_bus(
-                &mut tasks,
-                bus.clone(),
-                scope.clone(),
-                telemetry.clone(),
-                cancellation.clone(),
-                reopen_tx.clone(),
-            );
             spawn_runtimes(
                 &mut tasks,
                 bus.clone(),
@@ -183,34 +164,6 @@ impl SourceGroup {
             );
         }
         if let Some(bus) = first_bus {
-            let clock_bus = bus.clone();
-            let clock_telemetry = telemetry.clone();
-            let clock_cancel = cancellation.clone();
-            let clock_reopen = reopen_tx.clone();
-            tasks.spawn(async move {
-                    let mut retry = SourceRetry::new();
-                    loop {
-                        clock_telemetry.record_health("clock", SourceStatus::Connecting);
-                        tokio::select! {
-                            _ = clock_cancel.cancelled() => break,
-                            result = crate::sources::clock::run(
-                                clock_bus.clone(),
-                                clock_telemetry.clone(),
-                            ) => {
-                                match result {
-                                    Ok(()) => break,
-                                    Err(error) => {
-                                        tracing::debug!(error = %error, "attachment clock source stopped");
-                                        clock_telemetry.record_health("clock", SourceStatus::Failed);
-                                    }
-                                }
-                            }
-                        }
-                        if !retry.after_failure(&clock_cancel, &clock_reopen).await {
-                            break;
-                        }
-                    }
-                });
             spawn_motion(
                 &mut tasks,
                 bus.clone(),
@@ -288,72 +241,6 @@ fn participants_for(snapshot: &SupervisorSnapshotV0, robot: &RobotKey) -> Vec<St
             _ => None,
         })
         .collect()
-}
-
-fn spawn_device(
-    tasks: &mut TaskGroup,
-    bus: phoxal_bus::Bus,
-    scope: phoxal_cli_observation::RobotScope,
-    telemetry: TelemetryBackend,
-    cancellation: CancellationToken,
-    reopen: mpsc::Sender<()>,
-) {
-    let source = format!("device:{}/{}", scope.namespace, scope.robot_id);
-    let failed = telemetry.clone();
-    tasks.spawn(async move {
-        let mut retry = SourceRetry::new();
-        loop {
-            failed.record_health(&source, SourceStatus::Connecting);
-            tokio::select! {
-                _ = cancellation.cancelled() => break,
-                result = crate::sources::device::run(
-                    bus.clone(),
-                    scope.clone(),
-                    telemetry.clone(),
-                ) => {
-                    let error = result.expect_err("device source is intentionally endless");
-                    tracing::debug!(error = %error, "attachment device source stopped");
-                    failed.record_health(&source, SourceStatus::Failed);
-                }
-            }
-            if !retry.after_failure(&cancellation, &reopen).await {
-                break;
-            }
-        }
-    });
-}
-
-fn spawn_bus(
-    tasks: &mut TaskGroup,
-    bus: phoxal_bus::Bus,
-    scope: phoxal_cli_observation::RobotScope,
-    telemetry: TelemetryBackend,
-    cancellation: CancellationToken,
-    reopen: mpsc::Sender<()>,
-) {
-    let source = format!("bus:{}/{}", scope.namespace, scope.robot_id);
-    let failed = telemetry.clone();
-    tasks.spawn(async move {
-        let mut retry = SourceRetry::new();
-        loop {
-            failed.record_health(&source, SourceStatus::Connecting);
-            tokio::select! {
-                _ = cancellation.cancelled() => break,
-                result = crate::sources::bus::run(
-                    bus.clone(),
-                    scope.clone(),
-                    telemetry.clone(),
-                ) => {
-                    let error = result.expect_err("bus source is intentionally endless");
-                    tracing::debug!(error = %error, "attachment bus source stopped");
-                    failed.record_health(&source, SourceStatus::Failed);
-                }
-            }
-            if !retry.after_failure(&cancellation, &reopen).await {
-                break;
-            }
-        }
-    });
 }
 
 fn spawn_runtimes(
@@ -472,15 +359,6 @@ async fn apply_telemetry_update(
     update: TelemetryUpdate,
 ) {
     let (source, status) = match &update {
-        TelemetryUpdate::Clock(_) => ("clock".to_string(), SourceStatus::Live),
-        TelemetryUpdate::Device(scope, _) => (
-            format!("device:{}/{}", scope.namespace, scope.robot_id),
-            SourceStatus::Live,
-        ),
-        TelemetryUpdate::Router(scope, _) | TelemetryUpdate::Routers(scope, _) => (
-            format!("bus:{}/{}", scope.namespace, scope.robot_id),
-            SourceStatus::Live,
-        ),
         TelemetryUpdate::Runtimes(scope, _, _) | TelemetryUpdate::Runtime(scope, _) => (
             format!("runtimes:{}/{}", scope.namespace, scope.robot_id),
             SourceStatus::Live,
@@ -510,55 +388,6 @@ async fn apply_telemetry_update(
             .await;
     }
     match update {
-        TelemetryUpdate::Clock(sample) => {
-            let observation = stores.device.write().await.record_clock(sample);
-            let _ = events
-                .send(AttachmentEvent::DeviceChanged {
-                    epoch,
-                    values: Arc::new(observation),
-                })
-                .await;
-        }
-        TelemetryUpdate::Device(scope, sample) => {
-            let observation = stores
-                .device
-                .write()
-                .await
-                .record(RobotKey::new(scope.namespace, scope.robot_id), sample);
-            let _ = events
-                .send(AttachmentEvent::DeviceChanged {
-                    epoch,
-                    values: Arc::new(observation),
-                })
-                .await;
-        }
-        TelemetryUpdate::Router(scope, sample) => {
-            let rows = bus_rows(&scope, &sample);
-            let revision = stores.bus.write().await.record(epoch, rows);
-            if let Some(revision) = revision {
-                let _ = events
-                    .send(AttachmentEvent::BusChanged(StoreChanged {
-                        epoch,
-                        revision,
-                    }))
-                    .await;
-            }
-        }
-        TelemetryUpdate::Routers(scope, samples) => {
-            let rows = samples
-                .iter()
-                .flat_map(|sample| bus_rows(&scope, sample))
-                .collect::<Vec<_>>();
-            let revision = stores.bus.write().await.install(epoch, &scope, rows);
-            if let Some(revision) = revision {
-                let _ = events
-                    .send(AttachmentEvent::BusChanged(StoreChanged {
-                        epoch,
-                        revision,
-                    }))
-                    .await;
-            }
-        }
         TelemetryUpdate::Runtimes(scope, samples, status) => {
             let rows = samples.into_iter().map(|sample| RuntimeRow {
                 scope: scope.clone(),
@@ -620,66 +449,14 @@ async fn apply_telemetry_update(
     }
 }
 
-fn bus_rows(
-    scope: &phoxal_cli_observation::RobotScope,
-    sample: &crate::sources::Timestamped<phoxal_cli_observation::RouterMetricsSample>,
-) -> Vec<BusRow> {
-    let make_row = |topic: Option<&phoxal_cli_observation::TopicMetric>| BusRow {
-        scope: scope.clone(),
-        observed_at: sample.received_at,
-        topic: topic.map_or_else(String::new, |topic| topic.topic.clone()),
-        participant: topic.map_or_else(String::new, |topic| topic.from_participant.clone()),
-        rate_hz: topic.map_or(0.0, |topic| topic.ingress_rate_hz),
-        count: topic.map_or(0, |topic| topic.count),
-        aggregate_overflow: topic.is_some_and(|topic| topic.aggregate_overflow),
-        topics_truncated: sample.value.topics_truncated,
-        throughput_msg_s: sample.value.throughput_msg_s,
-        window_ns: sample.value.window_ns,
-    };
-    if sample.value.topics.is_empty() {
-        vec![make_row(None)]
-    } else {
-        sample
-            .value
-            .topics
-            .iter()
-            .map(|topic| make_row(Some(topic)))
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+
     use std::time::Duration;
 
-    use crate::sources::Timestamped;
-    use phoxal_cli_observation::{RobotScope, RouterMetricsSample};
+    use super::SourceRetry;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
-
-    use super::{SourceRetry, bus_rows};
-
-    #[test]
-    fn a_topicless_retained_window_still_preserves_throughput_history() {
-        let scope = RobotScope {
-            namespace: "lab".to_string(),
-            robot_id: "rover".to_string(),
-        };
-        let sample = Timestamped::new(
-            RouterMetricsSample {
-                topics: Arc::new(Vec::new()),
-                topics_truncated: 0,
-                throughput_msg_s: 12.5,
-                window_ns: 1_000_000_000,
-            },
-            std::time::Instant::now(),
-        );
-        let rows = bus_rows(&scope, &sample);
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].topic.is_empty());
-        assert_eq!(rows[0].throughput_msg_s, 12.5);
-    }
 
     #[tokio::test]
     async fn sustained_source_failures_emit_one_reopen_after_local_retries() {
