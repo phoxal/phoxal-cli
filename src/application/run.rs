@@ -1226,17 +1226,22 @@ pub(crate) async fn live_run_setup(
         phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
         "starting router",
     );
-    let router =
-        match start_embedded_router(connect.clone(), prepared.router.config.as_deref()).await {
-            Ok(router) => router,
-            Err(error) => {
-                prepared.board.step_failed(
-                    phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
-                    format!("{error:#}"),
-                );
-                return Err(error);
-            }
-        };
+    let router = match start_embedded_router(
+        connect.clone(),
+        prepared.router.config.as_deref(),
+        prepared.board.clone(),
+    )
+    .await
+    {
+        Ok(router) => router,
+        Err(error) => {
+            prepared.board.step_failed(
+                phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
+                format!("{error:#}"),
+            );
+            return Err(error);
+        }
+    };
     prepared.board.step_detail(
         phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
         format!("router {connect}"),

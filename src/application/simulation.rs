@@ -133,6 +133,7 @@ mod setup {
         let router = match phoxal_cli_supervisor::start_embedded_router(
             connect.clone(),
             prepared.router.config.as_deref(),
+            board.clone(),
         )
         .await
         {

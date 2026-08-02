@@ -133,3 +133,12 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
+
+# TEMPORARY local overlay: develop against framework `feat/router-watch`
+# before it releases. Remove this block and bump the pins above before the PR.
+[patch.crates-io]
+phoxal-api = { path = "../../../../framework/.claude/worktrees/router-watch/phoxal-api" }
+phoxal-bus = { path = "../../../../framework/.claude/worktrees/router-watch/phoxal-bus" }
+phoxal-manifest = { path = "../../../../framework/.claude/worktrees/router-watch/phoxal-manifest" }
+phoxal-model = { path = "../../../../framework/.claude/worktrees/router-watch/phoxal-model" }
+phoxal-runtime-contract = { path = "../../../../framework/.claude/worktrees/router-watch/phoxal-runtime-contract" }
