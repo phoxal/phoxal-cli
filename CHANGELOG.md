@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.32.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.32.0) - 2026-08-02
+
+
+### Added
+
+- *(ui)* Remove the Bus page and the device and clock feeds ([#285](https://github.com/phoxal/phoxal-cli/pull/285)) [**breaking**]
+
+
 ## [0.31.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.31.2) - 2026-08-02
 
 
