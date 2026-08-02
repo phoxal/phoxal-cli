@@ -23,14 +23,16 @@ pub(crate) async fn run(
     events: mpsc::Sender<AttachmentEvent>,
     telemetry: super::TelemetryBackend,
 ) -> Result<Infallible> {
-    let follow_topic = api::topic::client().tool().log().follow();
-    let subscriber = Subscriber::<api::tool::log::Follow>::new(&bus, &follow_topic, 256).await?;
-    let snapshot_topic = api::topic::client().tool().log().snapshot();
-    let querier = Querier::<api::tool::log::SnapshotRequest, api::tool::log::Snapshot>::new(
-        bus,
-        &snapshot_topic,
-        DEFAULT_QUERY_TIMEOUT,
-    )?;
+    let follow_topic = api::topic::client().supervisor().log().follow();
+    let subscriber =
+        Subscriber::<api::supervisor::log::Follow>::new(&bus, &follow_topic, 256).await?;
+    let snapshot_topic = api::topic::client().supervisor().log().snapshot();
+    let querier =
+        Querier::<api::supervisor::log::SnapshotRequest, api::supervisor::log::Snapshot>::new(
+            bus,
+            &snapshot_topic,
+            DEFAULT_QUERY_TIMEOUT,
+        )?;
     let mut reconciler = Reconciler::new(512);
     let mut local_drops = subscriber.dropped();
     let mut retry_backoff =
@@ -38,7 +40,7 @@ pub(crate) async fn run(
 
     'query: loop {
         reconciler.begin_query();
-        let query = querier.query(api::tool::log::SnapshotRequest {});
+        let query = querier.query(api::supervisor::log::SnapshotRequest {});
         tokio::pin!(query);
         loop {
             tokio::select! {
@@ -140,7 +142,7 @@ async fn apply_outcome(
 }
 
 async fn prepare_requery(
-    subscriber: &Subscriber<api::tool::log::Follow>,
+    subscriber: &Subscriber<api::supervisor::log::Follow>,
     local_drops: &mut u64,
     backoff: &mut RetryBackoff,
 ) {
@@ -152,11 +154,11 @@ async fn prepare_requery(
 #[derive(Debug, Clone)]
 struct RetainedLogFollow {
     cursor: Cursor,
-    record: api::tool::log::Record,
+    record: api::supervisor::log::Record,
 }
 
-impl From<api::tool::log::Follow> for RetainedLogFollow {
-    fn from(follow: api::tool::log::Follow) -> Self {
+impl From<api::supervisor::log::Follow> for RetainedLogFollow {
+    fn from(follow: api::supervisor::log::Follow) -> Self {
         Self {
             cursor: Cursor {
                 generation: follow.cursor.generation,
@@ -173,7 +175,7 @@ impl Sequenced for RetainedLogFollow {
     }
 }
 
-fn retained_log_row(scope: &LogScope, record: api::tool::log::Record) -> LogRow {
+fn retained_log_row(scope: &LogScope, record: api::supervisor::log::Record) -> LogRow {
     let mut text = format!("{:?}: {}", record.level, record.message);
     if record.dropped > 0 {
         text.push_str(&format!(" (producer dropped {})", record.dropped));
@@ -190,11 +192,11 @@ fn retained_log_row(scope: &LogScope, record: api::tool::log::Record) -> LogRow 
         ),
         source: LogSource::Bus,
         severity: match record.level {
-            api::tool::log::Level::Error => LogSeverity::Error,
-            api::tool::log::Level::Warn => LogSeverity::Warn,
-            api::tool::log::Level::Info => LogSeverity::Info,
-            api::tool::log::Level::Debug => LogSeverity::Debug,
-            api::tool::log::Level::Trace => LogSeverity::Trace,
+            api::supervisor::log::Level::Error => LogSeverity::Error,
+            api::supervisor::log::Level::Warn => LogSeverity::Warn,
+            api::supervisor::log::Level::Info => LogSeverity::Info,
+            api::supervisor::log::Level::Debug => LogSeverity::Debug,
+            api::supervisor::log::Level::Trace => LogSeverity::Trace,
         },
         text: bounded_log_text(&text),
         event_time: retained_log_time(&record.time),
@@ -202,7 +204,7 @@ fn retained_log_row(scope: &LogScope, record: api::tool::log::Record) -> LogRow 
     }
 }
 
-fn retained_log_time(time: &api::tool::log::Timestamp) -> SystemTime {
+fn retained_log_time(time: &api::supervisor::log::Timestamp) -> SystemTime {
     let nanos = Duration::from_nanos(u64::from(time.nanos.min(999_999_999)));
     let seconds = if time.unix_seconds >= 0 {
         UNIX_EPOCH.checked_add(Duration::from_secs(time.unix_seconds as u64))

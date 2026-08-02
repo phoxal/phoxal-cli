@@ -80,14 +80,16 @@ pub async fn stream_logs(
     mut emit: impl FnMut(LogEvent),
 ) -> Result<()> {
     let bus = open_bus(target, "phoxal-cli-logs").await?;
-    let follow_topic = api::topic::client().tool().log().follow();
-    let subscriber = Subscriber::<api::tool::log::Follow>::new(&bus, &follow_topic, 256).await?;
-    let snapshot_topic = api::topic::client().tool().log().snapshot();
-    let querier = Querier::<api::tool::log::SnapshotRequest, api::tool::log::Snapshot>::new(
-        bus.clone(),
-        &snapshot_topic,
-        DEFAULT_QUERY_TIMEOUT,
-    )?;
+    let follow_topic = api::topic::client().supervisor().log().follow();
+    let subscriber =
+        Subscriber::<api::supervisor::log::Follow>::new(&bus, &follow_topic, 256).await?;
+    let snapshot_topic = api::topic::client().supervisor().log().snapshot();
+    let querier =
+        Querier::<api::supervisor::log::SnapshotRequest, api::supervisor::log::Snapshot>::new(
+            bus.clone(),
+            &snapshot_topic,
+            DEFAULT_QUERY_TIMEOUT,
+        )?;
     let mut reconciler = Reconciler::new(512);
     let mut local_drops = subscriber.dropped();
     let mut tool_drops = 0_u64;
@@ -97,7 +99,7 @@ pub async fn stream_logs(
 
     'query: loop {
         reconciler.begin_query();
-        let query = querier.query(api::tool::log::SnapshotRequest {});
+        let query = querier.query(api::supervisor::log::SnapshotRequest {});
         tokio::pin!(query);
         loop {
             tokio::select! {
@@ -196,7 +198,7 @@ pub async fn stream_logs(
 }
 
 async fn prepare_log_requery(
-    subscriber: &Subscriber<api::tool::log::Follow>,
+    subscriber: &Subscriber<api::supervisor::log::Follow>,
     local_drops: &mut u64,
     backoff: &mut RetryBackoff,
 ) {
@@ -208,11 +210,11 @@ async fn prepare_log_requery(
 #[derive(Debug)]
 struct RetainedLog {
     cursor: Cursor,
-    record: api::tool::log::Record,
+    record: api::supervisor::log::Record,
 }
 
-impl From<api::tool::log::Follow> for RetainedLog {
-    fn from(follow: api::tool::log::Follow) -> Self {
+impl From<api::supervisor::log::Follow> for RetainedLog {
+    fn from(follow: api::supervisor::log::Follow) -> Self {
         Self {
             cursor: Cursor {
                 generation: follow.cursor.generation,
@@ -407,15 +409,15 @@ mod tests {
                 generation: "g".to_string(),
                 sequence,
             },
-            record: api::tool::log::Record {
+            record: api::supervisor::log::Record {
                 sequence,
                 participant_id: participant_id.to_string(),
                 source_sequence: sequence,
-                time: api::tool::log::Timestamp {
+                time: api::supervisor::log::Timestamp {
                     unix_seconds: 0,
                     nanos: 0,
                 },
-                level: api::tool::log::Level::Info,
+                level: api::supervisor::log::Level::Info,
                 target: participant_id.to_string(),
                 message: format!("record-{sequence}"),
                 fields: BTreeMap::new(),
