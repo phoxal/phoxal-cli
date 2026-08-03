@@ -20,7 +20,7 @@ pub fn stages_for_run(
     let mut graph = Vec::new();
     for spec in specs {
         match spec.kind {
-            phoxal_cli_core::runtime::ParticipantKind::Tool => infrastructure.push(spec),
+            phoxal_cli_core::runtime::ParticipantKind::Host => infrastructure.push(spec),
             phoxal_cli_core::runtime::ParticipantKind::Driver
             | phoxal_cli_core::runtime::ParticipantKind::Service
             | phoxal_cli_core::runtime::ParticipantKind::Simulator => graph.push(spec),
@@ -51,7 +51,7 @@ pub fn stages_for_simulation(
     let mut graph = Vec::new();
     for spec in specs {
         if spec.id == phoxal_cli_core::runtime::WEBOTS_PROCESS_ID
-            || spec.kind == phoxal_cli_core::runtime::ParticipantKind::Tool
+            || spec.kind == phoxal_cli_core::runtime::ParticipantKind::Host
         {
             infrastructure.push(spec);
         } else {
@@ -340,16 +340,16 @@ mod tests {
     }
 
     #[test]
-    fn run_assigns_tools_to_infrastructure_and_robot_processes_to_graph() {
+    fn run_assigns_host_processes_to_infrastructure_and_robot_processes_to_graph() {
         let stages = stages_for_run(
             vec![
-                spec("tool", ParticipantKind::Tool),
+                spec("webots", ParticipantKind::Host),
                 spec("service", ParticipantKind::Service),
             ],
             crate::WaitBudget::Unbounded,
         );
         assert_eq!(stages[0].step, StartupStepKind::Infrastructure);
-        assert_eq!(stages[0].specs[0].id, "tool");
+        assert_eq!(stages[0].specs[0].id, "webots");
         assert_eq!(stages[1].step, StartupStepKind::Graph);
         assert_eq!(stages[1].specs[0].id, "service");
     }

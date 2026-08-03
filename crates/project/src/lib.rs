@@ -112,6 +112,56 @@ pub struct PreparedExecution {
     pub participants: Vec<PreparedParticipant>,
     pub router: PreparedRouter,
     pub simulation: Option<PreparedSimulation>,
+    /// Whether this robot can be driven by manual input, derived once from the
+    /// staged robot model. The client reads the operator's pad locally but
+    /// needs these authored parameters to turn a trigger into a physical speed
+    /// (organization#978), so the resident publishes it on the snapshot.
+    pub manual_input: phoxal_cli_protocol::ManualInput,
+}
+
+/// Derive the manual-input capability from a staged bundle's canonical
+/// `robot.json`.
+///
+/// A robot that cannot be driven manually is not an error: the reason is
+/// reported to the operator instead of an empty device list, and a model that
+/// cannot even be read is reported the same way rather than failing the run.
+#[must_use]
+pub fn manual_input_from_staged_root(
+    staged_root: &std::path::Path,
+) -> phoxal_cli_protocol::ManualInput {
+    use phoxal_cli_protocol::{ManualDrive, ManualInput};
+
+    let path = staged_root.join(phoxal_cli_core::project::layout::ROBOT_FILE);
+    let robot = match std::fs::read(&path)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| phoxal_model::Robot::decode(&bytes).map_err(|error| error.to_string()))
+    {
+        Ok(robot) => robot,
+        Err(error) => {
+            return ManualInput::Unsupported(format!(
+                "failed to read the robot model at {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let limits = match robot.motion_limits().validate() {
+        Ok(limits) => limits,
+        Err(error) => return ManualInput::Unsupported(error.to_string()),
+    };
+    let phoxal_model::robot::KinematicConfig::Differential { wheel_base_m, .. } = robot.kinematic()
+    else {
+        return ManualInput::Unsupported(
+            "manual input requires differential robot kinematics".to_string(),
+        );
+    };
+    match ManualDrive::derive(
+        *wheel_base_m,
+        limits.max_linear_speed_mps,
+        limits.max_angular_speed_radps,
+    ) {
+        Ok(drive) => ManualInput::Supported(drive),
+        Err(reason) => ManualInput::Unsupported(reason),
+    }
 }
 
 pub struct ValidateRequest {
@@ -146,7 +196,6 @@ pub struct ValidationReport {
     pub train: String,
     pub platform_services: Vec<String>,
     pub services: Vec<String>,
-    pub tools: Vec<String>,
     pub components: Vec<ValidationComponent>,
 }
 

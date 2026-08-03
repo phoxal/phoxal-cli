@@ -1,6 +1,6 @@
 //! Compile-time participant metadata extraction (X-tools slice).
 //!
-//! A `#[phoxal::service]`/driver/tool/simulator attribute embeds one JSON
+//! A `#[phoxal::service]`/driver/simulator attribute embeds one JSON
 //! manifest per participant binary in a dedicated linker section -
 //! `__DATA,__phoxal_meta` on Mach-O,
 //! `.phoxal_meta` everywhere else (`phoxal-macros/src/authoring.rs`'s
@@ -28,7 +28,7 @@ pub const SECTION_NAMES: [&str; 2] = [".phoxal_meta", "__phoxal_meta"];
 /// name in [`SECTION_NAMES`] in turn. `Ok(None)` means the object file parsed
 /// fine but carries no such section at all. Every binary this module is asked
 /// to inspect is expected to be a compiled `#[phoxal::service]`/`driver`/
-/// `simulator`/`tool` participant, so a missing section is NOT a valid
+/// `simulator` participant, so a missing section is NOT a valid
 /// "no participant attribute" shape here - see
 /// [`extract_participant_metadata_from_bytes`], which turns `None` into a
 /// hard error rather than a synthesized identity. A malformed/unrecognized
@@ -57,7 +57,7 @@ fn read_meta_section(object_bytes: &[u8], describe: &str) -> Result<Option<Vec<u
 /// A binary with no metadata section at all is a hard error, not a
 /// synthesized identity: every caller of this function inspects a binary it
 /// expects to be a compiled phoxal participant (a service, driver, simulator,
-/// or tool), and that participant's own declared `id` is what an identity
+/// or simulator), and that participant's own declared `id` is what an identity
 /// check compares against an expected artifact/participant identity
 /// afterward. Silently returning a placeholder `id: "()"` here used to let a
 /// binary with no section at all sail through that check, because the
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn extracts_metadata_from_foreign_format_and_arch_object_files() -> Result<()> {
-        let payload = br#"{"schema":"phoxal/participant-metadata/v0","id":"drive","kind":"service","class":"checked","config_schema":{"type":"null"}}"#;
+        let payload = br#"{"schema":"phoxal/participant-metadata/v0","id":"drive","kind":"service","config_schema":{"type":"null"}}"#;
 
         // aarch64 ELF (Linux robot / release binary shape), `.phoxal_meta`.
         let elf = synthesize_object(

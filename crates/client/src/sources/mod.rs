@@ -12,61 +12,21 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use phoxal_api::v0_1 as api;
 use phoxal_api::v0_1 as state_api;
 use phoxal_bus::Bus;
-use phoxal_bus::{
-    CommandPublisher, ContractBody, DEFAULT_QUERY_TIMEOUT, Publish, Querier, Subscribe, Subscriber,
-    Topic,
-};
-use tokio::sync::{Notify, mpsc};
+use phoxal_bus::{ContractBody, DEFAULT_QUERY_TIMEOUT, Querier, Subscribe, Subscriber, Topic};
+use tokio::sync::Notify;
 
 use crate::reconcile::{Cursor, ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
 use phoxal_cli_observation::{
-    JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, RuntimeBufferKind, RuntimeDirection,
-    RuntimeFeedStatus, RuntimePerformanceSample, RuntimeStepSample, RuntimeTopicSample,
-    sanitize_terminal_text,
+    JoypadDevicesSample, RuntimeBufferKind, RuntimeDirection, RuntimeFeedStatus,
+    RuntimePerformanceSample, RuntimeStepSample, RuntimeTopicSample, sanitize_terminal_text,
 };
 use phoxal_cli_observation::{RobotScope, SourceStatus};
 
-const MAX_JOYPAD_DEVICES: usize = 64;
-
+/// Remote text reaches this client from another machine's supervisor, so it is
+/// sanitized and bounded before it can ever reach a terminal.
 const MAX_REMOTE_TEXT_CHARS: usize = 256;
-
-fn joypad_device_from(body: api::joypad::Device) -> JoypadDevice {
-    JoypadDevice {
-        id: bounded_remote_text(&body.id),
-        name: bounded_remote_text(&body.name),
-        status: match body.status {
-            api::joypad::DeviceStatus::Ready => JoypadDeviceStatus::Ready,
-            api::joypad::DeviceStatus::Disconnected => JoypadDeviceStatus::Disconnected,
-            api::joypad::DeviceStatus::Unsupported => JoypadDeviceStatus::Unsupported,
-        },
-    }
-}
-
-/// The joypad tool's latest published device state - `selected` is the
-/// authoritative selection (the tool's own acknowledgement), never a local
-/// client guess.
-fn joypad_devices_sample_from(body: api::joypad::Devices) -> JoypadDevicesSample {
-    let received_devices = body.available.len();
-    let available = body
-        .available
-        .into_iter()
-        .take(MAX_JOYPAD_DEVICES)
-        .map(joypad_device_from)
-        .collect::<Vec<_>>();
-    JoypadDevicesSample {
-        devices_truncated: received_devices.saturating_sub(available.len()),
-        available: Arc::new(available),
-        selected: body.selected.map(|id| bounded_remote_text(&id)),
-        enabled: body.enabled,
-        unavailable_reason: body
-            .unavailable_reason
-            .map(|reason| bounded_remote_text(&reason)),
-        last_error: body.last_error.map(|error| bounded_remote_text(&error)),
-    }
-}
 
 fn bounded_remote_text(text: &str) -> String {
     sanitize_terminal_text(text)
@@ -576,67 +536,6 @@ fn apply_runtime_outcome(
         }
         ReconcileOutcome::Buffered => true,
         ReconcileOutcome::Requery => false,
-    }
-}
-
-/// Subscribe v0_1::joypad::Devices and own the Select, SetEnabled, and Rescan
-/// publishers. This loop publishes typed port commands, and the next Devices
-/// receive is the authoritative acknowledgement.
-pub(crate) async fn joypad_devices_feed_loop(
-    bus: Bus,
-    telemetry: &TelemetryBackend,
-    command_rx: &mut mpsc::Receiver<crate::ports::input::InputCommand>,
-) -> Result<()> {
-    {
-        let devices_topic = Topic::<Subscribe<api::joypad::Devices>>::new_static(
-            <api::joypad::Devices as ContractBody>::TOPIC,
-        );
-        let devices_subscriber =
-            Subscriber::<api::joypad::Devices>::new(&bus, &devices_topic, 32).await?;
-        let select_topic = Topic::<Publish<api::joypad::Select>>::new_static(
-            <api::joypad::Select as ContractBody>::TOPIC,
-        );
-        let select_publisher =
-            CommandPublisher::<api::joypad::Select>::new(bus.clone(), &select_topic)?;
-        let enabled_topic = Topic::<Publish<api::joypad::SetEnabled>>::new_static(
-            <api::joypad::SetEnabled as ContractBody>::TOPIC,
-        );
-        let enabled_publisher =
-            CommandPublisher::<api::joypad::SetEnabled>::new(bus.clone(), &enabled_topic)?;
-        let rescan_topic = Topic::<Publish<api::joypad::Rescan>>::new_static(
-            <api::joypad::Rescan as ContractBody>::TOPIC,
-        );
-        let rescan_publisher =
-            CommandPublisher::<api::joypad::Rescan>::new(bus.clone(), &rescan_topic)?;
-        loop {
-            tokio::select! {
-                received = devices_subscriber.recv() => {
-                    let received = received?;
-                    telemetry.record_joypad(joypad_devices_sample_from(received.body));
-                }
-                command = command_rx.recv() => {
-                    match command {
-                        Some(crate::ports::input::InputCommand::Select(id)) => {
-                            if let Err(error) = select_publisher.send(api::joypad::Select { id }) {
-                                tracing::warn!("joypad select publish failed: {error:#}");
-                            }
-                        }
-                        Some(crate::ports::input::InputCommand::SetEnabled(enabled)) => {
-                            if let Err(error) = enabled_publisher.send(api::joypad::SetEnabled { enabled }) {
-                                tracing::warn!("joypad enable publish failed: {error:#}");
-                            }
-                        }
-                        Some(crate::ports::input::InputCommand::Rescan) => {
-                            if let Err(error) = rescan_publisher.send(api::joypad::Rescan {}) {
-                                tracing::warn!("joypad rescan publish failed: {error:#}");
-                            }
-                        }
-                        // Closing the typed port ends this source cleanly.
-                        None => return Ok(()),
-                    }
-                }
-            }
-        }
     }
 }
 

@@ -13,8 +13,8 @@ const PHOXAL_PROVIDER: &str = "phoxal";
 
 use phoxal_cli_core::project::resolver::{
     BundlePlan, CompiledBundle, ResolveOptions, ResolvedComponent, ResolvedComponentDriver,
-    ResolvedPathOverride, ResolvedPathOverrideKind, ResolvedPlatformRuntime, ResolvedTool,
-    ResolvedUserRuntime, UndeclaredRuntime, official_binary_name,
+    ResolvedPathOverride, ResolvedPathOverrideKind, ResolvedPlatformRuntime, ResolvedUserRuntime,
+    UndeclaredRuntime,
 };
 
 /// Resolve a robot manifest against the CLI-internal official catalog
@@ -107,10 +107,6 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
     robot
         .validate()
         .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
-    let tool_target = options
-        .tool_target_triple
-        .unwrap_or_else(host_target_triple);
-
     let mut platform_runtimes = catalog::NATIVE
         .iter()
         .filter(|official| official.kind == ArtifactKind::Service)
@@ -144,19 +140,12 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
         },
     )?;
 
-    let mut tools = catalog::NATIVE
-        .iter()
-        .filter(|official| official.kind == ArtifactKind::Tool)
-        .map(|official| tool_from_official(official, &train, &tool_target))
-        .collect::<Vec<_>>();
-
     let workspace = apply_workspace_runtimes(
         robot,
         project_root,
         &project.runtimes,
         &mut platform_runtimes,
         &mut simulators,
-        &mut tools,
     )?;
 
     let component_roots = components
@@ -181,10 +170,8 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
         platform_runtimes,
         simulators,
         user_runtimes: workspace.user_runtimes,
-        user_tools: workspace.user_tools,
         undeclared_runtimes: workspace.undeclared_runtimes,
         components,
-        tools,
         path_overrides: workspace.path_overrides,
     })
 }
@@ -204,27 +191,9 @@ fn platform_runtime_from_official(
     }
 }
 
-fn tool_from_official(
-    official: &catalog::OfficialRuntime,
-    train: &str,
-    target: &str,
-) -> ResolvedTool {
-    let short = short_name(official.package, official.kind);
-    ResolvedTool {
-        kind: official.kind,
-        name: format!("{}-{short}", official.kind.wire_kind()),
-        package: official.package.to_string(),
-        binary_name: official_binary_name(official.kind, &short),
-        path_override: None,
-        train: train.to_string(),
-        target: target.to_string(),
-    }
-}
-
 fn short_name(package: &str, kind: ArtifactKind) -> String {
     let prefix = match kind {
         ArtifactKind::Service => "phoxal/service-",
-        ArtifactKind::Tool => "phoxal/tool-",
         ArtifactKind::Simulator => "phoxal/simulator-",
         ArtifactKind::ComponentDriver => "phoxal/component-",
     };
@@ -476,12 +445,8 @@ fn apply_workspace_runtimes(
     runtimes: &[phoxal_cli_core::project::train::WorkspaceRuntime],
     platform_runtimes: &mut [ResolvedPlatformRuntime],
     _simulators: &mut [ResolvedPlatformRuntime],
-    tools: &mut [ResolvedTool],
 ) -> Result<WorkspaceRuntimeResolution> {
-    use phoxal_cli_core::project::train::WorkspaceRuntimeKind;
-
     let mut user_runtimes = Vec::new();
-    let mut user_tools = Vec::new();
     let mut undeclared = Vec::new();
     let mut overrides = Vec::new();
     for runtime in runtimes {
@@ -496,68 +461,33 @@ fn apply_workspace_runtimes(
             .strip_prefix(project_root)
             .unwrap_or(&runtime.crate_dir)
             .to_path_buf();
-        match runtime.kind {
-            WorkspaceRuntimeKind::Service => {
-                let official_package = format!("phoxal/service-{logical_name}");
-                if let Some(official) = platform_runtimes
-                    .iter_mut()
-                    .find(|entry| entry.package == official_package)
-                {
-                    official.path_override = Some(runtime.crate_dir.clone());
-                    overrides.push(ResolvedPathOverride {
-                        key: official_package,
-                        kind: ResolvedPathOverrideKind::Service,
-                        artifact_name: logical_name,
-                        path: runtime.crate_dir.clone(),
-                    });
-                } else if robot.services.contains_key(&logical_name) {
-                    // Declared: the services map selects which discovered
-                    // workspace services belong to the robot (#950).
-                    user_runtimes.push(ResolvedUserRuntime {
-                        name: logical_name,
-                        path: relative,
-                        source_hash: hash_tree(&runtime.crate_dir)?,
-                    });
-                } else {
-                    // Present but undeclared: legal, not built or launched;
-                    // surfaced as a drift diagnostic (#950).
-                    undeclared.push(UndeclaredRuntime {
-                        name: logical_name,
-                        family: "services",
-                    });
-                }
-            }
-            WorkspaceRuntimeKind::Tool => {
-                let official_package = format!("phoxal/tool-{logical_name}");
-                // A `tools/` workspace crate whose name matches an official
-                // tool identity overrides that official binary - a source
-                // override, never a declaration. A non-official crate is a
-                // user tool: the `tools:` map in robot.yaml selects it (#950);
-                // present-but-undeclared is a drift diagnostic, not an error.
-                if let Some(official) = tools
-                    .iter_mut()
-                    .find(|entry| entry.package == official_package)
-                {
-                    official.path_override = Some(runtime.crate_dir.clone());
-                    overrides.push(ResolvedPathOverride {
-                        key: official_package,
-                        kind: ResolvedPathOverrideKind::Tool,
-                        artifact_name: logical_name,
-                        path: runtime.crate_dir.clone(),
-                    });
-                } else if robot.tools.contains_key(&logical_name) {
-                    user_tools.push(ResolvedUserRuntime {
-                        name: logical_name,
-                        path: relative,
-                        source_hash: hash_tree(&runtime.crate_dir)?,
-                    });
-                } else {
-                    undeclared.push(UndeclaredRuntime {
-                        name: logical_name,
-                        family: "tools",
-                    });
-                }
-            }
+        let official_package = format!("phoxal/service-{logical_name}");
+        if let Some(official) = platform_runtimes
+            .iter_mut()
+            .find(|entry| entry.package == official_package)
+        {
+            official.path_override = Some(runtime.crate_dir.clone());
+            overrides.push(ResolvedPathOverride {
+                key: official_package,
+                kind: ResolvedPathOverrideKind::Service,
+                artifact_name: logical_name,
+                path: runtime.crate_dir.clone(),
+            });
+        } else if robot.services.contains_key(&logical_name) {
+            // Declared: the services map selects which discovered
+            // workspace services belong to the robot (#950).
+            user_runtimes.push(ResolvedUserRuntime {
+                name: logical_name,
+                path: relative,
+                source_hash: hash_tree(&runtime.crate_dir)?,
+            });
+        } else {
+            // Present but undeclared: legal, not built or launched;
+            // surfaced as a drift diagnostic (#950).
+            undeclared.push(UndeclaredRuntime {
+                name: logical_name,
+                family: "services",
+            });
         }
     }
     let discovered_services = user_runtimes
@@ -584,39 +514,10 @@ fn apply_workspace_runtimes(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    // The tools declaration validates both ways too (#950): a declared tool
-    // needs its workspace crate, may not name an official identity (officials
-    // are catalog-owned and configless), and may not collide with a declared
-    // service (both would claim bin/<name>).
-    let discovered_tools = user_tools
-        .iter()
-        .map(|tool| tool.name.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    for name in robot.tools.keys() {
-        anyhow::ensure!(
-            !tools
-                .iter()
-                .any(|entry| entry.package == format!("phoxal/tool-{name}")),
-            "robot.yaml declares tools.{name}, but '{name}' is an official tool; official tools \
-             are catalog-owned, always run, and take no robot.yaml declaration (a tools/{name} \
-             workspace crate overrides the official binary without being declared)"
-        );
-        anyhow::ensure!(
-            discovered_tools.contains(name.as_str()),
-            "robot.yaml declares tools.{name} with no matching tools/ workspace crate"
-        );
-        anyhow::ensure!(
-            !robot.services.contains_key(name.as_str()),
-            "robot.yaml declares '{name}' under both services and tools; the two maps share one \
-             binary namespace, so a name may appear in only one"
-        );
-    }
     overrides.sort_by(|left, right| left.key.cmp(&right.key));
-    user_tools.sort_by(|left, right| left.name.cmp(&right.name));
     undeclared.sort_by(|left, right| (left.family, &left.name).cmp(&(right.family, &right.name)));
     Ok(WorkspaceRuntimeResolution {
         user_runtimes,
-        user_tools,
         undeclared_runtimes: undeclared,
         path_overrides: overrides,
     })
@@ -631,13 +532,12 @@ fn discover_local_components(
     discover_local_components_from_locked(project_root, &project.local_components)
 }
 
-/// The workspace-runtime half of resolution (#950): the declared user services
-/// and tools, the drift records for undeclared crates, and the official-source
+/// The workspace-runtime half of resolution (#950): the declared user
+/// services, the drift records for undeclared crates, and the official-source
 /// overrides applied along the way.
 #[derive(Debug)]
 struct WorkspaceRuntimeResolution {
     user_runtimes: Vec<ResolvedUserRuntime>,
-    user_tools: Vec<ResolvedUserRuntime>,
     undeclared_runtimes: Vec<UndeclaredRuntime>,
     path_overrides: Vec<ResolvedPathOverride>,
 }

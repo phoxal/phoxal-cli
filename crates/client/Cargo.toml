@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
+gilrs = { workspace = true }
 phoxal-api = { workspace = true }
 phoxal-bus = { workspace = true }
 phoxal-runtime-contract = { workspace = true }

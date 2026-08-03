@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
 use phoxal_cli_core::project::resolver::{
-    BundlePlan, ResolvedPlatformRuntime, ResolvedTool, official_binary_name,
+    BundlePlan, ResolvedPlatformRuntime, official_binary_name,
 };
 
 use super::publish::remove_if_present;
@@ -106,7 +106,7 @@ pub(crate) fn stage_named_binary(
 }
 
 /// Complete one unpublished candidate's registry/source-override store in a
-/// single collection context. Platform entries, tools, and selected
+/// single collection context. Platform entries and selected
 /// registry drivers share the same pending install groups before Cargo runs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_candidate_store(
@@ -132,9 +132,6 @@ pub(crate) fn materialize_candidate_store(
     };
     for runtime in &resolved.platform_runtimes {
         materialize_platform_runtime(&mut context, runtime)?;
-    }
-    for tool in &resolved.tools {
-        materialize_tool(&mut context, tool)?;
     }
     for runtime in extra_registry_runtimes {
         queue_component_driver(&mut context, runtime)?;
@@ -267,37 +264,6 @@ fn materialize_platform_runtime(
     let spec = context.settings.apply(
         MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
             .with_target(runtime.target.clone()),
-    );
-    context.pending.push(spec);
-    Ok(())
-}
-
-/// Materialize one official tool into its
-/// canonical `bin/` entry, from a source override, an already-materialized
-/// `officials_source`, or `cargo install`.
-fn materialize_tool(context: &mut MaterializationContext<'_>, tool: &ResolvedTool) -> Result<()> {
-    let staged = context.bin_dir.join(&tool.binary_name);
-    if staged.is_file() {
-        return Ok(());
-    }
-    if let Some(crate_dir) = &tool.path_override {
-        // SourceArtifacts is keyed by SourceParticipant::name, which is the
-        // resolved tool name. The stripped participant id is only its emitted
-        // metadata identity and must not become a second artifact-map key.
-        let source = (context.build_override)(crate_dir, &tool.name)?;
-        return link_or_copy(&source, &staged);
-    }
-    if link_from_officials_source(
-        context.officials_source,
-        &tool.package,
-        &tool.binary_name,
-        &staged,
-    )? {
-        return Ok(());
-    }
-    let spec = context.settings.apply(
-        MaterializeSpec::new(tool.package.clone(), tool.train.clone())
-            .with_target(Some(tool.target.clone())),
     );
     context.pending.push(spec);
     Ok(())

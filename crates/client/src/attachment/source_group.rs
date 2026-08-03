@@ -175,6 +175,7 @@ impl SourceGroup {
             let input_telemetry = telemetry.clone();
             let input_reopen = reopen_tx.clone();
             let input = input.clone();
+            let manual_input = snapshot.manual_input.clone();
             tasks.spawn(async move {
                     let mut input = input.lock().await;
                     let input_rx = input.as_mut().expect("source group owns its input port");
@@ -185,6 +186,7 @@ impl SourceGroup {
                             _ = input_cancel.cancelled() => break,
                             result = crate::sources::input::run(
                                 bus.clone(),
+                                manual_input.clone(),
                                 telemetry.clone(),
                                 input_rx,
                             ) => {

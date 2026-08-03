@@ -102,17 +102,14 @@ impl DriverSelection {
 }
 
 /// The role a required runtime plays. Drives board classification and which
-/// runtimes the CLI supervisor launches (services/tools/drivers) versus which
+/// runtimes the CLI supervisor launches (services and drivers) versus which
 /// the simulator owns (simulators). The comms router is not here at all: it
 /// runs inside the supervisor process and has no staged binary
 /// (organization#978).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequiredRuntimeKind {
     OfficialService,
-    OfficialTool,
     UserService,
-    /// A compiled additional user tool.
-    UserTool,
     ComponentDriver,
 }
 
@@ -212,7 +209,7 @@ impl RuntimeLayout {
     /// The runtimes the compiled layout requires. The official set comes from
     /// the CLI-internal catalog (simulator binaries excluded from `Native`);
     /// the user-service set is every `services` entry that is not an official
-    /// service; the user-tool set is every `tools` entry (#950); component
+    /// service; component
     /// drivers are one per driven component id (a single driver binary serves
     /// every instance of that component id), gated by `drivers`: a driver whose
     /// every instance is excluded is not required, so it is never resolved or
@@ -231,7 +228,6 @@ impl RuntimeLayout {
             let short = official_short_name(official);
             let kind = match official.kind {
                 ArtifactKind::Service => RequiredRuntimeKind::OfficialService,
-                ArtifactKind::Tool => RequiredRuntimeKind::OfficialTool,
                 // The catalog's native set carries no simulators; the webots
                 // additions are not requested here (see the doc above), so a
                 // simulator entry can never appear. Guard structurally anyway.
@@ -270,12 +266,6 @@ impl RuntimeLayout {
                         config: participant.config.clone(),
                     });
                 }
-                ParticipantKind::Tool => required.push(RequiredRuntime {
-                    identity: participant.id.clone(),
-                    binary_name: participant.id.clone(),
-                    kind: RequiredRuntimeKind::UserTool,
-                    config: participant.config.clone(),
-                }),
                 ParticipantKind::Driver => {
                     let Some(instance) = participant.component_instance.as_deref() else {
                         continue;
@@ -335,9 +325,9 @@ impl RuntimeLayout {
     /// before the schema is trusted. `required.identity` is the canonical
     /// short/component id `required_runtimes` derived from the compiled
     /// participant declarations plus the CLI catalog - the official short name, the user
-    /// service/tool name, or the component id shared by every driven
+    /// service name, or the component id shared by every driven
     /// instance - which is exactly the identity a matching binary's own
-    /// `#[phoxal::service]`/`driver`/`tool` attribute declares. A mismatch
+    /// `#[phoxal::service]`/`driver` attribute declares. A mismatch
     /// here means the wrong binary landed at this canonical `bin/` path (a
     /// stale rebuild, a hand-edited bundle, two artifacts swapped on disk),
     /// and must fail before that binary's schema is used to validate
@@ -372,9 +362,6 @@ impl RuntimeLayout {
         let expected_kind = match required.kind {
             RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => {
                 phoxal_runtime_contract::ParticipantKind::Service
-            }
-            RequiredRuntimeKind::OfficialTool | RequiredRuntimeKind::UserTool => {
-                phoxal_runtime_contract::ParticipantKind::Tool
             }
             RequiredRuntimeKind::ComponentDriver => {
                 phoxal_runtime_contract::ParticipantKind::Driver
@@ -442,11 +429,10 @@ fn validate_bundle_asset(root: &Path, relative: &str, label: &str) -> Result<()>
 }
 
 /// The short (kind-stripped) name of one catalog official, e.g.
-/// `phoxal/service-drive` -> `drive`, `phoxal/tool-bus` -> `bus`.
+/// `phoxal/service-drive` -> `drive`.
 fn official_short_name(official: &OfficialRuntime) -> String {
     let prefix = match official.kind {
         ArtifactKind::Service => "phoxal/service-",
-        ArtifactKind::Tool => "phoxal/tool-",
         ArtifactKind::Simulator => "phoxal/simulator-",
         ArtifactKind::ComponentDriver => "phoxal/component-",
     };
@@ -497,16 +483,12 @@ pub fn decode_participants(path: &Path) -> Result<Vec<Participant>> {
 fn validate_participants(participants: &[Participant]) -> Result<()> {
     let mut seen = BTreeSet::new();
     let mut user_namespace = BTreeMap::new();
-    let official_names = official_service_short_names()
-        .into_iter()
-        .chain(official_tool_short_names())
-        .collect::<BTreeSet<_>>();
+    let official_names = official_service_short_names();
     for participant in participants {
         let kind = match participant.kind {
             ParticipantKind::Service => "service",
             ParticipantKind::Driver => "driver",
             ParticipantKind::Simulator => "simulator",
-            ParticipantKind::Tool => "tool",
         };
         anyhow::ensure!(
             seen.insert((
@@ -518,7 +500,7 @@ fn validate_participants(participants: &[Participant]) -> Result<()> {
             participant.id
         );
         match participant.kind {
-            ParticipantKind::Service | ParticipantKind::Tool => {
+            ParticipantKind::Service => {
                 anyhow::ensure!(
                     participant.component_instance.is_none(),
                     "compiled {kind} participant '{}' must not name a component instance",
@@ -610,8 +592,6 @@ fn validate_participant_model_membership(
 /// any workspace scanning) and by [`RuntimeLayout::open`] (so a hand-edited
 /// bundle cannot smuggle a forbidden declaration past the loader):
 ///
-/// - a name may be declared under `services:` or `tools:`, never both (one
-///   binary namespace);
 /// - official identities are never declared - official runtimes are
 ///   catalog-owned, always run, and take no authored configuration. A
 ///   workspace crate overriding an official identity does so WITHOUT a
@@ -619,34 +599,10 @@ fn validate_participant_model_membership(
 pub fn validate_runtime_declarations(
     robot: &phoxal_manifest::source::robot::v0::Manifest,
 ) -> Result<()> {
-    // Officials share ONE binary namespace across services and tools, so a
-    // declared name is checked against the WHOLE reserved catalog set, not just
-    // the map it appears in - `tools.drive` (drive is an official service) and
-    // `services.log` (log is an official tool) are both rejected (#950).
-    let official_kind = |name: &str| -> Option<&'static str> {
-        if official_service_short_names().contains(name) {
-            Some("service")
-        } else if official_tool_short_names().contains(name) {
-            Some("tool")
-        } else {
-            None
-        }
-    };
-    let declared = robot
-        .services
-        .keys()
-        .map(|name| ("services", name))
-        .chain(robot.tools.keys().map(|name| ("tools", name)));
-    for (map, name) in declared {
-        if map == "services" && robot.tools.contains_key(name) {
+    for name in robot.services.keys() {
+        if official_service_short_names().contains(name.as_str()) {
             bail!(
-                "robot.yaml declares '{name}' under both services and tools; the two maps \
-                 share one binary namespace, so a name may appear in only one"
-            );
-        }
-        if let Some(kind) = official_kind(name) {
-            bail!(
-                "robot.yaml declares {map}.{name}, but '{name}' is an official {kind}; \
+                "robot.yaml declares services.{name}, but '{name}' is an official service; \
                  official runtimes are catalog-owned, always run, and take no robot.yaml \
                  declaration (a workspace crate matching an official identity overrides its \
                  binary without being declared)"
@@ -654,20 +610,6 @@ pub fn validate_runtime_declarations(
         }
     }
     Ok(())
-}
-
-/// The short names of every official tool in the CLI catalog.
-fn official_tool_short_names() -> BTreeSet<&'static str> {
-    catalog::NATIVE
-        .iter()
-        .filter(|official| official.kind == ArtifactKind::Tool)
-        .map(|official| {
-            official
-                .package
-                .strip_prefix("phoxal/tool-")
-                .unwrap_or(official.package)
-        })
-        .collect()
 }
 
 /// The short names of every official service in the CLI catalog, so the loader
@@ -758,9 +700,7 @@ mod tests {
 
     #[test]
     fn official_identities_are_rejected_in_either_map_across_namespaces() -> anyhow::Result<()> {
-        use phoxal_manifest::source::robot::v0::{
-            Manifest as RobotManifest, UserService, UserTool,
-        };
+        use phoxal_manifest::source::robot::v0::{Manifest as RobotManifest, UserService};
 
         let base = || -> RobotManifest {
             robot_source::parse_from_string(
@@ -781,34 +721,23 @@ robot:
             .expect("minimal robot parses")
         };
 
-        // `tools.drive` - drive is an official SERVICE, rejected in the tools map.
-        let mut robot = base();
-        robot
-            .tools
-            .insert("drive".to_string(), UserTool { config: None });
-        let error = super::validate_runtime_declarations(&robot)
-            .expect_err("an official service name in tools: is rejected")
-            .to_string();
-        assert!(error.contains("official service"), "{error}");
-
-        // `services.joypad` - joypad is an official TOOL, rejected in the
-        // services map. (`log` used to be the example here; it became the
-        // supervisor's own collector, organization#978.)
+        // `services.drive` - drive is an official service, so it may not be
+        // declared: officials are catalog-owned, always run, and configless.
         let mut robot = base();
         robot
             .services
-            .insert("joypad".to_string(), UserService { config: None });
+            .insert("drive".to_string(), UserService { config: None });
         let error = super::validate_runtime_declarations(&robot)
-            .expect_err("an official tool name in services: is rejected")
+            .expect_err("an official service name in services: is rejected")
             .to_string();
-        assert!(error.contains("official tool"), "{error}");
+        assert!(error.contains("official service"), "{error}");
 
-        // A non-official user name in either map is accepted.
+        // A non-official user name is accepted.
         let mut robot = base();
         robot
-            .tools
-            .insert("lidar-viz".to_string(), UserTool { config: None });
-        super::validate_runtime_declarations(&robot).expect("a user tool name is accepted");
+            .services
+            .insert("lidar-viz".to_string(), UserService { config: None });
+        super::validate_runtime_declarations(&robot).expect("a user service name is accepted");
         Ok(())
     }
 
@@ -887,10 +816,6 @@ services:
   mission:
     config:
       speed: 1
-tools:
-  lidar-viz:
-    config:
-      port: 9000
 "#;
 
     /// Synthesize an object file of a given architecture carrying the phoxal
@@ -918,7 +843,6 @@ tools:
             "schema": phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA,
             "id": id,
             "kind": kind,
-            "class": "checked",
             "config_schema": schema,
         }))
         .expect("metadata serializes")
@@ -1133,27 +1057,6 @@ robot:
         assert!(
             error.contains("unsupported compiled participant schema"),
             "{error}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn declared_user_tools_are_required_under_their_identity() -> Result<()> {
-        let dir = write_layout(ROBOT_YAML)?;
-        let layout = RuntimeLayout::open(dir.path())?;
-        let required = layout.required_runtimes(&DriverSelection::All);
-        let tool = required
-            .iter()
-            .find(|runtime| runtime.identity == "lidar-viz")
-            .expect("declared user tool is required (#950)");
-        assert_eq!(tool.kind, RequiredRuntimeKind::UserTool);
-        assert_eq!(tool.binary_name, "lidar-viz");
-        assert_eq!(
-            tool.config
-                .as_ref()
-                .and_then(|config| config.get("port"))
-                .and_then(serde_json::Value::as_u64),
-            Some(9000)
         );
         Ok(())
     }

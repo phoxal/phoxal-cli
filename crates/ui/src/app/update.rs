@@ -179,7 +179,6 @@ pub(crate) fn process_is_runtime(process: &ProcessObservation) -> bool {
 fn is_known_internal_id(id: &str) -> bool {
     id.eq_ignore_ascii_case("phoxal-cli")
         || starts_with_ignore_ascii_case(id, "phoxal-cli/")
-        || starts_with_ignore_ascii_case(id, "tool-")
         || id.eq_ignore_ascii_case("supervisor")
         || id.eq_ignore_ascii_case(phoxal_cli_core::runtime::WEBOTS_PROCESS_ID)
         || starts_with_ignore_ascii_case(id, "webots-")
@@ -272,7 +271,7 @@ fn log_matches_source(source: LogSourceFilter, row: &LogRow, processes: &Process
     match source {
         LogSourceFilter::All => true,
         LogSourceFilter::Runtimes => runtime,
-        LogSourceFilter::Tools => !runtime,
+        LogSourceFilter::System => !runtime,
     }
 }
 
@@ -976,9 +975,9 @@ mod tests {
     }
 
     #[test]
-    fn log_source_filter_separates_runtime_participants_from_tools() {
+    fn log_source_filter_separates_runtime_participants_from_host_processes() {
         let runtime_key = ProcessKey::project("drive");
-        let tool_key = ProcessKey::project("log");
+        let tool_key = ProcessKey::project("webots");
         let processes = BTreeMap::from([
             (
                 runtime_key.clone(),
@@ -986,7 +985,7 @@ mod tests {
             ),
             (
                 tool_key.clone(),
-                process_with_kind(tool_key, ParticipantKind::Tool),
+                process_with_kind(tool_key, ParticipantKind::Host),
             ),
         ]);
         let row = |participant: &str| LogRow {
@@ -1004,25 +1003,25 @@ mod tests {
             &processes
         ));
         assert!(!log_matches_source(
-            LogSourceFilter::Tools,
+            LogSourceFilter::System,
             &row("drive"),
             &processes
         ));
         assert!(log_matches_source(
-            LogSourceFilter::Tools,
+            LogSourceFilter::System,
             &row("log"),
             &processes
         ));
         assert!(
-            log_matches_source(LogSourceFilter::Tools, &row("phoxal-cli"), &processes),
-            "unmatched local diagnostics belong to the tools stream"
+            log_matches_source(LogSourceFilter::System, &row("phoxal-cli"), &processes),
+            "unmatched local diagnostics belong to the system stream"
         );
         let internal_key = ProcessKey::project("supervisor");
         let mut internal = process_with_kind(internal_key.clone(), ParticipantKind::Service);
         internal.user_service = false;
         let processes = BTreeMap::from([(internal_key, internal)]);
         assert!(log_matches_source(
-            LogSourceFilter::Tools,
+            LogSourceFilter::System,
             &row("supervisor"),
             &processes
         ));
@@ -1265,7 +1264,7 @@ mod tests {
         model.runtimes.detail = Some(key.clone());
         let processes = Arc::new(BTreeMap::from([(
             key.clone(),
-            process_with_kind(key, ParticipantKind::Tool),
+            process_with_kind(key, ParticipantKind::Host),
         )]));
         let effects = update(
             &mut model,

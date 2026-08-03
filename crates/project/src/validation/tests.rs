@@ -6,15 +6,14 @@ use super::participants::{
 use super::*;
 use anyhow::{Result, anyhow, bail};
 use graph_check::Problem;
-use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind, ToolParticipant};
+use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind};
 use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, ROBOT_TOOL_DEVICE, ROBOT_TOOL_JOYPAD, build_launch_plan,
+    CheckedRobotLaunchInput, LaunchMode, build_launch_plan,
 };
 use phoxal_cli_core::project::resolver::{
-    BundlePlan, ResolveOptions, ResolvedComponent, ResolvedComponentDriver,
-    ResolvedPlatformRuntime, ResolvedTool,
+    BundlePlan, ResolveOptions, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
 };
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 use std::path::{Path, PathBuf};
@@ -103,8 +102,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
     )?;
     // `ddsm115` resolves from the `components/` workspace crate above -
     // no network, unlike a registry-resolved component.
-    let mut resolved = resolve(&robot, temp.path(), ResolveOptions::default())?;
-    add_launch_plan_robot_tools(&mut resolved);
+    let resolved = resolve(&robot, temp.path(), ResolveOptions::default())?;
     let source_participants = vec![
         SourceParticipant::user_service("mission", temp.path().join("services/mission")),
         SourceParticipant::component_driver_with_artifact_id(
@@ -121,7 +119,6 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
     let platform_refs = platform_artifact_refs_from_resolved(&resolved);
     let outcome = run_check_with_context(
         &platform_refs,
-        &[],
         &source_participants,
         CheckGraphContext {
             robot: Some(&robot),
@@ -136,11 +133,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
                 &participant.name,
             ))
         },
-        |_| bail!("no tools in this check fixture"),
         |source| match source.kind {
-            SourceParticipantKind::UserTool => {
-                Ok(launch_plan_raw_participant_report("tool", &source.name))
-            }
             SourceParticipantKind::UserService => {
                 Ok(launch_plan_raw_participant_report("service", &source.name))
             }
@@ -150,10 +143,6 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
             )),
             SourceParticipantKind::OfficialService => Ok(launch_plan_raw_participant_report(
                 "service",
-                &source.expected_artifact_id,
-            )),
-            SourceParticipantKind::Tool => Ok(launch_plan_raw_participant_report(
-                "tool",
                 &source.expected_artifact_id,
             )),
             SourceParticipantKind::Simulator => Ok(launch_plan_raw_participant_report(
@@ -194,11 +183,12 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
     }
     assert!(participant_ids.contains(&"left_drive"));
     assert!(participant_ids.contains(&"right_drive"));
-    assert!(participant_ids.contains(&"tool-bus-testbot"));
-    assert!(participant_ids.contains(&"tool-log-testbot"));
-    assert!(participant_ids.contains(&"tool-telemetry-testbot"));
-    assert!(participant_ids.contains(&"tool-device-testbot"));
-    assert!(participant_ids.contains(&"tool-joypad-testbot"));
+    // No `tool-*` participant survives: the supervisor absorbed the resident
+    // tools and the joypad became a local CLI concern (organization#978).
+    assert!(
+        !participant_ids.iter().any(|id| id.starts_with("tool-")),
+        "the tool concept is gone: {participant_ids:?}"
+    );
     assert_eq!(
         participant_ids
             .iter()
@@ -243,108 +233,7 @@ fn launch_plan_raw_participant_report(kind: &str, id: &str) -> RawParticipantRep
             kind: kind.to_string(),
             id: id.to_string(),
         },
-        participant_class: "checked".to_string(),
         config_schema: None,
-    }
-}
-
-#[test]
-fn a_user_tool_is_checked_and_its_config_is_validated() -> Result<()> {
-    // A declared user tool is an ordinary checked participant (#950): its
-    // embedded metadata must be kind `tool`, and its `tools.<id>.config` is
-    // validated against the emitted schema exactly like a user service.
-    let robot = phoxal_manifest::source::robot::parse_from_string(
-        r#"schema: robot/v0
-robot:
-  id: bot
-  namespace: dev
-  motion_limits:
-    max_linear_speed_mps: 0.6
-    max_angular_speed_radps: 2.0
-  kinematic:
-    kind: omnidirectional
-    actuators: []
-    encoders: []
-  components: {}
-tools:
-  lidar-viz:
-    config:
-      port: 9000
-"#,
-    )?;
-    let source = vec![SourceParticipant::user_tool(
-        "lidar-viz",
-        std::path::PathBuf::from("tools/lidar-viz"),
-    )];
-
-    // The tool emits a schema requiring a STRING port; the authored 9000 is an
-    // integer, so the check must surface an InvalidConfig problem for it.
-    let build = |participant: &SourceParticipant| {
-        let mut raw = launch_plan_raw_participant_report("tool", &participant.name);
-        raw.config_schema = Some(serde_json::json!({
-            "type": "object",
-            "properties": {"port": {"type": "string"}},
-            "required": ["port"],
-        }));
-        Ok(raw)
-    };
-    let outcome = run_check_with_context(
-        &[],
-        &[],
-        &source,
-        CheckGraphContext {
-            robot: Some(&robot),
-        },
-        |artifact_ref| bail!("unexpected official artifact {artifact_ref}"),
-        |_| bail!("no privileged tools in this fixture"),
-        build,
-    )?;
-    let problems = format!("{outcome:?}");
-    assert!(
-        problems.contains("lidar-viz") && problems.to_lowercase().contains("config"),
-        "user-tool config must be validated: {problems}"
-    );
-
-    // The kind gate rejects a user tool whose binary emits a non-tool kind.
-    let bad_kind = |participant: &SourceParticipant| {
-        Ok(launch_plan_raw_participant_report(
-            "service",
-            &participant.name,
-        ))
-    };
-    let error = run_check_with_context(
-        &[],
-        &[],
-        &source,
-        CheckGraphContext {
-            robot: Some(&robot),
-        },
-        |artifact_ref| bail!("unexpected official artifact {artifact_ref}"),
-        |_| bail!("no privileged tools in this fixture"),
-        bad_kind,
-    )
-    .expect_err("a user tool emitting a non-tool kind must fail identity validation");
-    assert!(format!("{error:#}").contains("kind"), "{error:#}");
-    Ok(())
-}
-
-fn add_launch_plan_robot_tools(resolved: &mut BundlePlan) {
-    resolved.tools.push(launch_plan_tool("tool-bus"));
-    resolved.tools.push(launch_plan_tool(ROBOT_TOOL_JOYPAD));
-    resolved.tools.push(launch_plan_tool("tool-log"));
-    resolved.tools.push(launch_plan_tool("tool-telemetry"));
-    resolved.tools.push(launch_plan_tool(ROBOT_TOOL_DEVICE));
-}
-
-fn launch_plan_tool(name: &str) -> ResolvedTool {
-    ResolvedTool {
-        kind: ArtifactKind::Tool,
-        name: name.to_string(),
-        package: format!("phoxal/{name}"),
-        binary_name: name.to_string(),
-        path_override: None,
-        train: "0.36.0".to_string(),
-        target: crate::resolve::project::host_target_triple(),
     }
 }
 
@@ -420,14 +309,12 @@ fn healthy_graph_passes_with_fake_participant_report() -> Result<()> {
 
     let outcome = run_check_with_context(
         &platform_refs(&images),
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |image_ref| match image_ref {
             "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
-        |_| bail!("no tools should be fetched"),
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/drive") {
@@ -453,14 +340,12 @@ fn healthy_graph_passes_with_platform_and_component_driver_source() -> Result<()
 
     let outcome = run_check_with_context(
         &platform_refs(&images),
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |image_ref| match image_ref {
             "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
-        |_| bail!("no tools should be fetched"),
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/components/ddsm115") {
@@ -476,75 +361,6 @@ fn healthy_graph_passes_with_platform_and_component_driver_source() -> Result<()
 }
 
 #[test]
-fn privileged_tools_and_checked_sources_coexist_in_one_graph() -> Result<()> {
-    // A privileged tool and a checked source participant appear in the same
-    // check run without incident.
-    let tools = vec![ToolParticipant {
-        name: "joypad".to_string(),
-        binary_path: PathBuf::from("/fake/cache/joypad"),
-    }];
-    let sources = vec![SourceParticipant::user_service(
-        "drive".to_string(),
-        PathBuf::from("/fake/project/runtimes/drive"),
-    )];
-
-    let outcome = run_check_with_context(
-        &[],
-        &tools,
-        &sources,
-        CheckGraphContext { robot: None },
-        |_| bail!("no platform images should be fetched"),
-        |tool| {
-            let path = tool.binary_path.as_path();
-            if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("tool", "joypad", "privileged"))
-            } else {
-                bail!("unexpected tool path {}", path.display())
-            }
-        },
-        |participant| {
-            let dir = participant.crate_dir.as_path();
-            if dir == Path::new("/fake/project/runtimes/drive") {
-                Ok(raw("drive"))
-            } else {
-                bail!("unexpected source dir {}", dir.display())
-            }
-        },
-    )?;
-
-    assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
-    Ok(())
-}
-
-#[test]
-fn privileged_tools_are_exempt_from_topology() -> Result<()> {
-    let tools = vec![ToolParticipant {
-        name: "joypad".to_string(),
-        binary_path: PathBuf::from("/fake/cache/joypad"),
-    }];
-
-    let outcome = run_check_with_context(
-        &[],
-        &tools,
-        &[],
-        CheckGraphContext { robot: None },
-        |_| bail!("no platform images should be fetched"),
-        |tool| {
-            let path = tool.binary_path.as_path();
-            if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("tool", "joypad", "privileged"))
-            } else {
-                bail!("unexpected tool path {}", path.display())
-            }
-        },
-        |_| bail!("no source services should be built"),
-    )?;
-
-    assert!(outcome.report.problems.is_empty());
-    Ok(())
-}
-
-#[test]
 fn source_and_platform_participants_coexist_in_a_healthy_graph() -> Result<()> {
     // A platform participant and a source participant both check clean.
     let images = vec![("mission".to_string(), "mission:ok".to_string())];
@@ -555,14 +371,12 @@ fn source_and_platform_participants_coexist_in_a_healthy_graph() -> Result<()> {
 
     let outcome = run_check_with_context(
         &platform_refs(&images),
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |image_ref| match image_ref {
             "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
-        |_| bail!("no tools should be fetched"),
         |_| Ok(raw("drive")),
     )?;
 
@@ -579,11 +393,9 @@ fn user_service_artifact_id_must_match_manifest_key() {
 
     let error = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
         |_| Ok(raw("surprise")),
     )
     .expect_err("mismatched user service artifact id should abort check");
@@ -603,13 +415,11 @@ fn official_service_artifact_identity_must_match_resolved_name() {
     let error = run_check_with_context(
         &platform_refs(&images),
         &[],
-        &[],
         CheckGraphContext { robot: None },
         |image_ref| match image_ref {
             "drive:swapped" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
-        |_| bail!("no tools should be fetched"),
         |_| bail!("no source services should be built"),
     )
     .expect_err("swapped official service artifact should abort check");
@@ -634,13 +444,11 @@ fn official_driver_artifact_identity_uses_driver_label() {
     let error = run_check_with_context(
         &artifacts,
         &[],
-        &[],
         CheckGraphContext { robot: None },
         |artifact_ref| match artifact_ref {
             "driver-bno085:swapped" => Ok(raw_kind("service", "bno085")),
             unexpected => bail!("unexpected artifact {unexpected}"),
         },
-        |_| bail!("no tools should be fetched"),
         |_| bail!("no source services should be built"),
     )
     .expect_err("wrong official driver kind should abort check");
@@ -649,105 +457,6 @@ fn official_driver_artifact_identity_uses_driver_label() {
     assert!(
         message.contains("official driver participant report artifact.kind 'service'")
             && message.contains("expected kind 'driver'"),
-        "{message}"
-    );
-}
-
-#[test]
-fn tool_artifact_identity_must_match_resolved_tool() {
-    let tools = vec![ToolParticipant {
-        name: "joypad".to_string(),
-        binary_path: PathBuf::from("/fake/cache/joypad"),
-    }];
-
-    let error = run_check_with_context(
-        &[],
-        &tools,
-        &[],
-        CheckGraphContext { robot: None },
-        |_| bail!("no platform images should be fetched"),
-        |tool| {
-            let path = tool.binary_path.as_path();
-            if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class(
-                    "tool",
-                    "simulator_webots_controller",
-                    "privileged",
-                ))
-            } else {
-                bail!("unexpected tool path {}", path.display())
-            }
-        },
-        |_| bail!("no source services should be built"),
-    )
-    .expect_err("swapped tool binary should abort check");
-
-    let message = error.to_string();
-    assert!(
-        message.contains("tool participant report artifact.id 'simulator_webots_controller'")
-            && message.contains("expected artifact id 'joypad'"),
-        "{message}"
-    );
-}
-
-#[test]
-fn tool_artifact_kind_true_kind_is_accepted() -> Result<()> {
-    let tools = vec![ToolParticipant {
-        name: "joypad".to_string(),
-        binary_path: PathBuf::from("/fake/cache/joypad"),
-    }];
-
-    let outcome = run_check_with_context(
-        &[],
-        &tools,
-        &[],
-        CheckGraphContext { robot: None },
-        |_| bail!("no platform images should be fetched"),
-        |tool| {
-            let path = tool.binary_path.as_path();
-            if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("tool", "joypad", "privileged"))
-            } else {
-                bail!("unexpected tool path {}", path.display())
-            }
-        },
-        |_| bail!("no source services should be built"),
-    )?;
-
-    assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
-    Ok(())
-}
-
-#[test]
-fn tool_artifact_kind_legacy_runtime_is_rejected() {
-    let tools = vec![ToolParticipant {
-        name: "joypad".to_string(),
-        binary_path: PathBuf::from("/fake/cache/joypad"),
-    }];
-
-    let error = run_check_with_context(
-        &[],
-        &tools,
-        &[],
-        CheckGraphContext { robot: None },
-        |_| bail!("no platform images should be fetched"),
-        |tool| {
-            let path = tool.binary_path.as_path();
-            if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("runtime", "joypad", "privileged"))
-            } else {
-                bail!("unexpected tool path {}", path.display())
-            }
-        },
-        |_| bail!("no source services should be built"),
-    )
-    .expect_err("tool binary reporting legacy runtime kind should abort check");
-
-    let message = error.to_string();
-    assert!(
-        message.contains(
-            "tool participant report artifact.kind 'runtime' does not match the expected kind 'tool'"
-        ),
         "{message}"
     );
 }
@@ -762,12 +471,10 @@ fn component_driver_artifact_kind_true_kind_is_accepted() -> Result<()> {
 
     let outcome = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
-        |_| Ok(raw_kind_class("driver", "ddsm115", "checked")),
+        |_| Ok(raw_kind("driver", "ddsm115")),
     )?;
 
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -784,12 +491,10 @@ fn component_driver_artifact_kind_legacy_runtime_is_rejected() {
 
     let error = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
-        |_| Ok(raw_kind_class("runtime", "ddsm115", "checked")),
+        |_| Ok(raw_kind("runtime", "ddsm115")),
     )
     .expect_err("component driver reporting legacy runtime kind should abort check");
 
@@ -800,39 +505,6 @@ fn component_driver_artifact_kind_legacy_runtime_is_rejected() {
             ),
             "{message}"
         );
-}
-
-#[test]
-fn tool_artifact_kind_garbage_is_rejected() {
-    let tools = vec![ToolParticipant {
-        name: "joypad".to_string(),
-        binary_path: PathBuf::from("/fake/cache/joypad"),
-    }];
-
-    let error = run_check_with_context(
-        &[],
-        &tools,
-        &[],
-        CheckGraphContext { robot: None },
-        |_| bail!("no platform images should be fetched"),
-        |tool| {
-            let path = tool.binary_path.as_path();
-            if path == Path::new("/fake/cache/joypad") {
-                Ok(raw_kind_class("nonsense", "joypad", "privileged"))
-            } else {
-                bail!("unexpected tool path {}", path.display())
-            }
-        },
-        |_| bail!("no source services should be built"),
-    )
-    .expect_err("tool binary reporting a garbage kind should abort check");
-
-    let message = error.to_string();
-    assert!(
-        message.contains("tool participant report artifact.kind 'nonsense'")
-            && message.contains("expected kind 'tool'"),
-        "{message}"
-    );
 }
 
 #[test]
@@ -860,11 +532,9 @@ fn every_source_participant_always_builds_no_scoping_no_cache() -> Result<()> {
     let mut built = Vec::new();
     let outcome = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
         |participant| {
             let dir = participant.crate_dir.as_path();
             built.push(dir.to_path_buf());
@@ -911,11 +581,9 @@ fn component_driver_with_no_producer_is_a_legal_graph() -> Result<()> {
 
     let outcome = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/other") {
@@ -947,11 +615,9 @@ fn user_service_with_no_producer_is_a_legal_graph() -> Result<()> {
 
     let outcome = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
         |participant| {
             let dir = participant.crate_dir.as_path();
             if dir == Path::new("/fake/project/runtimes/bad") {
@@ -983,14 +649,12 @@ fn component_driver_and_platform_participants_coexist_in_a_healthy_graph() -> Re
 
     let outcome = run_check_with_context(
         &platform_refs(&images),
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |image_ref| match image_ref {
             "mission:ok" => Ok(raw("mission")),
             unexpected => bail!("unexpected image {unexpected}"),
         },
-        |_| bail!("no tools should be fetched"),
         |_| Ok(raw_kind("driver", "ddsm115")),
     )?;
 
@@ -1013,11 +677,9 @@ fn source_build_error_is_a_hard_error() {
 
     let error = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
         |_| Err(anyhow!("source build failed")),
     )
     .expect_err("source build failures should abort check");
@@ -1040,11 +702,9 @@ fn component_driver_build_error_is_a_hard_error() {
 
     let error = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
         |_| Err(anyhow!("component build failed")),
     )
     .expect_err("component driver build failures should abort check");
@@ -1090,11 +750,9 @@ fn components_without_drivers_are_not_built() -> Result<()> {
     let mut built = Vec::new();
     let outcome = run_check_with_context(
         &[],
-        &[],
         &source_participants,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
         |participant| {
             let dir = participant.crate_dir.as_path();
             built.push(dir.to_path_buf());
@@ -1216,7 +874,6 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
     let mut fetch_calls = 0;
     let outcome = run_check_with_context(
         &platform_refs,
-        &[],
         &source_participants,
         CheckGraphContext { robot: None },
         |artifact_ref| {
@@ -1224,7 +881,6 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
             assert_eq!(artifact_ref, "phoxal-component-ddsm115");
             Ok(raw_kind("driver", "ddsm115"))
         },
-        |_| bail!("no tools should be fetched"),
         |_| bail!("no source participants should be built"),
     )?;
 
@@ -1303,11 +959,9 @@ fn path_overridden_service_enters_check_through_source_participant_report() -> R
     );
     let outcome = run_check_with_context(
         &platform_refs,
-        &[],
         &source_participants,
         CheckGraphContext { robot: None },
         |_| bail!("path-overridden service should not read registry metadata"),
-        |_| bail!("no tools in this fixture"),
         |participant| {
             assert_eq!(participant.kind, SourceParticipantKind::OfficialService);
             Ok(raw_kind("service", "drive"))
@@ -1315,16 +969,6 @@ fn path_overridden_service_enters_check_through_source_participant_report() -> R
     )?;
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
     Ok(())
-}
-
-#[test]
-fn raw_participant_report_unknown_participant_class_is_rejected() {
-    let mut raw = raw("drive");
-    raw.participant_class = "future".to_string();
-    let error = graph_check::ParticipantApis::try_from(raw)
-        .expect_err("an unknown participant class must fail closed")
-        .to_string();
-    assert!(error.contains("future"), "{error}");
 }
 
 #[test]
@@ -1338,7 +982,6 @@ fn user_service_config_is_validated_against_emitted_schema() -> Result<()> {
             kind: "service".to_string(),
             id: "avoid".to_string(),
         },
-        participant_class: "checked".to_string(),
         config_schema: Some(serde_json::json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "title": "Config",
@@ -1363,13 +1006,11 @@ fn user_service_config_is_validated_against_emitted_schema() -> Result<()> {
 
         run_check_with_context(
             &[],
-            &[],
             &sources,
             CheckGraphContext {
                 robot: Some(&robot),
             },
             |_| bail!("no platform images should be fetched"),
-            |_| bail!("no tools should be fetched"),
             |_| Ok(emitted.clone()),
         )
     };
@@ -1420,11 +1061,9 @@ fn absent_user_service_config_validates_as_null() -> Result<()> {
 
     let outcome = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
         |_| {
             let mut raw = raw("optional");
             raw.config_schema = Some(serde_json::json!({ "type": "null" }));
@@ -1453,11 +1092,9 @@ fn absent_user_service_config_still_fails_required_object_schema() -> Result<()>
 
     let outcome = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext { robot: None },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
         |_| {
             let mut raw = raw("required");
             raw.config_schema = Some(serde_json::json!({
@@ -1502,13 +1139,11 @@ fn user_service_config_uses_full_json_schema_keywords() -> Result<()> {
 
     let outcome = run_check_with_context(
         &[],
-        &[],
         &sources,
         CheckGraphContext {
             robot: Some(&robot),
         },
         |_| bail!("no platform images should be fetched"),
-        |_| bail!("no tools should be fetched"),
         |_| {
             let mut raw = raw("avoid");
             raw.config_schema = Some(serde_json::json!({
@@ -1569,16 +1204,11 @@ fn raw(id: &str) -> RawParticipantReport {
 }
 
 fn raw_kind(kind: &str, id: &str) -> RawParticipantReport {
-    raw_kind_class(kind, id, "checked")
-}
-
-fn raw_kind_class(kind: &str, id: &str, participant_class: &str) -> RawParticipantReport {
     RawParticipantReport {
         artifact: RawArtifact {
             kind: kind.to_string(),
             id: id.to_string(),
         },
-        participant_class: participant_class.to_string(),
         config_schema: None,
     }
 }
@@ -1592,10 +1222,8 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Bundle
         platform_runtimes: Vec::new(),
         simulators: Vec::new(),
         user_runtimes: Vec::new(),
-        user_tools: Vec::new(),
         undeclared_runtimes: Vec::new(),
         components,
-        tools: Vec::new(),
         path_overrides: Vec::new(),
     })
 }

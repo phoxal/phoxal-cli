@@ -9,17 +9,12 @@ use anyhow::Result;
 use phoxal_cli_core::check as graph_check;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
-use phoxal_cli_core::check::source::ToolParticipant;
-use phoxal_cli_core::project::catalog::ArtifactKind;
-use phoxal_cli_core::project::resolver::tool_participant_id;
 
 pub fn run_check_with_context(
     resolved_platform_artifact_refs: &[PlatformArtifactRef],
-    tool_participants: &[ToolParticipant],
     source_participants: &[SourceParticipant],
     context: CheckGraphContext<'_>,
     mut fetch: impl FnMut(&str) -> Result<RawParticipantReport>,
-    mut fetch_tool: impl FnMut(&ToolParticipant) -> Result<RawParticipantReport>,
     mut build: impl FnMut(&SourceParticipant) -> Result<RawParticipantReport>,
 ) -> Result<CheckOutcome> {
     let mut participants = Vec::new();
@@ -34,14 +29,9 @@ pub fn run_check_with_context(
                 artifact.name
             )
         })?;
-        let expected_artifact_id = if artifact.kind == ArtifactKind::Tool {
-            tool_participant_id(&artifact.name)
-        } else {
-            &artifact.name
-        };
         validate_artifact_identity(
             artifact.kind_label(),
-            expected_artifact_id,
+            &artifact.name,
             artifact.kind.wire_kind(),
             &raw,
         )?;
@@ -69,27 +59,6 @@ pub fn run_check_with_context(
                 participants.push(instance_participant);
             }
         }
-    }
-
-    for tool in tool_participants {
-        let raw = fetch_tool(tool).with_context(|| {
-            format!(
-                "failed to obtain participant report for tool {} ({})",
-                tool.name,
-                tool.binary_path.display()
-            )
-        })?;
-        let expected_id = tool_participant_id(&tool.name);
-        validate_artifact_identity("tool", expected_id, "tool", &raw)?;
-        let participant =
-            graph_check::ParticipantApis::try_from(raw.clone()).with_context(|| {
-                format!(
-                    "failed to interpret participant report for tool {} ({})",
-                    tool.name,
-                    tool.binary_path.display()
-                )
-            })?;
-        participants.push(participant);
     }
 
     for participant in source_participants {
@@ -124,18 +93,6 @@ pub fn run_check_with_context(
                 &participant.name,
                 participant_apis.config_schema.as_ref(),
                 context.robot,
-            )
-        {
-            config_problems.push(problem);
-        } else if participant.kind == SourceParticipantKind::UserTool
-            && let Some(problem) = crate::validation::validate_user_runtime_config(
-                &participant.name,
-                participant_apis.config_schema.as_ref(),
-                context
-                    .robot
-                    .and_then(|robot| robot.tools.get(&participant.name))
-                    .and_then(|tool| tool.config.as_ref()),
-                "tools",
             )
         {
             config_problems.push(problem);

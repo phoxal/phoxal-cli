@@ -212,7 +212,7 @@ fn selected_router_endpoint_reaches_plan_and_spawn_environment() {
     let spec = ParticipantSpec {
         key: phoxal_cli_core::runtime::ProcessKey::project("tool-bus"),
         id: "tool-bus".to_string(),
-        kind: ParticipantKind::Tool,
+        kind: ParticipantKind::Host,
         executable: PathBuf::from("/tmp/tool-bus"),
         args: Vec::new(),
         cwd: None,

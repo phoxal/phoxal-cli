@@ -105,6 +105,9 @@ pub(crate) struct PreparedRun {
     /// The runtime layout this run was staged into. The supervisor serves
     /// declared assets from below it (organization#978).
     pub(crate) staged_root: std::path::PathBuf,
+    /// Whether this robot can be driven by manual input, carried to the client
+    /// on the supervisor snapshot (organization#978).
+    pub(crate) manual_input: phoxal_cli_protocol::ManualInput,
 }
 
 /// Resources assembled after preparation but before the controller enters
@@ -949,6 +952,7 @@ async fn prepare_run(
         specs,
         router: prepared.router,
         staged_root: prepared.staged_root,
+        manual_input: prepared.manual_input,
     })
 }
 
@@ -987,19 +991,15 @@ fn launch_kind_label(
     execution: Option<&phoxal_cli_core::project::launch_plan::ParticipantExecution>,
 ) -> &'static str {
     match execution {
-        None => "robot-tool",
-        Some(
-            phoxal_cli_core::project::launch_plan::ParticipantExecution::OfficialArtifact {
-                ..
-            }
-            | phoxal_cli_core::project::launch_plan::ParticipantExecution::OfficialTool { .. },
-        ) => "official",
+        // A CLI-managed host process (the Webots binary) has no plan
+        // execution: it is launched by the resident, not resolved from `bin/`.
+        None => "host",
+        Some(phoxal_cli_core::project::launch_plan::ParticipantExecution::OfficialArtifact {
+            ..
+        }) => "official",
         Some(phoxal_cli_core::project::launch_plan::ParticipantExecution::UserService {
             ..
         }) => "user-service",
-        Some(phoxal_cli_core::project::launch_plan::ParticipantExecution::UserTool { .. }) => {
-            "user-tool"
-        }
         Some(phoxal_cli_core::project::launch_plan::ParticipantExecution::ComponentDriver {
             ..
         }) => "driver",
@@ -1012,17 +1012,11 @@ mod launch_kind_tests {
     use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 
     #[test]
-    fn launch_kind_labels_cover_every_execution_variant_and_robot_tools() {
+    fn launch_kind_labels_cover_every_execution_variant_and_host_processes() {
         let binary_name = || "fixture".to_string();
-        assert_eq!(launch_kind_label(None), "robot-tool");
+        assert_eq!(launch_kind_label(None), "host");
         assert_eq!(
             launch_kind_label(Some(&ParticipantExecution::OfficialArtifact {
-                binary_name: binary_name()
-            })),
-            "official"
-        );
-        assert_eq!(
-            launch_kind_label(Some(&ParticipantExecution::OfficialTool {
                 binary_name: binary_name()
             })),
             "official"
@@ -1032,12 +1026,6 @@ mod launch_kind_tests {
                 binary_name: binary_name()
             })),
             "user-service"
-        );
-        assert_eq!(
-            launch_kind_label(Some(&ParticipantExecution::UserTool {
-                binary_name: binary_name()
-            })),
-            "user-tool"
         );
         assert_eq!(
             launch_kind_label(Some(&ParticipantExecution::ComponentDriver {
@@ -1254,6 +1242,9 @@ pub(crate) async fn live_run_setup(
     // no longer a board row: it is this process, so a separate "ready" process
     // state for it could only ever restate that the supervisor is running.
     prepared.board.set_router_endpoint(connect.clone());
+    prepared
+        .board
+        .set_manual_input(prepared.manual_input.clone());
     ui.info(format!(
         "launch plan resolved: {} robot(s)",
         prepared.plan.robots.len()
@@ -1496,7 +1487,7 @@ mod tests {
         let specs = [ParticipantSpec {
             key: ProcessKey::project("fixture"),
             id: "fixture".to_string(),
-            kind: ParticipantKind::Tool,
+            kind: ParticipantKind::Host,
             executable: PathBuf::from("fixture-command"),
             args: Vec::new(),
             cwd: None,
@@ -1524,7 +1515,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0], "resolved launch participants:");
-        assert!(messages[1].contains("fixture (robot-tool) -> fixture-command"));
+        assert!(messages[1].contains("fixture (host) -> fixture-command"));
         assert!(messages[2].starts_with("motion guarantees:"));
         Ok(())
     }

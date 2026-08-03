@@ -11,7 +11,7 @@ mod target;
 
 pub use launch::{
     EncodedParticipantEnv, ParticipantLaunchCommand, ParticipantSpec, RestartPolicy,
-    encode_participant_env, encode_tool_env,
+    encode_participant_env,
 };
 pub use lifecycle::{
     ParticipantState, ProjectLifecycle, ReadinessPolicy, RuntimeFailurePolicy,

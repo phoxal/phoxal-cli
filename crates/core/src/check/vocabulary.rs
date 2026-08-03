@@ -5,7 +5,6 @@ pub struct ParticipantApis {
     pub participant_id: String,
     pub artifact_id: String,
     pub participant_kind: ParticipantKind,
-    pub participant_class: ParticipantClass,
     pub config_schema: Option<serde_json::Value>,
     pub scope: ParticipantScope,
 }
@@ -14,7 +13,6 @@ pub struct ParticipantApis {
 pub enum ParticipantKind {
     Service,
     Driver,
-    Tool,
     Simulator,
     Other(String),
 }
@@ -25,7 +23,6 @@ impl ParticipantKind {
         match value {
             "service" => Self::Service,
             "driver" => Self::Driver,
-            "tool" => Self::Tool,
             "simulator" => Self::Simulator,
             other => Self::Other(other.to_string()),
         }
@@ -36,7 +33,6 @@ impl ParticipantKind {
         match self {
             Self::Service => "service",
             Self::Driver => "driver",
-            Self::Tool => "tool",
             Self::Simulator => "simulator",
             Self::Other(kind) => kind,
         }
@@ -45,29 +41,6 @@ impl ParticipantKind {
     #[must_use]
     pub const fn is_simulator(&self) -> bool {
         matches!(self, Self::Simulator)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ParticipantClass {
-    #[default]
-    Checked,
-    Privileged,
-}
-
-impl ParticipantClass {
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        Some(match value {
-            "checked" => Self::Checked,
-            "privileged" => Self::Privileged,
-            _ => return None,
-        })
-    }
-
-    #[must_use]
-    pub const fn is_checked(self) -> bool {
-        matches!(self, Self::Checked)
     }
 }
 

@@ -118,7 +118,7 @@ mod tests {
         );
         board.register_planned(
             &key,
-            ParticipantKind::Tool,
+            ParticipantKind::Host,
             phoxal_cli_core::runtime::StartupRequirement::Optional,
         );
         apply_liveliness_event(

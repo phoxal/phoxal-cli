@@ -26,17 +26,10 @@ pub enum RegistryStatus {
     Yanked,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorkspaceRuntimeKind {
-    Service,
-    Tool,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceRuntime {
     pub package: String,
     pub crate_dir: PathBuf,
-    pub kind: WorkspaceRuntimeKind,
     pub binary_names: Vec<String>,
 }
 
@@ -258,12 +251,12 @@ fn discover_workspace_runtimes(
         else {
             continue;
         };
-        let kind = match directory {
-            "services" => WorkspaceRuntimeKind::Service,
-            "tools" => WorkspaceRuntimeKind::Tool,
-            "components" => continue,
-            _ => continue,
-        };
+        // Only `services/` carries workspace runtime crates: components have
+        // their own resolution path, and the tool concept is gone
+        // (organization#978).
+        if directory != "services" {
+            continue;
+        }
         let mut binary_names = package
             .targets
             .iter()
@@ -283,7 +276,6 @@ fn discover_workspace_runtimes(
         runtimes.push(WorkspaceRuntime {
             package: package.name.clone(),
             crate_dir,
-            kind,
             binary_names,
         });
     }
@@ -410,19 +402,21 @@ mod tests {
         };
 
         let runtimes = discover_workspace_runtimes(root.path(), &metadata).unwrap();
-        assert_eq!(runtimes.len(), 2);
-        let runtime = |package: &str| {
-            runtimes
-                .iter()
-                .find(|runtime| runtime.package == package)
-                .unwrap()
-        };
-        assert_eq!(runtime("mission").kind, WorkspaceRuntimeKind::Service);
-        assert_eq!(runtime("mission").binary_names, ["mission"]);
-        assert_eq!(runtime("operator").kind, WorkspaceRuntimeKind::Tool);
-        assert_eq!(runtime("operator").binary_names, ["operator"]);
-        assert!(runtimes.iter().all(|runtime| runtime.package != "passive"));
-        assert!(runtimes.iter().all(|runtime| runtime.package != "wrapped"));
+        assert_eq!(
+            runtimes.len(),
+            1,
+            "only services/ carries workspace runtimes"
+        );
+        assert_eq!(runtimes[0].package, "mission");
+        assert_eq!(runtimes[0].binary_names, ["mission"]);
+        // `tools/` is no longer a runtime family (organization#978), and
+        // `components/` never was one.
+        for ignored in ["operator", "passive", "wrapped"] {
+            assert!(
+                runtimes.iter().all(|runtime| runtime.package != ignored),
+                "{ignored} must not be discovered as a workspace runtime"
+            );
+        }
     }
 
     #[test]

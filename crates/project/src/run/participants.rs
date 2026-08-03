@@ -31,7 +31,7 @@ use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::official_binary_name;
 use phoxal_cli_core::runtime::ParticipantKind;
 use phoxal_cli_core::runtime::ParticipantSpec;
-use phoxal_cli_core::runtime::launch::{encode_participant_env, encode_tool_env};
+use phoxal_cli_core::runtime::launch::encode_participant_env;
 use phoxal_cli_core::runtime::{ParticipantState, ProcessKey, RobotKey};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -81,20 +81,18 @@ pub(crate) fn stage_complete_bin_store(
 ) -> Result<()> {
     let mut staged_names = BTreeSet::new();
     // Source-built user services and workspace/path-overridden component
-    // drivers. Official-service/tool/simulator source overrides are
-    // materialized by the candidate-wide planner, so they are skipped here.
+    // drivers. Official-service/simulator source overrides are materialized by
+    // the candidate-wide planner, so they are skipped here.
     for participant in source_participants {
         let binary_name = match participant.kind {
-            SourceParticipantKind::UserService | SourceParticipantKind::UserTool => {
-                participant.name.clone()
-            }
+            SourceParticipantKind::UserService => participant.name.clone(),
             SourceParticipantKind::ComponentDriver => official_binary_name(
                 ArtifactKind::ComponentDriver,
                 &participant.expected_artifact_id,
             ),
-            SourceParticipantKind::OfficialService
-            | SourceParticipantKind::Tool
-            | SourceParticipantKind::Simulator => continue,
+            SourceParticipantKind::OfficialService | SourceParticipantKind::Simulator => {
+                continue;
+            }
         };
         if !staged_names.insert(binary_name.clone()) {
             continue;
@@ -137,7 +135,7 @@ pub(crate) fn build_layout_specs(
             let key = ProcessKey::robot(robot_key.clone(), &id);
             let (kind, base_local) = participant_kind(&participant.execution);
             // Board-only staging provenance (#936, finding 10): a source-
-            // overridden official or tool runs from the project workspace, so it
+            // overridden official runs from the project workspace, so it
             // has a source cwd here even though its source-free `execution` is
             // byte-identical to a vendored one. Reflect that on the board (local
             // = runs from the robot's own code) WITHOUT touching the plan, which
@@ -148,7 +146,6 @@ pub(crate) fn build_layout_specs(
                 && matches!(
                     participant.execution,
                     ParticipantExecution::OfficialArtifact { .. }
-                        | ParticipantExecution::OfficialTool { .. }
                 );
             let local = base_local || source_overridden_official;
             let mut note = source_overridden_official
@@ -285,7 +282,6 @@ pub(crate) fn prepare_robot_participants(
             let source = resolve_participant_source(
                 staged_root,
                 participant,
-                resolved,
                 &official_by_name,
                 source_dirs,
                 source_artifacts,
@@ -311,7 +307,7 @@ pub(crate) fn prepare_robot_participants(
 
 /// The board `ParticipantKind` plus whether the participant runs from local
 /// (user/robot-owned) code, for a participant's source-free `execution` (#936).
-/// The role alone decides both here: officials and tools are framework binaries
+/// The role alone decides both here: officials are framework binaries
 /// (`local = false`), user services and component drivers are the robot's own
 /// code (`local = true`). An official the robot overrides in its Cargo workspace
 /// still resolves to the one official `bin/` entry, so the PLAN cannot and does
@@ -323,9 +319,7 @@ pub(crate) fn prepare_robot_participants(
 pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (ParticipantKind, bool) {
     match execution {
         ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
-        ParticipantExecution::OfficialTool { .. } => (ParticipantKind::Tool, false),
         ParticipantExecution::UserService { .. } => (ParticipantKind::Service, true),
-        ParticipantExecution::UserTool { .. } => (ParticipantKind::Tool, true),
         ParticipantExecution::ComponentDriver { .. } => (ParticipantKind::Driver, true),
     }
 }
@@ -357,7 +351,7 @@ fn official_runtimes_by_name(resolved: &BundlePlan) -> BTreeMap<&str, &ResolvedP
 /// participant's role and `bin/` binary, so where its bytes come from is
 /// recovered here from the resolved graph and the staging-side `source_dirs`
 /// record: a user service and a workspace-built component driver build
-/// through `cargo` from their crate directory; an official artifact, tool, or
+/// through `cargo` from their crate directory; an official artifact or
 /// registry-provided driver materializes via `cargo install`, straight into
 /// `staged_root/bin/`. The candidate-wide materialization pass has already
 /// completed before this function runs; every registry path therefore only
@@ -365,7 +359,6 @@ fn official_runtimes_by_name(resolved: &BundlePlan) -> BTreeMap<&str, &ResolvedP
 fn resolve_participant_source(
     staged_root: &Path,
     participant: &ParticipantLaunchRecord,
-    resolved: &BundlePlan,
     official_by_name: &BTreeMap<&str, &ResolvedPlatformRuntime>,
     source_dirs: &BTreeMap<String, PathBuf>,
     source_artifacts: &SourceArtifacts,
@@ -381,7 +374,7 @@ fn resolve_participant_source(
         return Ok(prepared);
     }
     match &participant.execution {
-        ParticipantExecution::UserService { .. } | ParticipantExecution::UserTool { .. } => {
+        ParticipantExecution::UserService { .. } => {
             source_dirs.get(id).ok_or_else(|| {
                 anyhow!("staged plan is missing the source crate directory for user runtime {id}")
             })?;
@@ -409,26 +402,6 @@ fn resolve_participant_source(
                 staged.is_file(),
                 "candidate-wide preparation did not materialize component driver '{}' at {}",
                 runtime.name,
-                staged.display()
-            );
-            Ok(staged)
-        }
-        ParticipantExecution::OfficialTool { .. } => {
-            let tool = resolved
-                .tools
-                .iter()
-                .find(|tool| tool.name == participant.artifact_id)
-                .ok_or_else(|| {
-                    anyhow!("resolved graph is missing tool {}", participant.artifact_id)
-                })?;
-            if tool.path_override.is_some() {
-                return source_artifacts.binary_named(&tool.name).map(PathBuf::from);
-            }
-            let staged = staged_root.join("bin").join(&tool.binary_name);
-            anyhow::ensure!(
-                staged.is_file(),
-                "candidate-wide preparation did not materialize tool '{}' at {}",
-                tool.name,
                 staged.display()
             );
             Ok(staged)
@@ -487,7 +460,7 @@ fn stage_and_inspect(
 /// relative asset paths resolve; a vendored official runs from the layout with
 /// no crate context. The crate directory comes from the staging-side record
 /// (user services / workspace drivers) or the resolved graph's path override
-/// (overridden officials and tools).
+/// (overridden officials).
 pub(crate) fn source_cwd(
     participant: &ParticipantLaunchRecord,
     resolved: &BundlePlan,
@@ -495,26 +468,15 @@ pub(crate) fn source_cwd(
 ) -> Option<PathBuf> {
     let id = &participant.launch.participant_id;
     match &participant.execution {
-        ParticipantExecution::UserService { .. }
-        | ParticipantExecution::UserTool { .. }
-        | ParticipantExecution::ComponentDriver { .. } => source_dirs.get(id).cloned(),
+        ParticipantExecution::UserService { .. } | ParticipantExecution::ComponentDriver { .. } => {
+            source_dirs.get(id).cloned()
+        }
         ParticipantExecution::OfficialArtifact { .. } => resolved
             .platform_runtimes
             .iter()
             .find(|runtime| runtime.name == participant.artifact_id)
             .and_then(|runtime| runtime.path_override.clone()),
-        ParticipantExecution::OfficialTool { .. } => resolved
-            .tools
-            .iter()
-            .find(|tool| tool.name == participant.artifact_id)
-            .and_then(|tool| tool.path_override.clone()),
     }
-}
-
-/// Whether a participant launches with tool env (privileged) rather than the
-/// bus-participant env: an official tool, vendored or overridden.
-fn is_tool_execution(execution: &ParticipantExecution) -> bool {
-    matches!(execution, ParticipantExecution::OfficialTool { .. })
 }
 
 /// Assemble the `ParticipantSpec` the supervisor spawns: the staged executable
@@ -527,11 +489,7 @@ fn participant_spec(
     cwd: Option<PathBuf>,
 ) -> Result<ParticipantSpec> {
     let id = participant.launch.participant_id.clone();
-    let env = if is_tool_execution(&participant.execution) {
-        encode_tool_env(&participant.launch)?
-    } else {
-        encode_participant_env(&participant.launch)?
-    };
+    let env = encode_participant_env(&participant.launch)?;
     Ok(ParticipantSpec {
         key: ProcessKey::robot(robot_key.clone(), &id),
         id,
@@ -587,7 +545,7 @@ mod tests {
             object::SectionKind::ReadOnlyData,
         );
         let payload = format!(
-            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{id}","kind":"{kind}","class":"checked","config_schema":{{"type":"null"}}}}"#
+            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{id}","kind":"{kind}","config_schema":{{"type":"null"}}}}"#
         );
         obj.append_section_data(section, payload.as_bytes(), 1);
         obj.write().expect("synthesize object file")
@@ -742,8 +700,6 @@ services:
                         | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserService => {
                             "service"
                         }
-                        phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialTool
-                        | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserTool => "tool",
                         phoxal_cli_core::project::layout::RequiredRuntimeKind::ComponentDriver => {
                             "driver"
                         }
@@ -813,8 +769,6 @@ services:
                         | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserService => {
                             "service"
                         }
-                        phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialTool
-                        | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserTool => "tool",
                         phoxal_cli_core::project::layout::RequiredRuntimeKind::ComponentDriver => {
                             "driver"
                         }

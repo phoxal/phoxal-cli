@@ -95,13 +95,6 @@ impl TryFrom<RawParticipantReport> for graph_check::ParticipantApis {
     fn try_from(raw: RawParticipantReport) -> Result<Self> {
         let artifact_id = raw.artifact.id;
         let participant_kind = graph_check::ParticipantKind::parse(&raw.artifact.kind);
-        let participant_class = graph_check::ParticipantClass::parse(&raw.participant_class)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "participant report carries unknown class '{}'",
-                    raw.participant_class
-                )
-            })?;
         Ok(Self {
             // Default the participant id to the artifact id; callers that launch
             // one artifact per instance (component drivers) override it with the
@@ -109,7 +102,6 @@ impl TryFrom<RawParticipantReport> for graph_check::ParticipantApis {
             participant_id: artifact_id.clone(),
             artifact_id,
             participant_kind,
-            participant_class,
             config_schema: raw.config_schema,
             scope: graph_check::ParticipantScope::Graph,
         })

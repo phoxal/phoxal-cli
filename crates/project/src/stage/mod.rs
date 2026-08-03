@@ -76,7 +76,7 @@ mod tests {
     use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::launch_plan::{ParticipantExecution, ParticipantLaunchRecord};
     use phoxal_cli_core::project::resolver::{
-        BundlePlan, ResolvedComponent, ResolvedPlatformRuntime, ResolvedTool, ResolvedUserRuntime,
+        BundlePlan, ResolvedComponent, ResolvedPlatformRuntime, ResolvedUserRuntime,
         official_binary_name,
     };
     use std::fs;
@@ -108,10 +108,8 @@ robot:
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
-            user_tools: Vec::new(),
             undeclared_runtimes: Vec::new(),
             components: Vec::new(),
-            tools: Vec::new(),
             path_overrides: Vec::new(),
         })
     }
@@ -200,30 +198,18 @@ robot:
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
 
         let mut resolved = bundle_plan()?;
-        // The declaration model (#950): the authored maps are complete - one
-        // declared service (selected), one declared tool, and one discovered
-        // crate that is NOT declared and therefore never enters the compiled
-        // document.
+        // The declaration model (#950): the authored map is complete - one
+        // declared service (selected) and one discovered crate that is NOT
+        // declared and therefore never enters the compiled document.
         resolved.source_manifest.services.insert(
             "mission".to_string(),
             phoxal_manifest::source::robot::v0::UserService {
                 config: Some(serde_json::json!({"speed": 1})),
             },
         );
-        resolved.source_manifest.tools.insert(
-            "lidar-viz".to_string(),
-            phoxal_manifest::source::robot::v0::UserTool {
-                config: Some(serde_json::json!({"port": 9000})),
-            },
-        );
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),
             path: PathBuf::from("services/mission"),
-            source_hash: "hash".to_string(),
-        });
-        resolved.user_tools.push(ResolvedUserRuntime {
-            name: "lidar-viz".to_string(),
-            path: PathBuf::from("tools/lidar-viz"),
             source_hash: "hash".to_string(),
         });
         resolved
@@ -232,20 +218,12 @@ robot:
                 name: "telemetry".to_string(),
                 family: "services",
             });
-        resolved.compiled.participants = vec![
-            phoxal_manifest::Participant {
-                id: "mission".to_string(),
-                kind: phoxal_manifest::ParticipantKind::Service,
-                component_instance: None,
-                config: Some(serde_json::json!({"speed": 1})),
-            },
-            phoxal_manifest::Participant {
-                id: "lidar-viz".to_string(),
-                kind: phoxal_manifest::ParticipantKind::Tool,
-                component_instance: None,
-                config: Some(serde_json::json!({"port": 9000})),
-            },
-        ];
+        resolved.compiled.participants = vec![phoxal_manifest::Participant {
+            id: "mission".to_string(),
+            kind: phoxal_manifest::ParticipantKind::Service,
+            component_instance: None,
+            config: Some(serde_json::json!({"speed": 1})),
+        }];
 
         let staged = stage_runtime_layout(project.path(), &resolved)?;
         let compiled = phoxal_cli_core::project::layout::decode_participants(
@@ -258,10 +236,9 @@ robot:
                 .iter()
                 .map(|participant| participant.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["mission", "lidar-viz"]
+            vec!["mission"]
         );
         assert_eq!(compiled[0].config, Some(serde_json::json!({"speed": 1})));
-        assert_eq!(compiled[1].config, Some(serde_json::json!({"port": 9000})));
         Ok(())
     }
 
@@ -569,9 +546,9 @@ robot:
     /// Every participant, on every host - the darwin path included - gets a flat
     /// `bin/` entry; there is no `.app`-bundle carve-out (#936, finding D). A
     /// robot participant is always a plain executable (a cargo-built binary),
-    /// so even a tool whose source lives under a `.app`-shaped path is
-    /// flattened into `bin/` under its canonical identity, and the loader
-    /// resolves it there with no host-specific tolerance.
+    /// so even one whose source lives under a `.app`-shaped path is flattened
+    /// into `bin/` under its canonical identity, and the loader resolves it
+    /// there with no host-specific tolerance.
     #[test]
     fn a_participant_is_always_flattened_into_bin_even_on_darwin() -> Result<()> {
         let _scratch = ScratchPhoxalHome::new()?;
@@ -585,20 +562,20 @@ robot:
         // never a `.app` bundle.
         let source_dir = project.path().join("target/debug");
         fs::create_dir_all(&source_dir)?;
-        let source = source_dir.join("phoxal-tool-joypad");
+        let source = source_dir.join("phoxal-service-drive");
         fs::write(&source, "MACHO")?;
 
         let record = launch_record(
-            "tool-joypad-testbot",
-            "tool-joypad",
-            ParticipantExecution::OfficialTool {
-                binary_name: "phoxal-tool-joypad".to_string(),
+            "drive",
+            "drive",
+            ParticipantExecution::OfficialArtifact {
+                binary_name: "phoxal-service-drive".to_string(),
             },
             None,
         );
         let executable = stage_participant_binary(&staged, &record, &source)?;
         // The flat `bin/` entry is created and returned - strict everywhere.
-        assert_eq!(executable, staged.join("bin/phoxal-tool-joypad"));
+        assert_eq!(executable, staged.join("bin/phoxal-service-drive"));
         assert!(executable.is_file());
         assert_eq!(fs::read_to_string(&executable)?, "MACHO");
         Ok(())
@@ -631,18 +608,6 @@ robot:
                 None,
             )),
             "mission"
-        );
-        // An official tool: the kind-prefixed short name.
-        assert_eq!(
-            canonical_binary_name(&launch_record(
-                "tool-bus-testbot",
-                "tool-bus",
-                ParticipantExecution::OfficialTool {
-                    binary_name: "phoxal-tool-bus".to_string()
-                },
-                None,
-            )),
-            "phoxal-tool-bus"
         );
         // A component driver is named by its component id and shared across
         // every instance - whether built from source or resolved from the
@@ -826,49 +791,6 @@ robot:
         assert_eq!(
             fs::read_to_string(staged.join("bin/phoxal-service-drive"))?,
             "OVERRIDE"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn materialize_source_overridden_tool_uses_the_resolved_tool_name() -> Result<()> {
-        let _scratch = ScratchPhoxalHome::new()?;
-        let project = tempfile::tempdir()?;
-        fs::create_dir_all(project.path().join("model"))?;
-        fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
-        let mut resolved = bundle_plan()?;
-        resolved.tools.push(ResolvedTool {
-            kind: ArtifactKind::Tool,
-            name: "tool-joypad".to_string(),
-            package: "phoxal/tool-joypad".to_string(),
-            binary_name: official_binary_name(ArtifactKind::Tool, "joypad"),
-            path_override: Some(PathBuf::from("tools/joypad")),
-            train: "0.36.0".to_string(),
-            target: host_target_triple(),
-        });
-        let staged = stage_runtime_layout(project.path(), &resolved)?;
-        let built = project.path().join("target/debug/tool-joypad");
-        fs::create_dir_all(built.parent().unwrap())?;
-        fs::write(&built, "TOOL OVERRIDE")?;
-
-        materialize_candidate_store(
-            &staged,
-            &resolved,
-            &[],
-            false,
-            None,
-            &MaterializeSettings::default(),
-            &crate::SilentReporter,
-            |crate_dir, name| {
-                assert_eq!(crate_dir, Path::new("tools/joypad"));
-                assert_eq!(name, "tool-joypad");
-                Ok(built.clone())
-            },
-        )?;
-
-        assert_eq!(
-            fs::read_to_string(staged.join("bin/phoxal-tool-joypad"))?,
-            "TOOL OVERRIDE"
         );
         Ok(())
     }

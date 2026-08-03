@@ -21,11 +21,8 @@ use crate::validation::CheckGraphContext;
 use crate::validation::build_participant_report_from_binary;
 use crate::validation::check_artifact_refs_from_resolved;
 use crate::validation::extract_participant_report_from_staged_runtime;
-use crate::validation::extract_participant_report_from_staged_tool;
-use crate::validation::fetch_participant_report_from_tool;
 use crate::validation::run_check_with_context;
 use crate::validation::source_participants_from_resolved;
-use crate::validation::tool_participants_from_resolved;
 use crate::{PrepareRunRequest, PreparedExecution, PreparedRouter};
 use anyhow::Context;
 use anyhow::Result;
@@ -145,7 +142,6 @@ pub(crate) fn resolve_staging_with_registry_cache(
         || {
             let options = ResolveOptions {
                 official_target_triple: official_target.clone(),
-                tool_target_triple: official_target,
                 drivers: driver_policy.selection(),
                 include_simulators: build.include_simulators(),
                 offline: options.offline,
@@ -555,6 +551,7 @@ pub(crate) fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecutio
     Ok(PreparedExecution {
         target: request.target,
         project_root: prepared.project_root,
+        manual_input: crate::manual_input_from_staged_root(&prepared.staged_root),
         staged_root: prepared.staged_root,
         train: prepared.train,
         plan,
@@ -714,7 +711,6 @@ fn run_source_check(
 ) -> Result<()> {
     let bin_dir = staged_root.join("bin");
     let platform_refs = check_artifact_refs_from_resolved(resolved, drivers);
-    let tool_participants = tool_participants_from_resolved(resolved)?;
     let mut official_by_name = resolved
         .platform_runtimes
         .iter()
@@ -731,28 +727,18 @@ fn run_source_check(
     official_by_name.extend(crate::validation::component_driver_runtimes_by_ref(
         resolved,
     ));
-    let tools_by_name = resolved
-        .tools
-        .iter()
-        .map(|tool| (tool.binary_name.clone(), tool))
-        .collect::<BTreeMap<_, _>>();
     let outcome = run_check_with_context(
         &platform_refs,
-        &tool_participants,
         source_participants,
         CheckGraphContext { robot: Some(robot) },
         |binary_name| {
             if let Some(runtime) = official_by_name.get(binary_name) {
                 return extract_participant_report_from_staged_runtime(&bin_dir, runtime);
             }
-            if let Some(tool) = tools_by_name.get(binary_name) {
-                return extract_participant_report_from_staged_tool(&bin_dir, tool);
-            }
             Err(anyhow!(
                 "resolved official artifact {binary_name} was not materialized into bin/"
             ))
         },
-        fetch_participant_report_from_tool,
         |participant| {
             build_participant_report_from_binary(
                 participant,
@@ -822,7 +808,7 @@ robot:
             object::SectionKind::ReadOnlyData,
         );
         let payload = format!(
-            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{id}","kind":"{kind}","class":"checked","config_schema":{{"type":"null"}}}}"#
+            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{id}","kind":"{kind}","config_schema":{{"type":"null"}}}}"#
         );
         obj.append_section_data(section, payload.as_bytes(), 1);
         obj.write().expect("synthesize object file")
@@ -884,7 +870,6 @@ robot:
                         RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => {
                             "service"
                         }
-                        RequiredRuntimeKind::OfficialTool | RequiredRuntimeKind::UserTool => "tool",
                         RequiredRuntimeKind::ComponentDriver => "driver",
                     },
                 ),

@@ -72,24 +72,6 @@ pub fn encode_participant_env(launch: &ParticipantLaunch) -> Result<EncodedParti
     Ok(EncodedParticipantEnv { variables })
 }
 
-pub fn encode_tool_env(launch: &ParticipantLaunch) -> Result<EncodedParticipantEnv> {
-    let mut variables = launch
-        .encode_env()
-        .with_context(|| {
-            format!(
-                "failed to encode launch environment for participant {}",
-                launch.participant_id
-            )
-        })?
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value))
-        .collect::<BTreeMap<_, _>>();
-    validate_config_size(launch, &variables)?;
-    variables.remove(env::EXECUTION_ORIGIN);
-    variables.remove(env::CLOCK);
-    Ok(EncodedParticipantEnv { variables })
-}
-
 fn validate_config_size(
     launch: &ParticipantLaunch,
     variables: &BTreeMap<String, String>,
@@ -237,27 +219,6 @@ mod tests {
             Some(
                 r#"{"message":"quoted \"value\" and backslash \\ with newline\nvisible","path":"/tmp/phoxal/robot's model"}"#
             )
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn tool_environment_is_clockless() -> anyhow::Result<()> {
-        let mut launch = launch("tool-log");
-        launch.execution_origin = Some(phoxal_runtime_contract::ExecutionOrigin::mint());
-        let encoded = encode_tool_env(&launch)?;
-        assert!(!encoded.variables().contains_key(env::CLOCK));
-        assert_eq!(
-            encoded.variables().get(env::EXECUTION_ORIGIN),
-            None,
-            "a tool must not receive the origin that would let it reconstruct robot time"
-        );
-        assert_eq!(
-            encoded
-                .variables()
-                .get(env::PARTICIPANT_ID)
-                .map(String::as_str),
-            Some("tool-log")
         );
         Ok(())
     }

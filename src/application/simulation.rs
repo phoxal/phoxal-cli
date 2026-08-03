@@ -151,6 +151,7 @@ mod setup {
             format!("router {connect}"),
         );
         board.set_router_endpoint(connect.clone());
+        board.set_manual_input(prepared.manual_input.clone());
         board.set_simulation_info("webots", simulation.world.display().to_string());
         ui.info(format!(
             "Webots profile: webots; world: {}; project: {}",
