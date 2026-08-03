@@ -215,7 +215,6 @@ mod tests {
             participant_id: id.to_string(),
             artifact_id: id.to_string(),
             participant_kind: kind,
-            participant_class: graph_check::ParticipantClass::Checked,
             config_schema: None,
             scope: graph_check::ParticipantScope::Graph,
         }

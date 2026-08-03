@@ -1,8 +1,8 @@
 //! CLI-owned official runtime catalog.
 //!
-//! Official services and tools are never
+//! Official services are never
 //! discovered from a network inventory: they are compiled into this CLI
-//! release. `robot.yaml` declares USER services/tools and component
+//! release. `robot.yaml` declares USER services and component
 //! instances; the official set comes from here alone (organization#951 WS4).
 //!
 //! ## One catalog, no per-train history (organization#951 WS4 review, medium 3)
@@ -100,7 +100,6 @@ pub fn cargo_package_name(catalog_id: &str) -> String {
 pub enum ArtifactKind {
     Service,
     ComponentDriver,
-    Tool,
     Simulator,
 }
 
@@ -110,7 +109,6 @@ impl ArtifactKind {
         match self {
             Self::Service => "service",
             Self::ComponentDriver => "driver",
-            Self::Tool => "tool",
             Self::Simulator => "simulator",
         }
     }
@@ -129,10 +127,6 @@ pub struct OfficialRuntime {
 }
 
 pub const NATIVE: &[OfficialRuntime] = &[
-    OfficialRuntime {
-        package: "phoxal/tool-joypad",
-        kind: ArtifactKind::Tool,
-    },
     OfficialRuntime {
         package: "phoxal/service-behavior",
         kind: ArtifactKind::Service,

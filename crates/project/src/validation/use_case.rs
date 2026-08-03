@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::project::catalog::{self, ArtifactKind};
-use phoxal_cli_core::project::train::{LockedProject, WorkspaceRuntimeKind};
+use phoxal_cli_core::project::train::LockedProject;
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 
 use crate::validation::{
@@ -36,7 +36,6 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
                 train: header.built_with.phoxal,
                 platform_services: Vec::new(),
                 services: Vec::new(),
-                tools: Vec::new(),
                 components: Vec::new(),
             });
         }
@@ -95,9 +94,9 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
     );
 
     // Config-schema validation (#951 WS4 follow-up): every declared user
-    // service/tool's `<family>.<id>.config` must satisfy the JSON Schema
-    // its own `#[phoxal::service(config = ...)]`/`#[phoxal::tool(config =
-    // ...)]` type embeds. There is no schema until that type compiles, so
+    // service's `services.<id>.config` must satisfy the JSON Schema its own
+    // `#[phoxal::service(config = ...)]` type embeds. There is no schema
+    // until that type compiles, so
     // this is the one part of `validate` that is not free - it builds
     // ONLY the declared participant crates (never the official set, never
     // a staged bundle), through the same check engine `build`/`run`/
@@ -105,7 +104,7 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
     let config_participants = declared_config_source_participants(&robot, &project);
     if !config_participants.is_empty() {
         request.reporter.info(format!(
-            "compiling {} declared service/tool crate{} to validate config against its \
+            "compiling {} declared service crate{} to validate config against its \
                  embedded schema (first build may take a while; cached afterward)",
             config_participants.len(),
             if config_participants.len() == 1 {
@@ -141,7 +140,6 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
             .map(|official| official.package.to_string())
             .collect(),
         services: robot.services.keys().cloned().collect(),
-        tools: robot.tools.keys().cloned().collect(),
         components: robot
             .robot
             .components
@@ -171,22 +169,17 @@ struct WorkspaceRuntimeReport {
 /// second `cargo metadata --locked` invocation).
 fn workspace_runtime_report(robot: &Robot, project: &LockedProject) -> WorkspaceRuntimeReport {
     let mut report = WorkspaceRuntimeReport::default();
-    let discovered = |kind: WorkspaceRuntimeKind| {
-        project
-            .runtimes
-            .iter()
-            .filter(move |runtime| runtime.kind == kind)
-            .filter_map(|runtime| {
-                runtime
-                    .crate_dir
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_string)
-            })
-            .collect::<BTreeSet<_>>()
-    };
-    let services = discovered(WorkspaceRuntimeKind::Service);
-    let tool_crates = discovered(WorkspaceRuntimeKind::Tool);
+    let services = project
+        .runtimes
+        .iter()
+        .filter_map(|runtime| {
+            runtime
+                .crate_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .collect::<BTreeSet<_>>();
     for service in &services {
         let note = if robot.services.contains_key(service) {
             "declared"
@@ -204,25 +197,17 @@ fn workspace_runtime_report(robot: &Robot, project: &LockedProject) -> Workspace
             ));
         }
     }
-    for configured in robot.tools.keys() {
-        if !tool_crates.contains(configured) {
-            report.problems.push(format!(
-                "tools.{configured} has no matching tools/{configured} workspace crate"
-            ));
-        }
-    }
     report
 }
 
 /// Every workspace runtime crate that can legally carry a robot.yaml `config:`
-/// value: a `services/<id>` or `tools/<id>` crate whose `<id>` is a declared
-/// key in `robot.services`/`robot.tools`. An official identity can never be a
-/// declared key (`validate_runtime_declarations` rejects that at parse time),
-/// so this filter alone is enough to exclude a workspace crate that path-
-/// overrides an official service or tool - no separate "is this an official
-/// package name" lookup is needed here the way full graph resolution needs
-/// one. A component driver crate carries no `config:` in robot.yaml at all
-/// and is filtered out by kind. This scoping is the point (organization#951
+/// value: a `services/<id>` crate whose `<id>` is a declared key in
+/// `robot.services`. An official identity can never be a declared key
+/// (`validate_runtime_declarations` rejects that at parse time), so this
+/// filter alone is enough to exclude a workspace crate that path-overrides an
+/// official service - no separate "is this an official package name" lookup is
+/// needed here the way full graph resolution needs one. This scoping is the
+/// point (organization#951
 /// WS4 follow-up brief): `validate` must build ONLY the crates whose schema
 /// it actually needs to read, not the whole component/driver/official graph
 /// `build`/`run` resolve.
@@ -235,15 +220,10 @@ fn declared_config_source_participants(
         .iter()
         .filter_map(|runtime| {
             let name = runtime.crate_dir.file_name()?.to_str()?.to_string();
-            match runtime.kind {
-                WorkspaceRuntimeKind::Service if robot.services.contains_key(&name) => Some(
-                    SourceParticipant::user_service(name, runtime.crate_dir.clone()),
-                ),
-                WorkspaceRuntimeKind::Tool if robot.tools.contains_key(&name) => Some(
-                    SourceParticipant::user_tool(name, runtime.crate_dir.clone()),
-                ),
-                _ => None,
-            }
+            robot
+                .services
+                .contains_key(&name)
+                .then(|| SourceParticipant::user_service(name, runtime.crate_dir.clone()))
         })
         .collect()
 }
@@ -261,19 +241,12 @@ fn check_declared_configs(
 ) -> Result<CheckOutcome> {
     run_check_with_context(
         &[],
-        &[],
         source_participants,
         CheckGraphContext { robot: Some(robot) },
         |image_ref| {
             bail!(
                 "validate does not fetch official artifact reports (unexpected request for \
                  {image_ref})"
-            )
-        },
-        |tool| {
-            bail!(
-                "validate does not fetch tool artifact reports (unexpected request for {})",
-                tool.name
             )
         },
         build,
@@ -306,7 +279,7 @@ mod tests {
         }
     }
 
-    fn workspace_runtime(dir: &str, kind: WorkspaceRuntimeKind) -> WorkspaceRuntime {
+    fn workspace_runtime(dir: &str) -> WorkspaceRuntime {
         let crate_dir = PathBuf::from(format!("/fake/project/{dir}"));
         let name = crate_dir
             .file_name()
@@ -316,7 +289,6 @@ mod tests {
         WorkspaceRuntime {
             package: name.clone(),
             crate_dir,
-            kind,
             binary_names: vec![name],
         }
     }
@@ -335,8 +307,6 @@ robot:
   components: {}
 services:
   avoid: {}
-tools:
-  lidar-viz: {}
 "#;
 
     fn minimal_robot() -> Robot {
@@ -360,7 +330,6 @@ tools:
                 kind: "service".to_string(),
                 id: id.to_string(),
             },
-            participant_class: "checked".to_string(),
             config_schema: Some(schema),
         }
     }
@@ -369,17 +338,10 @@ tools:
     fn workspace_runtime_report_flags_missing_and_notes_undeclared_crates() {
         let robot = minimal_robot();
         let project = locked_project(vec![
-            workspace_runtime("services/avoid", WorkspaceRuntimeKind::Service),
-            workspace_runtime("services/extra", WorkspaceRuntimeKind::Service),
+            workspace_runtime("services/avoid"),
+            workspace_runtime("services/extra"),
         ]);
         let report = workspace_runtime_report(&robot, &project);
-        assert!(
-            report
-                .problems
-                .iter()
-                .any(|problem| problem.contains("tools.lidar-viz")),
-            "{report:?}"
-        );
         assert!(
             report
                 .successes
@@ -397,32 +359,24 @@ tools:
     }
 
     #[test]
-    fn declared_config_source_participants_covers_only_declared_services_and_tools() {
+    fn declared_config_source_participants_covers_only_declared_services() {
         let robot = minimal_robot();
         let project = locked_project(vec![
-            workspace_runtime("services/avoid", WorkspaceRuntimeKind::Service),
+            workspace_runtime("services/avoid"),
             // Present on disk but not declared in robot.services - a drift
             // diagnostic elsewhere, never a config-check participant here.
-            workspace_runtime("services/undeclared", WorkspaceRuntimeKind::Service),
-            workspace_runtime("tools/lidar-viz", WorkspaceRuntimeKind::Tool),
+            workspace_runtime("services/undeclared"),
         ]);
 
         let participants = declared_config_source_participants(&robot, &project);
 
-        assert_eq!(participants.len(), 2, "{participants:?}");
+        assert_eq!(participants.len(), 1, "{participants:?}");
         assert!(
             participants
                 .iter()
                 .any(|participant| participant.name == "avoid"
                     && participant.kind
                         == phoxal_cli_core::check::source::SourceParticipantKind::UserService)
-        );
-        assert!(
-            participants
-                .iter()
-                .any(|participant| participant.name == "lidar-viz"
-                    && participant.kind
-                        == phoxal_cli_core::check::source::SourceParticipantKind::UserTool)
         );
     }
 

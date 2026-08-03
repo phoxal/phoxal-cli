@@ -22,6 +22,7 @@ phoxal-manifest = { workspace = true }
 phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
 phoxal-cli-core = { workspace = true }
+phoxal-cli-protocol = { workspace = true }
 reqwest = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }

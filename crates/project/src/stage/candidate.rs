@@ -253,17 +253,6 @@ robot:
             component_instance: None,
             config: service.config.clone(),
         })
-        .chain(
-            source_manifest
-                .tools
-                .iter()
-                .map(|(id, tool)| phoxal_manifest::Participant {
-                    id: id.clone(),
-                    kind: phoxal_manifest::ParticipantKind::Tool,
-                    component_instance: None,
-                    config: tool.config.clone(),
-                }),
-        )
         .collect();
     Ok(bundle)
 }

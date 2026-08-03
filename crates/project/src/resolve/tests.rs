@@ -328,9 +328,9 @@ fn an_invalid_declaration_fails_before_locked_project_resolution() -> anyhow::Re
     // first failure) - proving the ordering, not just the presence, of the
     // check.
     let _phoxal_home = ScratchPhoxalHome::new()?;
-    let robot = minimal_robot("tools:\n  drive: {}\n")?;
+    let robot = minimal_robot("services:\n  drive: {}\n")?;
     let error = resolve(&robot, Path::new("/nonexistent"), ResolveOptions::default())
-        .expect_err("an official identity in tools: must fail resolution");
+        .expect_err("an official identity in services: must fail resolution");
     let message = format!("{error:#}");
     assert!(
         message.contains("official service"),
@@ -368,16 +368,10 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
             .count()
     );
 
-    let joypad = resolved
-        .tools
-        .iter()
-        .find(|tool| tool.package == "phoxal/tool-joypad")
-        .expect("joypad is a catalog tool");
-    assert_eq!(joypad.binary_name, "phoxal-tool-joypad");
-    // Anything the supervisor absorbed must never resolve as an artifact: a
-    // stale catalog entry here is not a compile error, it is a `cargo install`
-    // failure at run time for a package the train no longer publishes
-    // (organization#978).
+    // Anything the supervisor absorbed - or that became a local CLI concern -
+    // must never resolve as an artifact: a stale catalog entry here is not a
+    // compile error, it is a `cargo install` failure at run time for a package
+    // the train no longer publishes (organization#978).
     for absorbed in [
         "router",
         "asset",
@@ -385,13 +379,16 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
         "tool-device",
         "tool-log",
         "tool-telemetry",
+        "tool-joypad",
+        // The whole `tool-` family is gone; catch any survivor by prefix too.
+        "phoxal/tool-",
     ] {
         assert!(
             !resolved
-                .tools
+                .platform_runtimes
                 .iter()
-                .any(|tool| tool.package.contains(absorbed)),
-            "{absorbed} is absorbed by the supervisor and must not be a resolved artifact"
+                .any(|runtime| runtime.package.contains(absorbed)),
+            "{absorbed} must not be a resolved artifact"
         );
     }
     Ok(())

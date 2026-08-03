@@ -19,7 +19,6 @@ pub enum JoypadDeviceStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JoypadDevicesSample {
     pub available: Arc<Vec<JoypadDevice>>,
-    pub devices_truncated: usize,
     pub selected: Option<String>,
     pub enabled: bool,
     pub unavailable_reason: Option<String>,

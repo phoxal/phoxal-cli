@@ -2,6 +2,7 @@
 
 mod attachment;
 pub mod finite;
+mod joypad;
 mod ports;
 pub mod reconcile;
 mod sources;

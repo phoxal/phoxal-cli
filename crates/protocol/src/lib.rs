@@ -16,7 +16,9 @@ pub use command::{
 pub use handshake::{
     ConnectionRole, HandshakeReply, HandshakeRequest, SUPERVISOR_PROTOCOL_VERSION,
 };
-pub use snapshot::{SupervisorSnapshot, SupervisorSnapshotV0, validate_snapshot_bounds};
+pub use snapshot::{
+    ManualDrive, ManualInput, SupervisorSnapshot, SupervisorSnapshotV0, validate_snapshot_bounds,
+};
 
 #[cfg(test)]
 mod tests {
@@ -60,6 +62,9 @@ mod tests {
             },
             processes: std::collections::BTreeMap::new(),
             failure: None,
+            manual_input: ManualInput::Supported(
+                ManualDrive::derive(0.3, 0.6, 2.0).expect("valid drive parameters"),
+            ),
         })
     }
 
@@ -88,7 +93,10 @@ mod tests {
                     "elapsed_ms": null
                 }]},
                 "processes": {},
-                "failure": null
+                "failure": null,
+                "manual_input": {
+                    "supported": { "wheel_base_m": 0.3, "side_speed_mps": 0.3 }
+                }
             })
         );
         let decoded: SupervisorSnapshot = serde_json::from_value(value).unwrap();
@@ -240,6 +248,9 @@ mod tests {
             },
             processes,
             failure: Some("f".repeat(limits::MAX_SUPERVISOR_FAILURE_REASON_BYTES)),
+            manual_input: ManualInput::Unsupported(
+                "manual input requires differential robot kinematics".to_string(),
+            ),
         };
         validate_snapshot_bounds(&snapshot).unwrap();
         let frame = codec::encode_frame(

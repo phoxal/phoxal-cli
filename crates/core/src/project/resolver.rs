@@ -11,17 +11,10 @@ use super::catalog::ArtifactKind;
 
 const ROBOT_FILE: &str = "robot.yaml";
 
-pub fn tool_participant_id(tool_name: &str) -> &str {
-    tool_name
-        .strip_prefix("phoxal/tool-")
-        .or_else(|| tool_name.strip_prefix("tool-"))
-        .unwrap_or(tool_name)
-}
-
 pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
     match kind {
         ArtifactKind::ComponentDriver => format!("phoxal-component-{name}"),
-        ArtifactKind::Service | ArtifactKind::Tool | ArtifactKind::Simulator => {
+        ArtifactKind::Service | ArtifactKind::Simulator => {
             format!("phoxal-{kind}-{name}")
         }
     }
@@ -33,9 +26,6 @@ pub struct ResolveOptions {
     /// materializes for that triple instead of the host, so a robot graph can
     /// be cross-compiled from a non-Linux host.
     pub official_target_triple: Option<String>,
-    /// Override native tool asset target triple. Host-native run/sim use the
-    /// host triple; an explicit target resolves robot-native tools instead.
-    pub tool_target_triple: Option<String>,
     /// The component-driver instances resolution may resolve driver binaries
     /// for. `run`'s driver policy threads through here so an excluded driver is
     /// never resolved - not even to select its target artifact (#936).
@@ -59,7 +49,6 @@ impl Default for ResolveOptions {
     fn default() -> Self {
         Self {
             official_target_triple: None,
-            tool_target_triple: None,
             drivers: crate::project::layout::DriverSelection::default(),
             include_simulators: true,
             offline: false,
@@ -79,16 +68,12 @@ pub struct BundlePlan {
     pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
     pub simulators: Vec<ResolvedPlatformRuntime>,
     pub user_runtimes: Vec<ResolvedUserRuntime>,
-    /// The declared additional user tools (`tools:` in robot.yaml) resolved to
-    /// their workspace crates (#950) - the tool analogue of `user_runtimes`.
-    pub user_tools: Vec<ResolvedUserRuntime>,
-    /// Workspace runtime crates present under `services/`/`tools/` but not
-    /// declared in robot.yaml (and not official-identity overrides). They are
+    /// Workspace runtime crates present under `services/` but not declared in
+    /// robot.yaml (and not official-identity overrides). They are
     /// not built or launched; graph validation and the staging summary
     /// surface them as drift diagnostics (#950).
     pub undeclared_runtimes: Vec<UndeclaredRuntime>,
     pub components: Vec<ResolvedComponent>,
-    pub tools: Vec<ResolvedTool>,
     pub path_overrides: Vec<ResolvedPathOverride>,
 }
 
@@ -164,7 +149,7 @@ pub struct ResolvedUserRuntime {
 pub struct UndeclaredRuntime {
     /// The crate's logical name (its directory name).
     pub name: String,
-    /// "services" or "tools" - the directory family and the robot.yaml map the
+    /// "services" - the directory family and the robot.yaml map the
     /// crate would be declared in.
     pub family: &'static str,
 }
@@ -206,29 +191,9 @@ impl ResolvedComponentDriver {
     }
 }
 
-/// A resolved native artifact (`tool-bus`, `tool-log`, `tool-joypad`). `name`
-/// is the short,
-/// launch-safe kind-qualified id used for participant ids, systemd unit
-/// names and env var keys; `package` is the
-/// canonical provider-qualified identity (`phoxal/tool-bus`) used for
-/// catalog lookups and `cargo install` materialization.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedTool {
-    pub kind: ArtifactKind,
-    pub name: String,
-    pub package: String,
-    pub binary_name: String,
-    pub path_override: Option<PathBuf>,
-    /// Exact locked framework train this entry belongs to.
-    pub train: String,
-    /// The target triple this entry was resolved/materialized for.
-    pub target: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedPathOverrideKind {
     Service,
-    Tool,
     Simulator,
 }
 
@@ -237,7 +202,6 @@ impl ResolvedPathOverrideKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Service => "service",
-            Self::Tool => "tool",
             Self::Simulator => "simulator",
         }
     }
@@ -322,13 +286,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_participant_id_strips_provider_and_tool_prefixes() {
-        assert_eq!(tool_participant_id("phoxal/tool-router"), "router");
-        assert_eq!(tool_participant_id("tool-router"), "router");
-        assert_eq!(tool_participant_id("router"), "router");
-    }
-
-    #[test]
     fn official_binary_name_uses_component_crate_binary_for_component_driver() {
         assert_eq!(
             official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
@@ -359,8 +316,8 @@ mod tests {
             "phoxal-service-drive"
         );
         assert_eq!(
-            official_binary_name(ArtifactKind::Tool, "router"),
-            "phoxal-tool-router"
+            official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
+            "phoxal-component-ddsm115"
         );
         assert_eq!(
             official_binary_name(ArtifactKind::Simulator, "webots-controller"),

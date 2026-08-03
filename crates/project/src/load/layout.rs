@@ -125,7 +125,6 @@ services:
             "schema": phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA,
             "id": id,
             "kind": kind,
-            "class": "checked",
             "config_schema": schema,
         }))?)
     }
@@ -133,7 +132,6 @@ services:
     fn required_kind(kind: RequiredRuntimeKind) -> &'static str {
         match kind {
             RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => "service",
-            RequiredRuntimeKind::OfficialTool | RequiredRuntimeKind::UserTool => "tool",
             RequiredRuntimeKind::ComponentDriver => "driver",
         }
     }
@@ -228,14 +226,14 @@ services:
     }
 
     #[test]
-    fn a_declared_user_tool_validates_its_own_config() -> anyhow::Result<()> {
-        // The tool's REAL `tools.<id>.config` is validated - not a phantom
-        // services lookup that would see null (#950 review finding 1).
+    fn a_declared_user_service_validates_its_own_config() -> anyhow::Result<()> {
+        // The service's REAL `services.<id>.config` is validated against the
+        // schema its own binary emits (#950 review finding 1).
         let dir = tempfile::tempdir()?;
         let root = dir.path().join("build");
-        stage_layout_with_tool(
+        stage_layout_with_user_service(
             &root,
-            r#"{"type":"object","properties":{"port":{"type":"integer"}},"required":["port"]}"#,
+            r#"{"type":"object","properties":{"speed":{"type":"integer"}},"required":["speed"]}"#,
         )?;
         let plan = validate_layout_plan(
             &root,
@@ -247,20 +245,20 @@ services:
             plan.robots[0]
                 .participants
                 .iter()
-                .any(|participant| participant.launch.participant_id == "lidar-viz"),
-            "the declared user tool is a plan participant"
+                .any(|participant| participant.launch.participant_id == "mission"),
+            "the declared user service is a plan participant"
         );
         Ok(())
     }
 
     #[test]
-    fn an_invalid_user_tool_config_fails_naming_the_tools_map() -> anyhow::Result<()> {
+    fn an_invalid_user_service_config_fails_naming_the_services_map() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path().join("build");
-        // The authored port is an integer; the schema demands a string.
-        stage_layout_with_tool(
+        // The authored speed is an integer; the schema demands a string.
+        stage_layout_with_user_service(
             &root,
-            r#"{"type":"object","properties":{"port":{"type":"string"}},"required":["port"]}"#,
+            r#"{"type":"object","properties":{"speed":{"type":"string"}},"required":["speed"]}"#,
         )?;
         let error = validate_layout_plan(
             &root,
@@ -268,9 +266,9 @@ services:
             LayoutInspection::Host,
             RunIdentity::default(),
         )
-        .expect_err("an invalid tool config must fail validation")
+        .expect_err("an invalid service config must fail validation")
         .to_string();
-        assert!(error.contains("tools.lidar-viz.config"), "{error}");
+        assert!(error.contains("services.mission.config"), "{error}");
         Ok(())
     }
 
@@ -303,20 +301,18 @@ services:
         Ok(())
     }
 
-    /// Stage a layout whose compiled declarations include the `lidar-viz` user tool
-    /// with `config: {port: 9000}` and whose bin/ carries a binary for it
-    /// emitting `tool_schema` as its config schema.
-    fn stage_layout_with_tool(root: &Path, tool_schema: &str) -> anyhow::Result<()> {
-        let yaml = format!("{ROBOT_YAML}tools:\n  lidar-viz:\n    config:\n      port: 9000\n");
-        crate::stage::write_test_layout(root, &yaml)?;
+    /// Stage a layout whose compiled declarations include the `mission` user
+    /// service with `config: {speed: 1}` and whose bin/ carries a binary for it
+    /// emitting `service_schema` as its config schema.
+    fn stage_layout_with_user_service(root: &Path, service_schema: &str) -> anyhow::Result<()> {
+        crate::stage::write_test_layout(root, ROBOT_YAML)?;
         let bin = root.join("bin");
         let layout = RuntimeLayout::open(root)?;
         let format = phoxal_cli_core::check::participant_metadata::host_binary_format();
         let arch = phoxal_cli_core::check::participant_metadata::host_architecture();
         for required in layout.required_runtimes(&DriverSelection::All) {
             let payload = match required.binary_name.as_str() {
-                "lidar-viz" => metadata("lidar-viz", "tool", tool_schema)?,
-                "mission" => metadata("mission", "service", r#"{"type":"object"}"#)?,
+                "mission" => metadata("mission", "service", service_schema)?,
                 _ => metadata(
                     &required.identity,
                     required_kind(required.kind),

@@ -629,13 +629,6 @@ fn selected_registry_officials(
         .iter()
         .filter(|runtime| runtime.path_override.is_some())
         .map(|runtime| runtime.package.clone())
-        .chain(
-            resolved
-                .tools
-                .iter()
-                .filter(|runtime| runtime.path_override.is_some())
-                .map(|runtime| runtime.package.clone()),
-        )
         .collect::<BTreeSet<_>>();
     let mut officials = phoxal_cli_core::project::catalog::for_webots(false)
         .filter(|official| !overridden.contains(official.package))
@@ -1127,7 +1120,6 @@ mod tests {
     use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::resolver::{
         BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
-        ResolvedTool,
     };
 
     fn minimal_bundle_plan() -> BundlePlan {
@@ -1153,10 +1145,8 @@ robot:
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
-            user_tools: Vec::new(),
             undeclared_runtimes: Vec::new(),
             components: Vec::new(),
-            tools: Vec::new(),
             path_overrides: Vec::new(),
         }
     }
@@ -1235,15 +1225,6 @@ robot:
             train: resolved.train.clone(),
             target: Some(resolved.target.clone()),
         });
-        resolved.tools.push(ResolvedTool {
-            kind: ArtifactKind::Tool,
-            name: "tool-joypad".to_string(),
-            package: "phoxal/tool-joypad".to_string(),
-            binary_name: "tool-joypad".to_string(),
-            path_override: Some(PathBuf::from("tools/joypad")),
-            train: resolved.train.clone(),
-            target: resolved.target.clone(),
-        });
         resolved.components = vec![registry_driver_component(
             "left_wheel",
             "phoxal/component-ddsm115",
@@ -1255,13 +1236,12 @@ robot:
             .map(|official| official.package.as_str())
             .collect::<BTreeSet<_>>();
 
-        assert!(!packages.contains("phoxal-service-behavior"));
-        assert!(!packages.contains("phoxal-tool-joypad"));
+        assert!(
+            !packages.contains("phoxal-service-behavior"),
+            "a path-overridden official builds from source, never from the registry"
+        );
         assert!(packages.contains("phoxal-service-drive"));
         assert!(packages.contains("phoxal-component-ddsm115"));
-        // There is no "an included tool" case left to assert: `joypad` is the
-        // only official tool remaining and it is this test's path-override
-        // subject. The supervisor absorbed the rest (organization#978).
     }
 
     #[test]

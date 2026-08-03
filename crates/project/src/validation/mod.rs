@@ -11,7 +11,6 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawParticipantReport {
     pub artifact: RawArtifact,
-    pub participant_class: String,
     pub config_schema: Option<Value>,
 }
 
@@ -45,7 +44,6 @@ mod use_case;
 pub(crate) use participants::{
     PlatformArtifactRef, check_artifact_refs_from_resolved, component_driver_runtimes_by_ref,
     source_participants_from_resolved, source_participants_from_resolved_with_drivers,
-    tool_participants_from_resolved,
 };
 pub(crate) use use_case::validate;
 mod graph;
@@ -54,9 +52,7 @@ mod config;
 pub(crate) use config::{validate_user_runtime_config, validate_user_service_config};
 mod metadata;
 pub(crate) use metadata::{
-    extract_participant_report_from_staged_runtime, extract_participant_report_from_staged_tool,
-    fetch_participant_report_from_tool, raw_participant_report_from_extracted_metadata,
-    tool_env_override,
+    extract_participant_report_from_staged_runtime, raw_participant_report_from_extracted_metadata,
 };
 mod build;
 pub(crate) use build::{

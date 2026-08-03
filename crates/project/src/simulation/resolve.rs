@@ -10,10 +10,7 @@ use crate::validation::CheckGraphContext;
 use crate::validation::build_participant_report_from_binary;
 use crate::validation::check_artifact_refs_from_resolved;
 use crate::validation::extract_participant_report_from_staged_runtime;
-use crate::validation::extract_participant_report_from_staged_tool;
-use crate::validation::fetch_participant_report_from_tool;
 use crate::validation::run_check_with_context;
-use crate::validation::tool_participants_from_resolved;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -168,7 +165,6 @@ pub(crate) fn build_checked_sim_launch_plan(
         resolved,
         phoxal_cli_core::project::layout::DriverSelection::None,
     );
-    let tool_participants = tool_participants_from_resolved(resolved)?;
     // Materialize the full selected registry set once into the caller's
     // unpublished candidate. This candidate is later published as the
     // simulation runtime layout; there is no scratch staging tree and no
@@ -213,15 +209,9 @@ pub(crate) fn build_checked_sim_launch_plan(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let tools_by_name = resolved
-        .tools
-        .iter()
-        .map(|tool| (tool.binary_name.clone(), tool))
-        .collect::<BTreeMap<_, _>>();
 
     let metadata_outcome = run_check_with_context(
         &platform_refs,
-        &tool_participants,
         &metadata_source_participants,
         CheckGraphContext {
             robot: Some(&resolved.source_manifest),
@@ -230,14 +220,10 @@ pub(crate) fn build_checked_sim_launch_plan(
             if let Some(runtime) = official_by_name.get(binary_name) {
                 return extract_participant_report_from_staged_runtime(&bin_dir, runtime);
             }
-            if let Some(tool) = tools_by_name.get(binary_name) {
-                return extract_participant_report_from_staged_tool(&bin_dir, tool);
-            }
             Err(anyhow!(
                 "resolved official artifact {binary_name} was not materialized into bin/"
             ))
         },
-        fetch_participant_report_from_tool,
         |participant| {
             build_participant_report_from_binary(
                 participant,
@@ -319,7 +305,7 @@ mod tests {
         )
         .expect("write fixture Cargo.lock");
         let json = format!(
-            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{SIMULATOR_CONTROLLER_ARTIFACT_NAME}","kind":"simulator","class":"checked","config_schema":{{"type":"null"}}}}"#
+            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{SIMULATOR_CONTROLLER_ARTIFACT_NAME}","kind":"simulator","config_schema":{{"type":"null"}}}}"#
         );
         let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
         let len = json.len();
@@ -388,7 +374,7 @@ services:
 
         let schema = r#"{"type":"object","required":["gain"],"properties":{"gain":{"type":"number"}},"additionalProperties":false}"#;
         let json = format!(
-            r#"{{"schema":"phoxal/participant-metadata/v0","id":"avoid","kind":"service","class":"checked","config_schema":{schema}}}"#
+            r#"{{"schema":"phoxal/participant-metadata/v0","id":"avoid","kind":"service","config_schema":{schema}}}"#
         );
         let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
         let len = json.len();
@@ -445,10 +431,8 @@ services:
                 path: crate_dir,
                 source_hash: "fixture".to_string(),
             }],
-            user_tools: Vec::new(),
             undeclared_runtimes: Vec::new(),
             components: Vec::new(),
-            tools: Vec::new(),
             path_overrides: vec![ResolvedPathOverride {
                 key: "phoxal/simulator-webots-controller".to_string(),
                 kind: ResolvedPathOverrideKind::Simulator,

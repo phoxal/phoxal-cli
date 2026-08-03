@@ -54,6 +54,15 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
+      # `gilrs` links libudev on Linux (organization#978). The joypad is a
+      # client concern now, so the shipped CLI binary needs it at build time -
+      # macOS uses IOKit and needs nothing.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev pkg-config
+
       - name: Build release binary
         run: >-
           cargo build

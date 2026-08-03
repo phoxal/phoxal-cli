@@ -1,15 +1,12 @@
 //! Participants responsibilities for check.
 
-use super::tool_env_override;
 use anyhow::Result;
 use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::check::source::ToolParticipant;
 use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolvedComponentDriver;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
 use phoxal_cli_core::project::resolver::official_binary_name;
-use phoxal_cli_core::project::resolver::tool_participant_id;
 use phoxal_cli_core::project::tooling::resolve_project_path;
 use std::path::Path;
 
@@ -40,32 +37,9 @@ impl PlatformArtifactRef {
         match self.kind {
             ArtifactKind::Service => "official service",
             ArtifactKind::ComponentDriver => "official driver",
-            ArtifactKind::Tool => "official tool",
             ArtifactKind::Simulator => "official simulator",
         }
     }
-}
-
-pub(crate) fn tool_participants_from_resolved(
-    resolved: &BundlePlan,
-) -> Result<Vec<ToolParticipant>> {
-    resolved
-        .tools
-        .iter()
-        .filter(|tool| tool.kind == ArtifactKind::Tool)
-        .filter_map(|tool| {
-            if tool.path_override.is_some() {
-                None
-            } else {
-                tool_env_override(tool).map(|path| {
-                    Ok(ToolParticipant {
-                        name: tool.name.clone(),
-                        binary_path: path,
-                    })
-                })
-            }
-        })
-        .collect()
 }
 
 pub(crate) fn platform_artifact_refs_from_resolved(
@@ -165,20 +139,6 @@ pub(crate) fn check_artifact_refs_from_resolved(
                 (!reference.instances.is_empty()).then_some(reference)
             }),
     );
-    refs.extend(
-        resolved
-            .tools
-            .iter()
-            .filter(|tool| tool.kind == ArtifactKind::Tool)
-            .filter(|tool| tool.path_override.is_none())
-            .filter(|tool| tool_env_override(tool).is_none())
-            .map(|tool| PlatformArtifactRef {
-                name: tool.name.clone(),
-                kind: tool.kind,
-                binary_name: tool.binary_name.clone(),
-                instances: Vec::new(),
-            }),
-    );
     refs
 }
 
@@ -215,13 +175,6 @@ pub(crate) fn source_participants_from_resolved_with_drivers(
         )
     }));
 
-    participants.extend(resolved.user_tools.iter().map(|runtime| {
-        SourceParticipant::user_tool(
-            runtime.name.clone(),
-            resolve_project_path(project_root, &runtime.path),
-        )
-    }));
-
     // A registry-sourced driver is a first-class official artifact, not a
     // build-from-source participant - it becomes a `PlatformArtifactRef`
     // instead (see `component_driver_platform_refs_from_resolved`),
@@ -240,23 +193,6 @@ pub(crate) fn source_participants_from_resolved_with_drivers(
             component.source_name.clone(),
             crate_dir.clone(),
         ));
-    }
-
-    for tool in resolved
-        .tools
-        .iter()
-        .filter(|tool| tool.kind == ArtifactKind::Tool)
-        .filter_map(|tool| {
-            tool.path_override.as_ref().map(|path| {
-                SourceParticipant::tool(
-                    tool.name.clone(),
-                    tool_participant_id(&tool.name).to_string(),
-                    path.clone(),
-                )
-            })
-        })
-    {
-        participants.push(tool);
     }
 
     for simulator in resolved

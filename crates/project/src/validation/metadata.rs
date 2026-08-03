@@ -5,10 +5,8 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use phoxal_cli_core::check::participant_metadata;
-use phoxal_cli_core::check::source::ToolParticipant;
 use phoxal_cli_core::project::resolver::{ResolvedPlatformRuntime, official_binary_name};
 use std::path::Path;
-use std::path::PathBuf;
 
 /// Extract one official runtime's participant report straight from its
 /// already-materialized binary at `bin_dir/<canonical name>`. Materialization
@@ -33,56 +31,12 @@ pub(crate) fn extract_participant_report_from_staged_runtime(
     )
 }
 
-pub(crate) fn extract_participant_report_from_staged_tool(
-    bin_dir: &Path,
-    tool: &phoxal_cli_core::project::resolver::ResolvedTool,
-) -> Result<RawParticipantReport> {
-    let binary = bin_dir.join(&tool.binary_name);
-    let meta = participant_metadata::extract_participant_metadata(&binary).with_context(|| {
-        format!(
-            "failed to extract participant metadata from {}",
-            binary.display()
-        )
-    })?;
-    raw_participant_report_from_extracted_metadata(
-        "tool",
-        phoxal_cli_core::project::resolver::tool_participant_id(&tool.name),
-        &binary,
-        meta,
-    )
-}
-
-/// Fetches a native tool binary's config-schema report by extracting its
-/// compiled-in participant metadata section directly from the built artifact
-/// file, never by executing it. The section carries the participant's declared
-/// identity, kind, class, and config schema; caller-owned expectations are
-/// checked before any of them is trusted (see
-/// [`raw_participant_report_from_extracted_metadata`]).
-pub(crate) fn fetch_participant_report_from_tool(
-    tool: &ToolParticipant,
-) -> Result<RawParticipantReport> {
-    let meta = participant_metadata::extract_participant_metadata(&tool.binary_path).with_context(
-        || {
-            format!(
-                "failed to extract participant metadata from {}",
-                tool.binary_path.display()
-            )
-        },
-    )?;
-    raw_participant_report_from_extracted_metadata(
-        "tool",
-        phoxal_cli_core::project::resolver::tool_participant_id(&tool.name),
-        &tool.binary_path,
-        meta,
-    )
-}
-
 /// Builds a [`RawParticipantReport`] from a binary's extracted [`ParticipantMeta`] plus
-/// the artifact identity the caller already expects - the shared tail of
-/// [`fetch_participant_report_from_tool`] and selected-source artifact inspection.
+/// the artifact identity the caller already expects - the shared tail of staged
+/// runtime and selected-source artifact inspection.
 ///
-/// The embedded metadata carries the participant's declared identity, kind,
-/// class, and config schema. The caller's expectations are claims made
+/// The embedded metadata carries the participant's declared identity, kind, and
+/// config schema. The caller's expectations are claims made
 /// from context (a resolved runtime name, a registry package, an
 /// `expected_artifact_id` field) that could disagree with it, for instance if
 /// two staged binaries were swapped on disk. This function is the one place
@@ -113,7 +67,6 @@ pub(crate) fn raw_participant_report_from_extracted_metadata(
         phoxal_runtime_contract::ParticipantKind::Service => "service",
         phoxal_runtime_contract::ParticipantKind::Driver => "driver",
         phoxal_runtime_contract::ParticipantKind::Simulator => "simulator",
-        phoxal_runtime_contract::ParticipantKind::Tool => "tool",
     };
     if kind != artifact_kind {
         bail!(
@@ -125,61 +78,13 @@ pub(crate) fn raw_participant_report_from_extracted_metadata(
             artifact_kind,
         );
     }
-    let participant_class = match meta.class {
-        phoxal_runtime_contract::ParticipantClass::Checked => "checked",
-        phoxal_runtime_contract::ParticipantClass::Privileged => "privileged",
-    };
     Ok(RawParticipantReport {
         artifact: RawArtifact {
             kind: kind.to_string(),
             id: meta.id,
         },
-        participant_class: participant_class.to_string(),
         config_schema: Some(meta.config_schema),
     })
-}
-
-pub(crate) fn tool_env_override(
-    tool: &phoxal_cli_core::project::resolver::ResolvedTool,
-) -> Option<PathBuf> {
-    env_path_override("PHOXAL_ARTIFACT", &tool.name)
-        .or_else(|| env_path_override("PHOXAL_TOOL", &tool.name))
-        .or_else(|| {
-            std::env::var_os("PHOXAL_ARTIFACT_DIR")
-                .map(PathBuf::from)
-                .map(|dir| dir.join(&tool.binary_name))
-                .filter(|path| path.is_file())
-        })
-        .or_else(|| {
-            std::env::var_os("PHOXAL_TOOL_DIR")
-                .map(PathBuf::from)
-                .and_then(|dir| {
-                    [tool.name.as_str(), tool.binary_name.as_str()]
-                        .into_iter()
-                        .map(|name| dir.join(name))
-                        .find(|path| path.is_file())
-                })
-        })
-}
-
-pub(crate) fn env_path_override(prefix: &str, id: &str) -> Option<PathBuf> {
-    let key = format!("{prefix}_{}_PATH", env_key(id));
-    std::env::var_os(key)
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
-}
-
-pub(crate) fn env_key(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -191,7 +96,6 @@ mod tests {
             schema: phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA.to_string(),
             id: id.to_string(),
             kind: phoxal_runtime_contract::ParticipantKind::Service,
-            class: phoxal_runtime_contract::ParticipantClass::Checked,
             config_schema: serde_json::json!({"type": "object", "properties": {"speed": {"type": "integer"}}}),
         }
     }
@@ -209,7 +113,6 @@ mod tests {
         )?;
         assert_eq!(raw.artifact.id, "drive");
         assert_eq!(raw.artifact.kind, "service");
-        assert_eq!(raw.participant_class, "checked");
         assert_eq!(
             raw.config_schema,
             Some(

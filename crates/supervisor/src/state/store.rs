@@ -335,6 +335,13 @@ impl SupervisorState {
         self.modify(|snapshot| snapshot.router = bounded_text(&endpoint.into()));
     }
 
+    /// Record whether this robot can be driven by manual input. The client
+    /// reads the pad locally but needs the robot's authored parameters to turn
+    /// a trigger into a speed (organization#978).
+    pub fn set_manual_input(&self, manual_input: phoxal_cli_protocol::ManualInput) {
+        self.modify(|snapshot| snapshot.manual_input = manual_input);
+    }
+
     pub fn set_simulation_info(&self, profile: impl Into<String>, world: impl Into<String>) {
         self.modify(|snapshot| {
             snapshot.simulation = Some(phoxal_cli_core::runtime::SimulationSessionInfo {
@@ -594,7 +601,7 @@ mod tests {
         let mut consumer = state.subscribe();
         state.upsert_process(
             ProcessKey::project("router"),
-            ParticipantKind::Tool,
+            ParticipantKind::Host,
             ProcessState::Starting,
             StartupRequirement::Required,
         );

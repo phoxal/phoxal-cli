@@ -68,7 +68,7 @@ pub struct ConstructedPlan {
 }
 
 /// A compiler-owned runtime config paired with the schema embedded in its
-/// selected binary. This covers declared user services/tools and typed
+/// selected binary. This covers declared user services and typed
 /// compiler-generated official config such as behavior `{root, autostart}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRuntimeConfig {
@@ -176,29 +176,6 @@ impl RuntimeLayout {
                         });
                     }
                 }
-                RequiredRuntimeKind::OfficialTool => {
-                    // Tools are per-robot instances (`tool-<short>-<robot_id>`)
-                    // and always run under the real clock, exactly like the
-                    // resolved-robot leg's tool loop.
-                    let artifact_id = format!("tool-{}", required.identity);
-                    let participant_id = format!("{artifact_id}-{robot_id}");
-                    participants.push(cli_managed_record(
-                        artifact_id,
-                        ParticipantExecution::OfficialTool {
-                            binary_name: required.binary_name.clone(),
-                        },
-                        launch(
-                            &participant_id,
-                            &namespace,
-                            &robot_id,
-                            ClockMode::Real,
-                            None,
-                            &bundle_root,
-                            None,
-                            run,
-                        ),
-                    ));
-                }
                 RequiredRuntimeKind::UserService => {
                     let participant_id = required.identity.clone();
                     participants.push(cli_managed_record(
@@ -222,33 +199,6 @@ impl RuntimeLayout {
                         config_schema: config_schema(&required.binary_name)?,
                         config: required.config.clone(),
                         family: "services",
-                    });
-                }
-                RequiredRuntimeKind::UserTool => {
-                    let participant_id = required.identity.clone();
-                    participants.push(cli_managed_record(
-                        participant_id.clone(),
-                        ParticipantExecution::UserTool {
-                            binary_name: required.binary_name.clone(),
-                        },
-                        launch(
-                            &participant_id,
-                            &namespace,
-                            &robot_id,
-                            service_clock,
-                            required.config.clone(),
-                            &bundle_root,
-                            None,
-                            run,
-                        ),
-                    ));
-                    // The tool's config validates against its embedded schema
-                    // through the same pairing user services use (#950).
-                    user_runtime_configs.push(UserRuntimeConfig {
-                        runtime_id: participant_id,
-                        config_schema: config_schema(&required.binary_name)?,
-                        config: required.config.clone(),
-                        family: "tools",
                     });
                 }
                 RequiredRuntimeKind::ComponentDriver => {
@@ -374,7 +324,7 @@ mod tests {
     };
     use super::super::super::resolver::{
         BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
-        ResolvedTool, ResolvedUserRuntime, official_binary_name,
+        ResolvedUserRuntime,
     };
     use super::super::RuntimeLayout;
     use super::*;
@@ -450,7 +400,6 @@ services:
             "schema": phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA,
             "id": id,
             "kind": kind,
-            "class": "checked",
             "config_schema": config_schema,
         }))
         .expect("metadata serializes")
@@ -459,7 +408,6 @@ services:
     fn required_kind(required: RequiredRuntimeKind) -> &'static str {
         match required {
             RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => "service",
-            RequiredRuntimeKind::OfficialTool | RequiredRuntimeKind::UserTool => "tool",
             RequiredRuntimeKind::ComponentDriver => "driver",
         }
     }
@@ -507,11 +455,6 @@ services:
             .filter(|official| official.kind == ArtifactKind::Service)
             .map(|official| platform_runtime(catalog_short(official.package)))
             .collect();
-        let tools = catalog::NATIVE
-            .iter()
-            .filter(|official| official.kind == ArtifactKind::Tool)
-            .map(|official| official_tool(&format!("tool-{}", catalog_short(official.package))))
-            .collect();
         Ok(BundlePlan {
             source_manifest: robot,
             compiled: Default::default(),
@@ -528,13 +471,11 @@ services:
                 path: PathBuf::from("services/mission"),
                 source_hash: "hash".to_string(),
             }],
-            user_tools: Vec::new(),
             undeclared_runtimes: Vec::new(),
             components: vec![
                 driven_component("left_drive"),
                 driven_component("right_drive"),
             ],
-            tools,
             path_overrides: Vec::new(),
         })
     }
@@ -547,19 +488,6 @@ services:
             path_override: None,
             train: "0.36.0".to_string(),
             target: None,
-        }
-    }
-
-    fn official_tool(name: &str) -> ResolvedTool {
-        let short = name.strip_prefix("tool-").unwrap_or(name);
-        ResolvedTool {
-            kind: ArtifactKind::Tool,
-            name: name.to_string(),
-            package: format!("phoxal/tool-{short}"),
-            binary_name: official_binary_name(ArtifactKind::Tool, short),
-            path_override: None,
-            train: "0.36.0".to_string(),
-            target: "triple".to_string(),
         }
     }
 
@@ -584,7 +512,6 @@ services:
             participant_id: participant_id.to_string(),
             artifact_id: artifact_id.to_string(),
             participant_kind: kind,
-            participant_class: graph_check::ParticipantClass::Checked,
             config_schema: None,
             scope,
         }

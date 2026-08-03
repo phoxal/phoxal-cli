@@ -123,7 +123,7 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
     let webots_spec = ParticipantSpec {
         key: webots_key.clone(),
         id: WEBOTS_PROCESS_ID.to_string(),
-        kind: ParticipantKind::Tool,
+        kind: ParticipantKind::Host,
         executable: request.webots.executable,
         args: webots_launch_args(&staged_world.staged_world_path),
         cwd: None,
@@ -140,7 +140,7 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
     participants.push(PreparedParticipant {
         key: webots_key.clone(),
         id: WEBOTS_PROCESS_ID.to_string(),
-        kind: ParticipantKind::Tool,
+        kind: ParticipantKind::Host,
         robot: None,
         local: true,
         startup_requirement: StartupRequirement::Required,
@@ -152,6 +152,7 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
     Ok(PreparedExecution {
         target: request.target,
         project_root: resolved.project_root,
+        manual_input: crate::manual_input_from_staged_root(&staged_root),
         staged_root,
         train: resolved.resolved.train.clone(),
         plan,

@@ -8,15 +8,17 @@ pub enum LogSourceFilter {
     #[default]
     All,
     Runtimes,
-    Tools,
+    /// Everything that is not a robot participant: this CLI's own
+    /// diagnostics, the supervisor, and host processes such as Webots.
+    System,
 }
 
 impl LogSourceFilter {
     pub const fn cycle(self) -> Self {
         match self {
             Self::All => Self::Runtimes,
-            Self::Runtimes => Self::Tools,
-            Self::Tools => Self::All,
+            Self::Runtimes => Self::System,
+            Self::System => Self::All,
         }
     }
 }

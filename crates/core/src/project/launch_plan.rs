@@ -18,8 +18,6 @@ use crate::check::source::{SourceParticipant, SourceParticipantKind};
 use crate::runtime::{RuntimeFailurePolicy, StartupRequirement};
 
 pub const DEFAULT_ROUTER_CONNECT: &str = "tcp/localhost:7447";
-pub const ROBOT_TOOL_JOYPAD: &str = "tool-joypad";
-pub const ROBOT_TOOL_DEVICE: &str = "tool-device";
 /// The staged runtime layout / `cargo install --root` directory
 /// (organization#951 WS4). No per-triple nesting: one robot targets one
 /// platform at a time, so a second `--target` simply restages this same root.
@@ -197,14 +195,8 @@ pub enum ParticipantExecution {
     /// vendored or built from a workspace override - resolved from
     /// `bin/<binary_name>`.
     OfficialArtifact { binary_name: String },
-    /// A privileged official tool, vendored or overridden, resolved from
-    /// `bin/<binary_name>`.
-    OfficialTool { binary_name: String },
     /// A user service, resolved from `bin/<binary_name>`.
     UserService { binary_name: String },
-    /// A declared additional user tool (`tools:` in robot.yaml, #950),
-    /// resolved from `bin/<binary_name>`.
-    UserTool { binary_name: String },
     /// A component driver - one binary serving every instance of a component
     /// id - resolved from `bin/<binary_name>`.
     ComponentDriver { binary_name: String },
@@ -218,9 +210,7 @@ impl ParticipantExecution {
     pub fn binary_name(&self) -> &str {
         match self {
             Self::OfficialArtifact { binary_name }
-            | Self::OfficialTool { binary_name }
             | Self::UserService { binary_name }
-            | Self::UserTool { binary_name }
             | Self::ComponentDriver { binary_name } => binary_name,
         }
     }
@@ -318,13 +308,6 @@ impl Default for RunIdentity {
     }
 }
 
-/// The kind-stripped short name of an official tool artifact id
-/// (`tool-bus` -> `bus`), matching the CLI catalog's short name and so the
-/// canonical `bin/` binary the loader resolves the tool under.
-fn tool_short_name(artifact_id: &str) -> &str {
-    artifact_id.strip_prefix("tool-").unwrap_or(artifact_id)
-}
-
 fn build_robot_launch(
     mode: &LaunchMode,
     input: &CheckedRobotLaunchInput<'_>,
@@ -354,7 +337,7 @@ fn build_robot_launch(
     for checked in input
         .checked_participants
         .iter()
-        .filter(|participant| is_robot_launch_participant(mode, participant, &source_participants))
+        .filter(|participant| is_robot_launch_participant(mode, participant))
     {
         let execution = participant_execution(checked, &source_participants, &official_kinds)?;
         let launch = participant_launch(mode, input, checked, run);
@@ -364,46 +347,6 @@ fn build_robot_launch(
             launch,
             startup_requirement: StartupRequirement::Required,
             runtime_failure: RuntimeFailurePolicy::StopProject,
-        });
-    }
-    for tool in input
-        .resolved
-        .tools
-        .iter()
-        .filter(|tool| tool.kind == ArtifactKind::Tool)
-    {
-        let startup_requirement = StartupRequirement::Required;
-        let runtime_failure = RuntimeFailurePolicy::StopProject;
-        participants.push(ParticipantLaunchRecord {
-            artifact_id: tool.name.clone(),
-            // Vendored or workspace-overridden, a tool resolves to the one
-            // canonical `bin/` entry the loader names; whether it was rebuilt
-            // from a crate is recovered from the resolved graph at staging,
-            // never encoded in the source-free plan (#936).
-            execution: ParticipantExecution::OfficialTool {
-                binary_name: official_binary_name(ArtifactKind::Tool, tool_short_name(&tool.name)),
-            },
-            launch: ParticipantLaunch {
-                participant_id: format!(
-                    "{}-{}",
-                    tool.name, input.resolved.source_manifest.robot.id
-                ),
-                execution: run.execution(),
-                producer: ProducerId::mint(),
-                execution_origin: Some(run.origin()),
-                namespace: input.resolved.source_manifest.robot.namespace.clone(),
-                robot_id: input.resolved.source_manifest.robot.id.clone(),
-                bus: BusProfile {
-                    connect_endpoints: vec![DEFAULT_ROUTER_CONNECT.to_string()],
-                },
-                clock: ClockMode::Real,
-                config: None,
-                bundle_root: Some(runtime_layout_dir(input.project_root)),
-                component_instance: None,
-                shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
-            },
-            startup_requirement,
-            runtime_failure,
         });
     }
     participants.sort_by(|left, right| {
@@ -423,16 +366,7 @@ fn build_robot_launch(
 fn is_robot_launch_participant(
     mode: &LaunchMode,
     participant: &graph_check::ParticipantApis,
-    source_participants: &BTreeMap<&str, &SourceParticipant>,
 ) -> bool {
-    if !participant.participant_class.is_checked() {
-        return false;
-    }
-    if participant.participant_kind == graph_check::ParticipantKind::Tool {
-        return source_participants
-            .get(participant.participant_id.as_str())
-            .is_some_and(|source| source.kind == SourceParticipantKind::UserTool);
-    }
     if participant.participant_kind == graph_check::ParticipantKind::Simulator {
         // Webots owns its controller process. Simulator artifacts participate
         // in compile-time graph validation and content staging, never in the
@@ -486,12 +420,9 @@ fn participant_execution(
             SourceParticipantKind::Simulator => ParticipantExecution::OfficialArtifact {
                 binary_name: official_binary_name(ArtifactKind::Simulator, &checked.artifact_id),
             },
-            SourceParticipantKind::UserTool => ParticipantExecution::UserTool {
-                binary_name: checked.artifact_id.clone(),
-            },
             // Component drivers are handled by the component-instance branch
-            // above; official tools are supplied by `resolved.tools`.
-            SourceParticipantKind::ComponentDriver | SourceParticipantKind::Tool => bail!(
+            // above.
+            SourceParticipantKind::ComponentDriver => bail!(
                 "source participant {} of kind {:?} is not a launchable non-driver participant",
                 source.name,
                 source.kind
@@ -562,15 +493,10 @@ fn participant_launch(
 
 fn ensure_launch_set_parity(mode: &LaunchMode, input: &CheckedRobotLaunchInput<'_>) -> Result<()> {
     let expected = expected_checked_participant_ids(mode, input.resolved);
-    let source_participants = input
-        .source_participants
-        .iter()
-        .map(|participant| (participant.name.as_str(), participant))
-        .collect::<BTreeMap<_, _>>();
     let checked = input
         .checked_participants
         .iter()
-        .filter(|participant| is_robot_launch_participant(mode, participant, &source_participants))
+        .filter(|participant| is_robot_launch_participant(mode, participant))
         .map(|participant| participant.participant_id.clone())
         .collect::<BTreeSet<_>>();
 
@@ -609,12 +535,6 @@ fn expected_checked_participant_ids(mode: &LaunchMode, resolved: &BundlePlan) ->
     expected.extend(
         resolved
             .user_runtimes
-            .iter()
-            .map(|runtime| runtime.name.clone()),
-    );
-    expected.extend(
-        resolved
-            .user_tools
             .iter()
             .map(|runtime| runtime.name.clone()),
     );
@@ -663,10 +583,8 @@ mod tests {
         );
     }
 
-    use crate::project::catalog::ArtifactKind;
     use crate::project::resolver::{
-        BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
-        ResolvedTool, ResolvedUserRuntime,
+        BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedUserRuntime,
     };
 
     use super::*;
@@ -717,13 +635,31 @@ mod tests {
     #[test]
     fn launch_plan_constructor_enforces_runtime_process_bound() -> anyhow::Result<()> {
         let mut resolved = empty_bundle_plan("testbot")?;
-        resolved.tools = (0..38)
-            .map(|index| tool(&format!("tool-{index}")))
-            .collect();
+        let names = (0..38)
+            .map(|index| format!("service-{index}"))
+            .collect::<Vec<_>>();
+        for name in &names {
+            add_user_service(&mut resolved, name);
+        }
+        let checked = names
+            .iter()
+            .map(|name| participant(name, name, graph_check::ParticipantScope::Graph))
+            .collect::<Vec<_>>();
+        let sources = names
+            .iter()
+            .map(|name| {
+                SourceParticipant::user_service(name.clone(), PathBuf::from(format!("/tmp/{name}")))
+            })
+            .collect::<Vec<_>>();
 
         let error = build_launch_plan(
             LaunchMode::Run,
-            &[empty_checked_input(Path::new("/tmp/robot"), &resolved)],
+            &[CheckedRobotLaunchInput {
+                project_root: Path::new("/tmp/robot"),
+                resolved: &resolved,
+                checked_participants: &checked,
+                source_participants: &sources,
+            }],
             RunIdentity::default(),
         )
         .expect_err("the authoritative constructor must reject 41 processes");
@@ -734,9 +670,8 @@ mod tests {
     }
 
     #[test]
-    fn launch_plan_covers_per_robot_tools_and_user_service_config() -> anyhow::Result<()> {
+    fn launch_plan_carries_user_service_config_through_the_launch_env() -> anyhow::Result<()> {
         let mut resolved = empty_bundle_plan("testbot")?;
-        add_robot_tools(&mut resolved);
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),
             path: PathBuf::from("runtimes/mission"),
@@ -777,25 +712,6 @@ mod tests {
             RunIdentity::default(),
         )?;
 
-        assert_eq!(
-            plan.robots[0]
-                .participants
-                .iter()
-                .filter_map(|participant| match participant.execution {
-                    ParticipantExecution::OfficialTool { .. } => {
-                        Some(participant.launch.participant_id.as_str())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            vec![
-                "tool-bus-testbot",
-                "tool-device-testbot",
-                "tool-joypad-testbot",
-                "tool-log-testbot",
-                "tool-telemetry-testbot",
-            ]
-        );
         let mission = plan.robots[0]
             .participants
             .iter()
@@ -808,82 +724,6 @@ mod tests {
                 .get(phoxal_runtime_contract::env::CONFIG)
                 .map(String::as_str),
             Some(r#"{"message":"line\nquoted \"value\""}"#)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn webots_plan_keeps_declared_user_tools_in_the_resident_graph() -> anyhow::Result<()> {
-        let mut resolved = empty_bundle_plan("testbot")?;
-        resolved.simulators.push(platform_runtime(
-            "webots-controller",
-            ArtifactKind::Simulator,
-        ));
-        resolved.user_tools.push(ResolvedUserRuntime {
-            name: "console".to_string(),
-            path: PathBuf::from("tools/console"),
-            source_hash: "hash".to_string(),
-        });
-        resolved.source_manifest.tools.insert(
-            "console".to_string(),
-            phoxal_manifest::source::robot::v0::UserTool {
-                config: Some(serde_json::json!({"rate": 20})),
-            },
-        );
-        resolved
-            .compiled
-            .participants
-            .push(phoxal_manifest::Participant {
-                id: "console".to_string(),
-                kind: phoxal_manifest::ParticipantKind::Tool,
-                component_instance: None,
-                config: Some(serde_json::json!({"rate": 20})),
-            });
-        let sources = vec![SourceParticipant::user_tool(
-            "console",
-            PathBuf::from("/tmp/console"),
-        )];
-        let mut tool = participant("console", "console", graph_check::ParticipantScope::Graph);
-        tool.participant_kind = graph_check::ParticipantKind::Tool;
-        let controller_id = simulator_controller_provider_id("testbot");
-        let mut controller = participant(
-            &controller_id,
-            SIMULATOR_CONTROLLER_ARTIFACT_NAME,
-            graph_check::ParticipantScope::Graph,
-        );
-        controller.participant_kind = graph_check::ParticipantKind::Simulator;
-        let checked = [tool, controller];
-        let plan = build_launch_plan(
-            LaunchMode::Webots {
-                world: PathBuf::from("/tmp/default.wbt"),
-            },
-            &[CheckedRobotLaunchInput {
-                project_root: Path::new("/tmp/robot"),
-                resolved: &resolved,
-                checked_participants: &checked,
-                source_participants: &sources,
-            }],
-            RunIdentity::default(),
-        )?;
-
-        assert_eq!(
-            plan.robots[0].participants.len(),
-            1,
-            "the Webots controller is compile-time metadata, never a resident process"
-        );
-        let console = &plan.robots[0].participants[0];
-        assert_eq!(
-            console.execution,
-            ParticipantExecution::UserTool {
-                binary_name: "console".to_string()
-            }
-        );
-        assert_eq!(console.launch.config, Some(serde_json::json!({"rate": 20})));
-        assert!(
-            !plan.robots[0]
-                .participants
-                .iter()
-                .any(|participant| participant.launch.participant_id == controller_id)
         );
         Ok(())
     }
@@ -905,20 +745,11 @@ mod tests {
             graph_check::ParticipantScope::Graph,
         );
         driver.participant_kind = graph_check::ParticipantKind::Driver;
-        let source_participants = BTreeMap::new();
         let webots = LaunchMode::Webots {
             world: PathBuf::from("/tmp/default.wbt"),
         };
-        assert!(!is_robot_launch_participant(
-            &webots,
-            &driver,
-            &source_participants
-        ));
-        assert!(is_robot_launch_participant(
-            &LaunchMode::Run,
-            &driver,
-            &source_participants
-        ));
+        assert!(!is_robot_launch_participant(&webots, &driver));
+        assert!(is_robot_launch_participant(&LaunchMode::Run, &driver));
         assert!(!expected_checked_participant_ids(&webots, &resolved).contains("left_drive"));
         assert!(
             expected_checked_participant_ids(&LaunchMode::Run, &resolved).contains("left_drive")
@@ -1017,62 +848,6 @@ robot:
         Ok(())
     }
 
-    #[test]
-    fn run_robot_tools_have_unique_participant_ids_per_robot() -> anyhow::Result<()> {
-        let mut robot_a = empty_bundle_plan("robot_a")?;
-        let mut robot_b = empty_bundle_plan("robot_b")?;
-        add_robot_tools(&mut robot_a);
-        add_robot_tools(&mut robot_b);
-        let inputs = [
-            empty_checked_input(Path::new("/tmp/project"), &robot_a),
-            empty_checked_input(Path::new("/tmp/project"), &robot_b),
-        ];
-
-        let plan = build_launch_plan(LaunchMode::Run, &inputs, RunIdentity::default())?;
-        let ids = plan
-            .robots
-            .iter()
-            .flat_map(|robot| {
-                robot
-                    .participants
-                    .iter()
-                    .map(|participant| participant.launch.participant_id.as_str())
-            })
-            .collect::<Vec<_>>();
-        assert!(ids.contains(&"tool-bus-robot_a"));
-        assert!(ids.contains(&"tool-log-robot_a"));
-        assert!(ids.contains(&"tool-joypad-robot_a"));
-        assert!(ids.contains(&"tool-bus-robot_b"));
-        assert!(ids.contains(&"tool-log-robot_b"));
-        assert!(ids.contains(&"tool-joypad-robot_b"));
-        let devices = plan
-            .robots
-            .iter()
-            .map(|robot| {
-                robot
-                    .participants
-                    .iter()
-                    .find(|participant| participant.artifact_id == ROBOT_TOOL_DEVICE)
-                    .expect("per-robot device activation")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(devices.len(), 2);
-        assert_eq!(
-            devices[0].launch.execution, devices[1].launch.execution,
-            "co-hosted robot samplers belong to one supervised run"
-        );
-        assert_ne!(
-            devices[0].launch.producer, devices[1].launch.producer,
-            "each participant is its own producer"
-        );
-        assert_eq!(devices[0].startup_requirement, StartupRequirement::Required);
-        assert_eq!(
-            devices[0].runtime_failure,
-            RuntimeFailurePolicy::StopProject
-        );
-        Ok(())
-    }
-
     /// The `/var/phoxal -> releases/<ts>/` deployment model (#930): the device
     /// identity is taken from the *logical* symlink path, so retargeting the
     /// symlink to a new release directory keeps the same identity - observation
@@ -1116,7 +891,6 @@ robot:
     #[test]
     fn parity_rejects_missing_and_extra_checked_metadata() -> anyhow::Result<()> {
         let mut resolved = empty_bundle_plan("testbot")?;
-        add_robot_tools(&mut resolved);
         resolved.user_runtimes.push(ResolvedUserRuntime {
             name: "mission".to_string(),
             path: PathBuf::from("runtimes/mission"),
@@ -1157,7 +931,6 @@ robot:
             participant_id: participant_id.to_string(),
             artifact_id: artifact_id.to_string(),
             participant_kind: graph_check::ParticipantKind::Service,
-            participant_class: graph_check::ParticipantClass::Checked,
             config_schema: None,
             scope,
         }
@@ -1200,43 +973,34 @@ robot:
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
-            user_tools: Vec::new(),
             undeclared_runtimes: Vec::new(),
             components: Vec::new(),
-            tools: Vec::new(),
             path_overrides: Vec::new(),
         })
     }
 
-    fn add_robot_tools(resolved: &mut BundlePlan) {
-        resolved.tools.push(tool("tool-bus"));
-        resolved.tools.push(tool("tool-joypad"));
-        resolved.tools.push(tool("tool-log"));
-        resolved.tools.push(tool("tool-telemetry"));
-        resolved.tools.push(tool(ROBOT_TOOL_DEVICE));
-    }
-
-    fn platform_runtime(name: &str, kind: ArtifactKind) -> ResolvedPlatformRuntime {
-        ResolvedPlatformRuntime {
+    /// Declare one user service on `resolved`, complete enough for the launch
+    /// planner: the workspace crate, the authored declaration, and the
+    /// compiled participant record.
+    fn add_user_service(resolved: &mut BundlePlan, name: &str) {
+        resolved.user_runtimes.push(ResolvedUserRuntime {
             name: name.to_string(),
-            package: format!("phoxal/simulator-{name}"),
-            kind,
-            path_override: None,
-            train: "0.36.0".to_string(),
-            target: Some(host_target_triple_for_tests()),
-        }
-    }
-
-    fn tool(name: &str) -> ResolvedTool {
-        ResolvedTool {
-            kind: ArtifactKind::Tool,
-            name: name.to_string(),
-            package: format!("phoxal/{name}"),
-            binary_name: name.to_string(),
-            path_override: None,
-            train: "0.36.0".to_string(),
-            target: host_target_triple_for_tests(),
-        }
+            path: PathBuf::from(format!("services/{name}")),
+            source_hash: "hash".to_string(),
+        });
+        resolved.source_manifest.services.insert(
+            name.to_string(),
+            phoxal_manifest::source::robot::v0::UserService { config: None },
+        );
+        resolved
+            .compiled
+            .participants
+            .push(phoxal_manifest::Participant {
+                id: name.to_string(),
+                kind: phoxal_manifest::ParticipantKind::Service,
+                component_instance: None,
+                config: None,
+            });
     }
 
     fn host_target_triple_for_tests() -> String {

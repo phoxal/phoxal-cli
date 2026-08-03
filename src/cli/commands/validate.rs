@@ -48,9 +48,6 @@ impl Validate {
                         "services": report.services.iter().map(|name| {
                             serde_json::json!({"name": name, "declared": true})
                         }).collect::<Vec<_>>(),
-                        "tools": report.tools.iter().map(|name| {
-                            serde_json::json!({"name": name, "declared": true})
-                        }).collect::<Vec<_>>(),
                         "components": report.components,
                     });
                     println!("{}", serde_json::to_string_pretty(&json)?);
@@ -65,10 +62,6 @@ impl Validate {
                     println!("services:");
                     for service in &report.services {
                         println!("  - {service} (declared)");
-                    }
-                    println!("tools:");
-                    for tool in &report.tools {
-                        println!("  - {tool} (declared)");
                     }
                     println!("components:");
                     for component in &report.components {
