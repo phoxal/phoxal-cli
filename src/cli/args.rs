@@ -15,7 +15,7 @@ use super::commands::{
     version = version::long_version(),
     about = "Build, check, and simulate Phoxal robot projects.",
     long_about = "Build, check, and simulate Phoxal robot projects.\n\n\
-                  phoxal reads robot.yaml and materializes official services, tools, and component drivers with `cargo install` against the phoxal registry, pinned exactly to the Cargo.lock-selected framework train, then drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes."
+                  phoxal reads robot.yaml and materializes official services and component drivers with `cargo install` against the phoxal registry, pinned exactly to the Cargo.lock-selected framework train, then drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes."
 )]
 pub struct Cli {
     #[arg(
@@ -57,9 +57,9 @@ pub enum RootCommand {
     #[command(about = "Activate an older installed runtime release.")]
     Rollback(rollback::Rollback),
     #[command(
-        about = "Validate robot.yaml structure, Cargo workspace runtime ownership, and declared service/tool config.",
-        long_about = "Validate that this project is well-formed: robot.yaml structure, Cargo workspace runtime ownership (every declared services/tools entry has a matching workspace crate), and every declared service's/tool's config against the JSON Schema its own participant type embeds.\n\n\
-                      The config-schema check compiles the declared service/tool crates (never the official set, never a staged bundle) to read their embedded schema - the one part of `validate` that is not free. A robot.yaml with no declared services/tools compiles nothing."
+        about = "Validate robot.yaml structure, Cargo workspace runtime ownership, and declared service config.",
+        long_about = "Validate that this project is well-formed: robot.yaml structure, Cargo workspace runtime ownership (every declared services entry has a matching workspace crate), and every declared service's config against the JSON Schema its own participant type embeds.\n\n\
+                      The config-schema check compiles the declared service crates (never the official set, never a staged bundle) to read their embedded schema - the one part of `validate` that is not free. A robot.yaml with no declared services compiles nothing."
     )]
     Validate(validate::Validate),
     #[command(about = "Generate portable JSON Schemas for authored YAML editors.")]

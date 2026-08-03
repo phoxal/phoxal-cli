@@ -1,0 +1,24 @@
+ phoxal /Users/jbernavaprah/RustroverProjects/phoxal/robot-rover  ready  connect
+────────────────────────────────────────────────────────────────────────────────
+>1 Overview   2 Runtimes   3 Logs   4 Input
+
+╭ Project ─────────────────────────────────╮╭ Health ──────────────────────────╮
+│Project: /Users/jbernavaprah/RustroverProj││All observed sources are fresh    │
+│Mode: native                              ││Epoch history shed: 0             │
+│Connection: connected                     ││                                  │
+│Lifecycle: Ready                          ││                                  │
+│Startup: 4 steps complete                 ││                                  │
+│Framework: 0.52.0                         ││                                  │
+│Router: unixsock-stream//Users/jbernavapra││                                  │
+│Processes: 13                             ││                                  │
+│                                          ││                                  │
+│                                          ││                                  │
+╰──────────────────────────────────────────╯╰──────────────────────────────────╯
+╭ Diagnostics ─────────────────────────────────────────────────────────────────╮
+│No diagnostics                                                                │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+────────────────────────────────────────────────────────────────────────────────
+ tabs  Enter descend  Esc ascend  ? help  i session  S stop  q detach

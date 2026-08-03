@@ -1,0 +1,32 @@
+ phoxal /Users/jbernavaprah/RustroverProjects/phoxal/robot-rover  ready  connected
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>1 Overview   2 Runtimes   3 Logs   4 Input
+
+╭ Project ───────────────────────────────────────────────────────╮╭ Health ────────────────────────────────────────────╮
+│Project: /Users/jbernavaprah/RustroverProjects/phoxal/robot-rove││All observed sources are fresh                      │
+│Mode: native                                                    ││Epoch history shed: 0                               │
+│Connection: connected                                           ││                                                    │
+│Lifecycle: Ready                                                ││                                                    │
+│Startup: ✓ Project          robot.yaml · framework 0.52.0 · 0.1…││                                                    │
+│         ✓ Prepare runtime  publishing runtime layout · 8.0s    ││                                                    │
+│         ✓ Infrastructure   router unixsock-stream//Users/jbern…││                                                    │
+│         ✓ Robot graph      13 participants ready · 6.5s        ││                                                    │
+│Framework: 0.52.0                                               ││                                                    │
+│Router: unixsock-stream//Users/jbernavaprah/RustroverProjects/ph││                                                    │
+│Processes: 13                                                   ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+│                                                                ││                                                    │
+╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────╯
+╭ Diagnostics ─────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│No diagnostics                                                                                                        │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ tabs  Enter descend  Esc ascend  ? help  i session  S stop  q detach

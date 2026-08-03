@@ -19,6 +19,7 @@ members = [
     "crates/protocol",
     "crates/supervisor",
     "crates/ui",
+    "xtask",
 ]
 default-members = [
     ".",
