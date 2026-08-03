@@ -22,10 +22,22 @@ pub struct Scenario {
     /// Whether a resident must be running for this scenario to mean anything.
     /// The TUI only exists against one.
     pub needs_resident: bool,
+    /// Whether this scenario renders the full-screen TUI. Below the shell's
+    /// supported minimum a TUI paints only its too-small notice, so its normal
+    /// ready marker never arrives and the harness must expect the notice
+    /// instead (organization#974).
+    is_tui: bool,
     args: &'static [&'static str],
     /// Text that must appear before the screen is worth reading.
     ready_marker: &'static str,
 }
+
+/// The shell's supported minimum, mirrored from `phoxal_cli_ui::minimum_size`.
+/// Mirrored rather than imported: this drives the *shipped binary*, which may
+/// be a different build than this checkout, so it must not silently adopt this
+/// checkout's idea of the minimum.
+const MINIMUM: TerminalSize = TerminalSize::new(80, 24);
+const TOO_SMALL_NOTICE: &str = "terminal too small";
 
 impl Scenario {
     /// Bring up whatever this scenario attaches to.
@@ -41,6 +53,16 @@ impl Scenario {
         }
     }
 
+    /// What proves the first usable frame arrived at `size`.
+    fn marker_at(&self, size: TerminalSize) -> &str {
+        let too_small = size.cols < MINIMUM.cols || size.rows < MINIMUM.rows;
+        if self.is_tui && too_small {
+            TOO_SMALL_NOTICE
+        } else {
+            self.ready_marker
+        }
+    }
+
     /// Start the scenario and return once its first usable frame is up.
     pub fn launch(&self, binary: &Path, project: &Path, size: TerminalSize) -> Result<Session> {
         let args = self
@@ -49,7 +71,7 @@ impl Scenario {
             .map(|arg| (*arg).to_string())
             .collect::<Vec<_>>();
         let mut session = Session::spawn(binary, &args, project, size)?;
-        session.wait_for(self.ready_marker, FIRST_FRAME_BUDGET)?;
+        session.wait_for(self.marker_at(size), FIRST_FRAME_BUDGET)?;
         // One more settle so a marker that arrives mid-paint does not snapshot
         // a half-drawn frame.
         session.settle(Duration::from_millis(250), Duration::from_secs(2))?;
@@ -63,6 +85,7 @@ pub const ALL: &[Scenario] = &[
         description: "the TUI attached to a live robot - the main event",
         needs_project: true,
         needs_resident: true,
+        is_tui: true,
         args: &["attach"],
         ready_marker: "Runtimes",
     },
@@ -71,6 +94,7 @@ pub const ALL: &[Scenario] = &[
         description: "attaching to nothing: the error a user gets, not a TUI",
         needs_project: true,
         needs_resident: false,
+        is_tui: false,
         args: &["attach"],
         ready_marker: "project is not running",
     },
@@ -79,6 +103,7 @@ pub const ALL: &[Scenario] = &[
         description: "the non-TUI baseline that proves the harness itself works",
         needs_project: false,
         needs_resident: false,
+        is_tui: false,
         args: &["--version"],
         ready_marker: "phoxal",
     },

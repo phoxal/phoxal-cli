@@ -110,3 +110,86 @@ fn diff(recorded: &str, actual: &str) -> String {
     }
     out
 }
+
+/// Replace the parts of a screen that legitimately differ between two
+/// identical runs.
+///
+/// Without this, every snapshot "changes" every run and the comparison stops
+/// meaning anything - which is worse than having no comparison, because it
+/// trains the reader to ignore it. What is normalized here is exactly what a
+/// second run of the same build would render differently: elapsed times, the
+/// absolute path the harness happened to run from, and minted identities.
+pub fn normalize(screen: &str, project: &Path) -> String {
+    let project = project.to_string_lossy().to_string();
+    screen
+        .lines()
+        .map(|line| {
+            let line = line.replace(&project, "<project>");
+            normalize_durations(&line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `8.2s` / `0.15s` / `1m 3s` -> `<t>`. Elapsed time is the loudest source of
+/// snapshot churn and never the thing under review.
+fn normalize_durations(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if !ch.is_ascii_digit() {
+            out.push(ch);
+            continue;
+        }
+        let rest = &line[index..];
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len());
+        if rest[digits..].starts_with('s') && rest[..digits].contains('.') {
+            out.push_str("<t>s");
+            for _ in 1..=digits {
+                chars.next();
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_times_are_normalized_so_two_identical_runs_match() {
+        assert_eq!(
+            normalize_durations("✓ Robot graph  13 participants ready · 8.2s"),
+            "✓ Robot graph  13 participants ready · <t>s"
+        );
+        assert_eq!(
+            normalize_durations("✓ Project  robot.yaml · framework 0.52.0 · 0.1s"),
+            "✓ Project  robot.yaml · framework 0.52.0 · <t>s"
+        );
+    }
+
+    #[test]
+    fn version_numbers_are_not_mistaken_for_durations() {
+        // `0.52.0` must survive: the framework train is exactly the kind of
+        // thing a snapshot exists to catch changing.
+        assert_eq!(
+            normalize_durations("framework 0.52.0 · 13 processes"),
+            "framework 0.52.0 · 13 processes"
+        );
+        assert_eq!(normalize_durations("Processes: 13"), "Processes: 13");
+    }
+
+    #[test]
+    fn the_projects_absolute_path_becomes_a_placeholder() {
+        let screen = normalize(
+            "Project: /home/dev/robots/rover",
+            Path::new("/home/dev/robots/rover"),
+        );
+        assert_eq!(screen, "Project: <project>");
+    }
+}

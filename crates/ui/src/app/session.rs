@@ -22,6 +22,7 @@ use tuirealm::ratatui::Terminal;
 use tuirealm::ratatui::backend::CrosstermBackend;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::layout::{Constraint, Direction, Layout};
+use tuirealm::ratatui::widgets::Paragraph;
 use tuirealm::state::State;
 
 use crate::Theme;
@@ -201,6 +202,17 @@ fn render_requested(
     }
     if redraw {
         terminal.draw(|frame| {
+            // Below the supported minimum the fixed bands eat the whole frame
+            // and every panel collapses to its own border. Say so instead of
+            // painting a layout that cannot be honoured (organization#974).
+            if !crate::minimum_size::fits(frame.area()) {
+                let message = crate::minimum_size::message(frame.area());
+                frame.render_widget(
+                    Paragraph::new(message.as_str()),
+                    crate::minimum_size::centered(frame.area(), &message),
+                );
+                return;
+            }
             let [header, tabs, body, footer] = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([

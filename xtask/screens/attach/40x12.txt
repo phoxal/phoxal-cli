@@ -1,12 +1,6 @@
- phoxal /Users/jbernavaprah/RustroverPro
-────────────────────────────────────────
->1 Overview   2 Runtimes   3 Logs   4 In
 
-╭ Project ───────────╮╭ Health ────────╮
-│Project: /Users/jber││All observed sou│
-│Mode: native        ││Epoch history sh│
-╰────────────────────╯╰────────────────╯
-╭ Diagnostics ─────────────────────────╮
-╰──────────────────────────────────────╯
-────────────────────────────────────────
- tabs  Enter descend  Esc ascend  ? help
+
+
+
+
+ terminal too small (40x12, need 80x24)

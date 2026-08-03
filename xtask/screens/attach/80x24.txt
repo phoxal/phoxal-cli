@@ -1,4 +1,4 @@
- phoxal /Users/jbernavaprah/RustroverProjects/phoxal/robot-rover  ready  connect
+ phoxal <project>  ready  connect
 ────────────────────────────────────────────────────────────────────────────────
 >1 Overview   2 Runtimes   3 Logs   4 Input
 

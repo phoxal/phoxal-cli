@@ -1,18 +1,18 @@
- phoxal /Users/jbernavaprah/RustroverProjects/phoxal/robot-rover  ready  connected
+ phoxal <project>  ready  connected
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 >1 Overview   2 Runtimes   3 Logs   4 Input
 
 ╭ Project ───────────────────────────────────────────────────────────────────────────────────────────────────╮╭ Health ────────────────────────────────────────────────────────────────────────────────╮
-│Project: /Users/jbernavaprah/RustroverProjects/phoxal/robot-rover                                           ││All observed sources are fresh                                                          │
+│Project: <project>                                           ││All observed sources are fresh                                                          │
 │Mode: native                                                                                                ││Epoch history shed: 0                                                                   │
 │Connection: connected                                                                                       ││                                                                                        │
 │Lifecycle: Ready                                                                                            ││                                                                                        │
-│Startup: ✓ Project          robot.yaml · framework 0.52.0 · 0.1s                                            ││                                                                                        │
-│         ✓ Prepare runtime  publishing runtime layout · 8.0s                                                ││                                                                                        │
-│         ✓ Infrastructure   router unixsock-stream//Users/jbernavaprah/RustroverProjects/phoxal/robot-rover…││                                                                                        │
-│         ✓ Robot graph      13 participants ready · 6.5s                                                    ││                                                                                        │
+│Startup: ✓ Project          robot.yaml · framework 0.52.0 · <t>s                                            ││                                                                                        │
+│         ✓ Prepare runtime  publishing runtime layout · <t>s                                                ││                                                                                        │
+│         ✓ Infrastructure   router unixsock-stream/<project>…││                                                                                        │
+│         ✓ Robot graph      13 participants ready · <t>s                                                    ││                                                                                        │
 │Framework: 0.52.0                                                                                           ││                                                                                        │
-│Router: unixsock-stream//Users/jbernavaprah/RustroverProjects/phoxal/robot-rover/.phoxal/run/zenoh.sock     ││                                                                                        │
+│Router: unixsock-stream/<project>/.phoxal/run/zenoh.sock     ││                                                                                        │
 │Processes: 13                                                                                               ││                                                                                        │
 │                                                                                                            ││                                                                                        │
 │                                                                                                            ││                                                                                        │

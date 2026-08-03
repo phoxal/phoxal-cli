@@ -6,6 +6,7 @@
 pub mod app;
 pub mod components;
 pub mod format;
+pub mod minimum_size;
 pub mod terminal;
 pub mod theme;
 

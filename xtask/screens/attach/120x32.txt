@@ -1,4 +1,4 @@
- phoxal /Users/jbernavaprah/RustroverProjects/phoxal/robot-rover  ready  connected
+ phoxal <project>  ready  connected
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 >1 Overview   2 Runtimes   3 Logs   4 Input
 
@@ -8,9 +8,9 @@
 │Connection: connected                                           ││                                                    │
 │Lifecycle: Ready                                                ││                                                    │
 │Startup: ✓ Project          robot.yaml · framework 0.52.0 · 0.1…││                                                    │
-│         ✓ Prepare runtime  publishing runtime layout · 8.0s    ││                                                    │
+│         ✓ Prepare runtime  publishing runtime layout · <t>s    ││                                                    │
 │         ✓ Infrastructure   router unixsock-stream//Users/jbern…││                                                    │
-│         ✓ Robot graph      13 participants ready · 6.5s        ││                                                    │
+│         ✓ Robot graph      13 participants ready · <t>s        ││                                                    │
 │Framework: 0.52.0                                               ││                                                    │
 │Router: unixsock-stream//Users/jbernavaprah/RustroverProjects/ph││                                                    │
 │Processes: 13                                                   ││                                                    │

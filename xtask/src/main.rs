@@ -143,7 +143,10 @@ fn screens(args: ScreensArgs) -> Result<()> {
     let _resident = scenario.prepare(&binary, &project)?;
     for size in TERMINAL_MATRIX {
         let session = scenario.launch(&binary, &project, size)?;
-        snapshots.check(&size.label(), &session.screen())?;
+        snapshots.check(
+            &size.label(),
+            &snapshot::normalize(&session.screen(), &project),
+        )?;
         session.shutdown()?;
     }
     snapshots.finish()
