@@ -1258,8 +1258,10 @@ robot:
         assert!(!packages.contains("phoxal-service-behavior"));
         assert!(!packages.contains("phoxal-tool-joypad"));
         assert!(packages.contains("phoxal-service-drive"));
-        assert!(packages.contains("phoxal-tool-telemetry"));
         assert!(packages.contains("phoxal-component-ddsm115"));
+        // There is no "an included tool" case left to assert: `joypad` is the
+        // only official tool remaining and it is this test's path-override
+        // subject. The supervisor absorbed the rest (organization#978).
     }
 
     #[test]

@@ -134,10 +134,6 @@ pub const NATIVE: &[OfficialRuntime] = &[
         kind: ArtifactKind::Tool,
     },
     OfficialRuntime {
-        package: "phoxal/tool-telemetry",
-        kind: ArtifactKind::Tool,
-    },
-    OfficialRuntime {
         package: "phoxal/service-behavior",
         kind: ArtifactKind::Service,
     },

@@ -23,7 +23,7 @@ use phoxal_model::{AssetId, AssetResolver};
 ///
 /// Returns only when the bus closes; the caller supervises it like any other
 /// long-lived session task.
-pub(crate) async fn serve_assets(bus: &Bus, assets: &AssetResolver) -> Result<()> {
+pub(crate) async fn run(bus: &Bus, assets: &AssetResolver) -> Result<()> {
     let topic = <GetRequest as ContractBody>::TOPIC;
     let queryable = bus
         .declare_server(topic)
