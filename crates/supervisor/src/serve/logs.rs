@@ -73,8 +73,8 @@ impl LogHistory {
         }
     }
 
-    fn cursor(&self) -> api::tool::Cursor {
-        api::tool::Cursor {
+    fn cursor(&self) -> api::supervisor::Cursor {
+        api::supervisor::Cursor {
             generation: self.generation.clone(),
             sequence: self.sequence,
         }
@@ -203,7 +203,7 @@ fn retained_component(
 /// draining the wildcard `logs/*` subscription into the bounded history and
 /// republishing each retained record on `follow`, and a query loop answering
 /// `snapshot` from that same history.
-pub(crate) async fn serve_logs(bus: &Bus, generation: String) -> Result<()> {
+pub(crate) async fn run(bus: &Bus, generation: String) -> Result<()> {
     let history = Arc::new(Mutex::new(LogHistory::new(generation)));
 
     let logs = Subscriber::<api::logs::Event>::new(
@@ -305,7 +305,7 @@ pub(crate) async fn serve_logs(bus: &Bus, generation: String) -> Result<()> {
 /// Consumers compare generations for equality only, never parse or order them,
 /// so a restart simply produces an unrelated identity and invalidates any cursor
 /// a client was holding.
-pub(crate) fn log_generation() -> Result<String> {
+pub(crate) fn generation() -> Result<String> {
     let mut random = [0_u8; 16];
     getrandom::fill(&mut random)
         .map_err(|error| anyhow::anyhow!("OS entropy unavailable for log generation: {error}"))?;
@@ -378,15 +378,15 @@ mod tests {
 
     #[test]
     fn generation_change_and_sequence_gap_are_requery_conditions() {
-        let installed = api::tool::Cursor {
+        let installed = api::supervisor::Cursor {
             generation: "generation-a".to_string(),
             sequence: 8,
         };
-        let restarted = api::tool::Cursor {
+        let restarted = api::supervisor::Cursor {
             generation: "generation-b".to_string(),
             sequence: 1,
         };
-        let gap = api::tool::Cursor {
+        let gap = api::supervisor::Cursor {
             generation: "generation-a".to_string(),
             sequence: 10,
         };
@@ -394,7 +394,7 @@ mod tests {
         assert!(requires_requery(&installed, &gap));
         assert!(!requires_requery(
             &installed,
-            &api::tool::Cursor {
+            &api::supervisor::Cursor {
                 generation: "generation-a".to_string(),
                 sequence: 9,
             }
@@ -581,15 +581,18 @@ mod tests {
     }
 
     #[test]
-    fn log_generation_is_opaque_and_unique_per_call() {
-        let first = log_generation().unwrap();
-        let second = log_generation().unwrap();
+    fn generation_is_opaque_and_unique_per_call() {
+        let first = generation().unwrap();
+        let second = generation().unwrap();
         assert_eq!(first.len(), 32);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(first, second);
     }
 
-    fn requires_requery(installed: &api::tool::Cursor, next: &api::tool::Cursor) -> bool {
+    fn requires_requery(
+        installed: &api::supervisor::Cursor,
+        next: &api::supervisor::Cursor,
+    ) -> bool {
         installed.generation != next.generation
             || next.sequence != installed.sequence.saturating_add(1)
     }

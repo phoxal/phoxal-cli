@@ -48,6 +48,7 @@ impl WaitBudget {
 pub mod lock;
 pub mod resident;
 pub mod router;
+pub mod serve;
 pub mod systemd;
 
 mod process;
@@ -69,5 +70,6 @@ pub use process::spec::{
 pub use process::stages::{SupervisionStage, stages_for_run, stages_for_simulation};
 pub use process::supervise::supervise_until_shutdown;
 pub use router::{EmbeddedRouter, start_embedded_router};
+pub use serve::start_supervisor_session;
 pub use state::SupervisorState;
-pub use state::readiness::{default_connect_endpoint, start_supervisor_session};
+pub use state::readiness::default_connect_endpoint;

@@ -75,7 +75,7 @@ fn bounded_remote_text(text: &str) -> String {
         .collect()
 }
 
-fn runtime_topic_from(body: state_api::tool::RuntimeTopic) -> RuntimeTopicSample {
+fn runtime_topic_from(body: state_api::supervisor::RuntimeTopic) -> RuntimeTopicSample {
     RuntimeTopicSample {
         topic: if body.topic.is_empty() {
             "Other/unobserved topics".to_string()
@@ -83,15 +83,15 @@ fn runtime_topic_from(body: state_api::tool::RuntimeTopic) -> RuntimeTopicSample
             bounded_remote_text(&body.topic)
         },
         direction: match body.direction {
-            state_api::tool::RuntimeDirection::Publish => RuntimeDirection::Publish,
-            state_api::tool::RuntimeDirection::Subscribe => RuntimeDirection::Subscribe,
-            state_api::tool::RuntimeDirection::Mixed => RuntimeDirection::Mixed,
+            state_api::supervisor::RuntimeDirection::Publish => RuntimeDirection::Publish,
+            state_api::supervisor::RuntimeDirection::Subscribe => RuntimeDirection::Subscribe,
+            state_api::supervisor::RuntimeDirection::Mixed => RuntimeDirection::Mixed,
         },
         buffer_kind: match body.buffer_kind {
-            state_api::tool::RuntimeBufferKind::Outbound => RuntimeBufferKind::Outbound,
-            state_api::tool::RuntimeBufferKind::Latest => RuntimeBufferKind::Latest,
-            state_api::tool::RuntimeBufferKind::Subscriber => RuntimeBufferKind::Subscriber,
-            state_api::tool::RuntimeBufferKind::Mixed => RuntimeBufferKind::Mixed,
+            state_api::supervisor::RuntimeBufferKind::Outbound => RuntimeBufferKind::Outbound,
+            state_api::supervisor::RuntimeBufferKind::Latest => RuntimeBufferKind::Latest,
+            state_api::supervisor::RuntimeBufferKind::Subscriber => RuntimeBufferKind::Subscriber,
+            state_api::supervisor::RuntimeBufferKind::Mixed => RuntimeBufferKind::Mixed,
         },
         count: body.count,
         rate_hz: body.rate_hz,
@@ -106,7 +106,7 @@ fn runtime_topic_from(body: state_api::tool::RuntimeTopic) -> RuntimeTopicSample
     }
 }
 
-fn runtime_record_from(body: state_api::tool::runtime::Record) -> RuntimePerformanceSample {
+fn runtime_record_from(body: state_api::supervisor::telemetry::Record) -> RuntimePerformanceSample {
     RuntimePerformanceSample {
         sequence: body.sequence,
         participant_id: bounded_remote_text(&body.participant_id),
@@ -302,13 +302,17 @@ pub(crate) async fn runtime_performance_feed_loop(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let follow_topic = state_api::topic::client().tool().runtime().follow();
+    let follow_topic = state_api::topic::client().supervisor().telemetry().follow();
     let subscriber =
-        Subscriber::<state_api::tool::runtime::Follow>::new(bus, &follow_topic, 512).await?;
-    let snapshot_topic = state_api::topic::client().tool().runtime().snapshot();
+        Subscriber::<state_api::supervisor::telemetry::Follow>::new(bus, &follow_topic, 512)
+            .await?;
+    let snapshot_topic = state_api::topic::client()
+        .supervisor()
+        .telemetry()
+        .snapshot();
     let querier = Querier::<
-        state_api::tool::runtime::SnapshotRequest,
-        state_api::tool::runtime::Snapshot,
+        state_api::supervisor::telemetry::SnapshotRequest,
+        state_api::supervisor::telemetry::Snapshot,
     >::new(bus.clone(), &snapshot_topic, DEFAULT_QUERY_TIMEOUT)?;
     let mut reconciler = Reconciler::new(4096);
     let mut local_drops = subscriber.dropped();
@@ -322,7 +326,7 @@ pub(crate) async fn runtime_performance_feed_loop(
             &subscriber,
             &mut reconciler,
             &mut local_drops,
-            state_api::tool::runtime::SnapshotRequest {
+            state_api::supervisor::telemetry::SnapshotRequest {
                 participant_id: None,
                 limit: 1,
                 before_sequence: None,
@@ -346,7 +350,7 @@ pub(crate) async fn runtime_performance_feed_loop(
                 &subscriber,
                 &mut reconciler,
                 &mut local_drops,
-                state_api::tool::runtime::SnapshotRequest {
+                state_api::supervisor::telemetry::SnapshotRequest {
                     participant_id: Some(participant_id.clone()),
                     limit: 1,
                     before_sequence: Some(anchor.sequence),
@@ -370,7 +374,7 @@ pub(crate) async fn runtime_performance_feed_loop(
             if expected.contains(&record.participant_id)
                 && latest_by_participant
                     .get(&record.participant_id)
-                    .is_none_or(|current: &state_api::tool::runtime::Record| {
+                    .is_none_or(|current: &state_api::supervisor::telemetry::Record| {
                         current.sequence < record.sequence
                     })
             {
@@ -425,14 +429,14 @@ pub(crate) async fn runtime_performance_feed_loop(
 
 async fn query_runtime_snapshot(
     querier: &Querier<
-        state_api::tool::runtime::SnapshotRequest,
-        state_api::tool::runtime::Snapshot,
+        state_api::supervisor::telemetry::SnapshotRequest,
+        state_api::supervisor::telemetry::Snapshot,
     >,
-    subscriber: &Subscriber<state_api::tool::runtime::Follow>,
+    subscriber: &Subscriber<state_api::supervisor::telemetry::Follow>,
     reconciler: &mut Reconciler<RuntimeRecordFollow>,
     local_drops: &mut u64,
-    request: state_api::tool::runtime::SnapshotRequest,
-) -> Result<Option<state_api::tool::runtime::Snapshot>> {
+    request: state_api::supervisor::telemetry::SnapshotRequest,
+) -> Result<Option<state_api::supervisor::telemetry::Snapshot>> {
     let query = querier.query(request);
     tokio::pin!(query);
     loop {
@@ -467,7 +471,7 @@ fn runtime_protocol_violation(
     let _ = reconciler.local_drop();
 }
 
-fn runtime_anchor_cursor(snapshot: &state_api::tool::runtime::Snapshot) -> Option<Cursor> {
+fn runtime_anchor_cursor(snapshot: &state_api::supervisor::telemetry::Snapshot) -> Option<Cursor> {
     let cursor = Cursor {
         generation: snapshot.cursor.generation.clone(),
         sequence: snapshot.cursor.sequence,
@@ -481,7 +485,7 @@ fn runtime_anchor_cursor(snapshot: &state_api::tool::runtime::Snapshot) -> Optio
 }
 
 fn runtime_participant_page_is_valid(
-    snapshot: &state_api::tool::runtime::Snapshot,
+    snapshot: &state_api::supervisor::telemetry::Snapshot,
     anchor: &Cursor,
     participant_id: &str,
 ) -> bool {
@@ -510,7 +514,7 @@ fn capacity_eviction_delta(previous: Option<u64>, current: u64) -> u64 {
 }
 
 async fn prepare_runtime_requery(
-    subscriber: &Subscriber<state_api::tool::runtime::Follow>,
+    subscriber: &Subscriber<state_api::supervisor::telemetry::Follow>,
     local_drops: &mut u64,
     backoff: &mut RetryBackoff,
 ) {
@@ -522,11 +526,11 @@ async fn prepare_runtime_requery(
 #[derive(Debug, Clone)]
 struct RuntimeRecordFollow {
     cursor: Cursor,
-    record: state_api::tool::runtime::Record,
+    record: state_api::supervisor::telemetry::Record,
 }
 
-impl From<state_api::tool::runtime::Follow> for RuntimeRecordFollow {
-    fn from(follow: state_api::tool::runtime::Follow) -> Self {
+impl From<state_api::supervisor::telemetry::Follow> for RuntimeRecordFollow {
+    fn from(follow: state_api::supervisor::telemetry::Follow) -> Self {
         Self {
             cursor: Cursor {
                 generation: follow.cursor.generation,
@@ -640,8 +644,11 @@ pub(crate) async fn joypad_devices_feed_loop(
 mod tests {
     use super::*;
 
-    fn runtime_record(sequence: u64, participant_id: &str) -> state_api::tool::runtime::Record {
-        state_api::tool::runtime::Record {
+    fn runtime_record(
+        sequence: u64,
+        participant_id: &str,
+    ) -> state_api::supervisor::telemetry::Record {
+        state_api::supervisor::telemetry::Record {
             sequence,
             participant_id: participant_id.to_string(),
             truncated: 0,
@@ -655,10 +662,10 @@ mod tests {
     fn runtime_snapshot(
         generation: &str,
         sequence: u64,
-        records: Vec<state_api::tool::runtime::Record>,
-    ) -> state_api::tool::runtime::Snapshot {
-        state_api::tool::runtime::Snapshot {
-            cursor: state_api::tool::Cursor {
+        records: Vec<state_api::supervisor::telemetry::Record>,
+    ) -> state_api::supervisor::telemetry::Snapshot {
+        state_api::supervisor::telemetry::Snapshot {
+            cursor: state_api::supervisor::Cursor {
                 generation: generation.to_string(),
                 sequence,
             },
