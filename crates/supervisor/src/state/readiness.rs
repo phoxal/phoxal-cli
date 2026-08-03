@@ -91,7 +91,13 @@ pub(crate) async fn supervisor_session_loop(
     //
     // Serving assets is what parks this task: it returns only when the bus
     // closes, which is also the one condition that used to end the wait here.
-    super::assets::serve_assets(&bus, &assets).await
+    // Everything the supervisor answers on this bus runs here, concurrently,
+    // and the session ends when the bus closes - which is what ends both.
+    let assets = super::assets::serve_assets(&bus, &assets);
+    let logs = super::logs::serve_logs(&bus, super::logs::log_generation()?);
+    let (assets, logs) = tokio::join!(assets, logs);
+    assets?;
+    logs
 }
 
 fn apply_liveliness_event(

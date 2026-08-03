@@ -368,19 +368,25 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
             .count()
     );
 
-    let bus = resolved
+    let telemetry = resolved
         .tools
         .iter()
-        .find(|tool| tool.package == "phoxal/tool-bus")
-        .expect("bus is a catalog tool");
-    assert_eq!(bus.binary_name, "phoxal-tool-bus");
-    assert!(
-        !resolved
-            .tools
-            .iter()
-            .any(|tool| tool.package.contains("router")),
-        "the router runs inside the supervisor and is never a resolved artifact"
-    );
+        .find(|tool| tool.package == "phoxal/tool-telemetry")
+        .expect("telemetry is a catalog tool");
+    assert_eq!(telemetry.binary_name, "phoxal-tool-telemetry");
+    // Anything the supervisor absorbed must never resolve as an artifact: a
+    // stale catalog entry here is not a compile error, it is a `cargo install`
+    // failure at run time for a package the train no longer publishes
+    // (organization#978).
+    for absorbed in ["router", "asset", "tool-bus", "tool-device", "tool-log"] {
+        assert!(
+            !resolved
+                .tools
+                .iter()
+                .any(|tool| tool.package.contains(absorbed)),
+            "{absorbed} is absorbed by the supervisor and must not be a resolved artifact"
+        );
+    }
     Ok(())
 }
 

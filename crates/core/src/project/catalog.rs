@@ -130,19 +130,7 @@ pub struct OfficialRuntime {
 
 pub const NATIVE: &[OfficialRuntime] = &[
     OfficialRuntime {
-        package: "phoxal/tool-bus",
-        kind: ArtifactKind::Tool,
-    },
-    OfficialRuntime {
-        package: "phoxal/tool-device",
-        kind: ArtifactKind::Tool,
-    },
-    OfficialRuntime {
         package: "phoxal/tool-joypad",
-        kind: ArtifactKind::Tool,
-    },
-    OfficialRuntime {
-        package: "phoxal/tool-log",
         kind: ArtifactKind::Tool,
     },
     OfficialRuntime {

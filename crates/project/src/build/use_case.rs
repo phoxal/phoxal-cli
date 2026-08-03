@@ -1258,7 +1258,7 @@ robot:
         assert!(!packages.contains("phoxal-service-behavior"));
         assert!(!packages.contains("phoxal-tool-joypad"));
         assert!(packages.contains("phoxal-service-drive"));
-        assert!(packages.contains("phoxal-tool-log"));
+        assert!(packages.contains("phoxal-tool-telemetry"));
         assert!(packages.contains("phoxal-component-ddsm115"));
     }
 

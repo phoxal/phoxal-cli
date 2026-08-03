@@ -791,11 +791,13 @@ robot:
             .to_string();
         assert!(error.contains("official service"), "{error}");
 
-        // `services.log` - log is an official TOOL, rejected in the services map.
+        // `services.joypad` - joypad is an official TOOL, rejected in the
+        // services map. (`log` used to be the example here; it became the
+        // supervisor's own collector, organization#978.)
         let mut robot = base();
         robot
             .services
-            .insert("log".to_string(), UserService { config: None });
+            .insert("joypad".to_string(), UserService { config: None });
         let error = super::validate_runtime_declarations(&robot)
             .expect_err("an official tool name in services: is rejected")
             .to_string();
