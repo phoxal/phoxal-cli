@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.34.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.34.0) - 2026-08-03
+
+
+### Added
+
+- Read the joypad locally and delete the tool concept ([#290](https://github.com/phoxal/phoxal-cli/pull/290)) [**breaking**]
+
+
 ## [0.33.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.33.0) - 2026-08-03
 
 
