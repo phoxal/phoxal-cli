@@ -4,6 +4,15 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.33.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.33.0) - 2026-08-03
+
+
+### Added
+
+- *(supervisor)* Collect participant logs in-process, and fix a shipped catalog regression ([#287](https://github.com/phoxal/phoxal-cli/pull/287)) [**breaking**]
+- *(supervisor)* Retain runtime telemetry in-process, under a serve module ([#289](https://github.com/phoxal/phoxal-cli/pull/289)) [**breaking**]
+
+
 ## [0.32.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.32.0) - 2026-08-02
 
 
