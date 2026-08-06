@@ -14,7 +14,7 @@ static GUARDIAN: LazyLock<Mutex<Option<GuardianClient>>> = LazyLock::new(|| Mute
 static SPAWN_GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static NEXT_GUARDIAN_TOKEN: AtomicU64 = AtomicU64::new(1);
 const GUARDIAN_RECORD_LEN: usize = 17;
-const SUPERVISOR_ONLY_ENV: [&str; 9] = [
+const SUPERVISOR_ONLY_ENV: [&str; 8] = [
     "NOTIFY_SOCKET",
     "WATCHDOG_USEC",
     "WATCHDOG_PID",
@@ -23,7 +23,6 @@ const SUPERVISOR_ONLY_ENV: [&str; 9] = [
     "LISTEN_FDNAMES",
     "INVOCATION_ID",
     "JOURNAL_STREAM",
-    "PHOXAL_PROJECT_LOCK_FD",
 ];
 type GuardianRecord = [u8; GUARDIAN_RECORD_LEN];
 
@@ -505,7 +504,6 @@ mod tests {
             "LISTEN_FDNAMES",
             "INVOCATION_ID",
             "JOURNAL_STREAM",
-            "PHOXAL_PROJECT_LOCK_FD",
         ] {
             assert_eq!(
                 command

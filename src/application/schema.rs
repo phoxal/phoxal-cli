@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_requires_no_cargo_registry_resident_or_project_lock_state() -> Result<()> {
+    fn generation_requires_no_cargo_registry_resident_or_build_lock_state() -> Result<()> {
         let project = project()?;
         generate_command(project.path())?;
         assert!(!project.path().join("target").exists());

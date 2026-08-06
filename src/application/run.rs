@@ -3059,17 +3059,9 @@ mod doctor {
                 app.project.root(),
                 app.offline,
             )?;
-            println!(
-                "framework train: {} ({})",
-                train.version,
-                match &train.source {
-                    phoxal_cli_core::project::train::TrainSource::Registry => "registry",
-                    phoxal_cli_core::project::train::TrainSource::Git(_) => "git",
-                    phoxal_cli_core::project::train::TrainSource::Path => "path",
-                }
-            );
+            println!("framework train: {}", train.version);
             println!("root package: Cargo.toml and Cargo.lock are coherent");
-            if train.is_published() {
+            {
                 if app.offline {
                     println!("framework facade: crates.io probe skipped in offline mode");
                 } else {

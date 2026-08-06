@@ -9,8 +9,6 @@ use anyhow::{Context, Result, bail};
 
 use crate::{PreparationEvent, Reporter};
 
-const SUDO_PASSWORD_ENV: &str = "PHOXAL_SUDO_PASSWORD";
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CapturedStream {
     Stdout,
@@ -118,7 +116,6 @@ pub fn run_output(
     reporter: Option<&dyn Reporter>,
 ) -> Result<Output> {
     let mut command = Command::new(executable);
-    command.env_remove(SUDO_PASSWORD_ENV);
     command.args(args);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);

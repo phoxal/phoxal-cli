@@ -111,7 +111,7 @@ pub enum ProjectLockStatus {
 impl ProjectLock {
     #[must_use]
     pub fn lock_path(project: &Path) -> PathBuf {
-        phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project).project_lock()
+        phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project).build_lock()
     }
 
     pub fn inspect(project: &Path) -> Result<ProjectLockStatus> {
@@ -294,11 +294,11 @@ mod tests {
             ProjectOperation::Build,
         ))?;
 
-        assert!(first_project.join(".phoxal/project.lock").is_file());
-        assert!(second_project.join(".phoxal/project.lock").is_file());
+        assert!(first_project.join(".phoxal/run/build.lock").is_file());
+        assert!(second_project.join(".phoxal/run/build.lock").is_file());
         drop((first, second));
-        assert!(first_project.join(".phoxal/project.lock").is_file());
-        assert!(second_project.join(".phoxal/project.lock").is_file());
+        assert!(first_project.join(".phoxal/run/build.lock").is_file());
+        assert!(second_project.join(".phoxal/run/build.lock").is_file());
         Ok(())
     }
 

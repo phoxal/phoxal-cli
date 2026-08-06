@@ -495,7 +495,7 @@ mod tests {
         let target = RuntimeTarget {
             logical_root: directory.path().to_path_buf(),
             requested_entry: None,
-            project_lock: PathBuf::new(),
+            build_lock: PathBuf::new(),
             supervisor_socket: socket,
             zenoh_socket: PathBuf::new(),
             zenoh_endpoint: String::new(),
@@ -599,7 +599,7 @@ mod tests {
         let target = RuntimeTarget {
             logical_root: directory.path().to_path_buf(),
             requested_entry: None,
-            project_lock: PathBuf::new(),
+            build_lock: PathBuf::new(),
             supervisor_socket: socket,
             zenoh_socket: PathBuf::new(),
             zenoh_endpoint: String::new(),
@@ -690,7 +690,7 @@ mod tests {
         let target = RuntimeTarget {
             logical_root: directory.path().to_path_buf(),
             requested_entry: None,
-            project_lock: PathBuf::new(),
+            build_lock: PathBuf::new(),
             supervisor_socket: socket,
             zenoh_socket: PathBuf::new(),
             zenoh_endpoint: String::new(),

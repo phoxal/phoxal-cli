@@ -53,7 +53,7 @@ pub(crate) fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<Runtim
     Ok(RuntimeTarget {
         logical_root,
         requested_entry,
-        project_lock: paths.project_lock(),
+        build_lock: paths.build_lock(),
         supervisor_socket: paths.supervisor_socket(),
         zenoh_endpoint: format!("unixsock-stream/{}", zenoh_socket.display()),
         zenoh_socket,
@@ -81,7 +81,7 @@ mod tests {
         let target = resolve(Some(root.path()), Path::new("/unused"))?;
         let root = root.path().canonicalize()?;
         assert_eq!(target.logical_root, root);
-        assert_eq!(target.project_lock, root.join(".phoxal/project.lock"));
+        assert_eq!(target.build_lock, root.join(".phoxal/run/build.lock"));
         assert_eq!(
             target.supervisor_socket,
             root.join(".phoxal/run/supervisor.sock")
@@ -100,10 +100,7 @@ mod tests {
                 unit: "phoxal.service".to_string()
             }
         );
-        assert_eq!(
-            target.project_lock,
-            Path::new("/var/lib/phoxal/state/project.lock")
-        );
+        assert_eq!(target.build_lock, Path::new("/run/phoxal/build.lock"));
         assert_eq!(
             target.supervisor_socket,
             Path::new("/run/phoxal/supervisor.sock")

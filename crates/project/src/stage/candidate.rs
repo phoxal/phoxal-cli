@@ -352,3 +352,152 @@ robot:
         .collect();
     Ok(bundle)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phoxal_cli_core::project::intent::DriverSelection;
+    use phoxal_cli_core::project::layout::RuntimeLayout;
+    use phoxal_cli_core::project::requirements::RequiredParticipantKind;
+    use std::collections::BTreeSet;
+
+    const DRIVEN: &str = r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators:
+      - left_drive.motor
+    encoders: []
+  components:
+    left_drive:
+      component: ddsm115
+      mount_link: base
+      driver:
+        connection:
+          type: serial
+          port: /dev/ttyUSB0
+          baud: 115200
+    right_drive:
+      component: ddsm115
+      mount_link: base
+      driver:
+        connection:
+          type: serial
+          port: /dev/ttyUSB1
+          baud: 115200
+"#;
+
+    fn files(root: &Path) -> BTreeSet<String> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeSet<String>) {
+            for entry in fs::read_dir(dir).expect("read staged directory") {
+                let path = entry.expect("read staged entry").path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    out.insert(
+                        path.strip_prefix(root)
+                            .expect("staged file is below the bundle root")
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        let mut out = BTreeSet::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    /// The bundle root is exactly one persisted robot definition, the frozen
+    /// assets, and `bin/` - no `robot.json`, no `participants.json`, no
+    /// `runtime.json`, and no authored source layout.
+    #[test]
+    fn a_published_bundle_has_exactly_the_finalized_shape() -> Result<()> {
+        let bundle = tempfile::tempdir()?;
+        write_test_bundle(bundle.path(), DRIVEN, &RunIntent::default(), &[])?;
+        assert_eq!(
+            files(bundle.path()),
+            BTreeSet::from([
+                "assets/components/ddsm115/component.yaml".to_string(),
+                "assets/components/ddsm115/structure.urdf".to_string(),
+                "assets/robot/structure.urdf".to_string(),
+                "robot.yaml".to_string(),
+            ])
+        );
+        for descriptor in [
+            "robot.json",
+            "assets/participants.json",
+            "assets/runtime.json",
+        ] {
+            assert!(
+                !bundle.path().join(descriptor).exists(),
+                "the old descriptor {descriptor} must not exist"
+            );
+        }
+        Ok(())
+    }
+
+    /// A stripped driver is absent from the finalized manifest, is never
+    /// derived as a requirement, and therefore never has a `bin/` entry to
+    /// resolve or inspect: exclusion is enforced once, by the document.
+    #[test]
+    fn a_stripped_driver_is_absent_from_the_manifest_and_the_requirements() -> Result<()> {
+        let bundle = tempfile::tempdir()?;
+        write_test_bundle(
+            bundle.path(),
+            DRIVEN,
+            &RunIntent::real(DriverSelection::Only(
+                ["left_drive".to_string()].into_iter().collect(),
+            )),
+            &[],
+        )?;
+        let document = fs::read_to_string(bundle.path().join(ROBOT_FILE))?;
+        assert!(document.contains("ttyUSB0"), "{document}");
+        assert!(!document.contains("ttyUSB1"), "{document}");
+
+        let layout = RuntimeLayout::open(bundle.path())?;
+        let drivers = layout
+            .requirements()
+            .participants
+            .iter()
+            .filter(|participant| participant.kind == RequiredParticipantKind::ComponentDriver)
+            .map(|participant| participant.participant_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(drivers, vec!["left_drive"]);
+        Ok(())
+    }
+
+    /// Nothing between staging and publication touches the live bundle: the
+    /// candidate is a sibling directory, and a candidate that is dropped
+    /// instead of published leaves the previous bundle byte-identical.
+    #[test]
+    fn a_discarded_candidate_never_touches_the_live_bundle() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let live = project
+            .path()
+            .join(phoxal_cli_core::project::launch_plan::RUNTIME_BUNDLE_ROOT_RELATIVE);
+        write_test_bundle(&live, DRIVEN, &RunIntent::default(), &[])?;
+        let published = fs::read(live.join(ROBOT_FILE))?;
+
+        let candidate = tempfile::Builder::new()
+            .prefix(".bundle-candidate-")
+            .tempdir_in(live.parent().context("bundle has a parent")?)?;
+        write_test_bundle(
+            candidate.path(),
+            DRIVEN,
+            &RunIntent::simulated(),
+            &["ddsm115"],
+        )?;
+        // The candidate really does differ, or this proves nothing.
+        assert_ne!(fs::read(candidate.path().join(ROBOT_FILE))?, published);
+        drop(candidate);
+
+        assert_eq!(fs::read(live.join(ROBOT_FILE))?, published);
+        Ok(())
+    }
+}

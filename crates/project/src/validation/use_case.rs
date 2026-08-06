@@ -286,14 +286,13 @@ fn join_errors(errors: Vec<phoxal_manifest::source::robot::v0::ValidationError>)
 mod tests {
     use super::*;
     use crate::validation::{RawArtifact, RawParticipantReport};
-    use phoxal_cli_core::project::train::{LockedTrain, TrainSource, WorkspaceRuntime};
+    use phoxal_cli_core::project::train::{LockedTrain, WorkspaceRuntime};
     use std::path::PathBuf;
 
     fn locked_project(runtimes: Vec<WorkspaceRuntime>) -> LockedProject {
         LockedProject {
             train: LockedTrain {
                 version: "0.42.0".to_string(),
-                source: TrainSource::Registry,
             },
             brain: phoxal_cli_core::project::train::RootBrainPackage {
                 package: "testbot-robot".to_string(),

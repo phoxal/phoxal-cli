@@ -69,7 +69,7 @@ fn force_stop_with(
     authority: &impl Authority,
     durations: Durations,
 ) -> Result<ForceStopOutcome> {
-    let identity = match authority.inspect_lock(&target.project_lock)? {
+    let identity = match authority.inspect_lock(&target.build_lock)? {
         ProjectLockStatus::Free => {
             bail!("project is not running: {}", target.logical_root.display())
         }
@@ -108,14 +108,14 @@ fn force_stop_with(
             authority.validate_session_leader(identity.pid)?;
             authority.signal_group(identity.pid, libc::SIGTERM)?;
             if wait_until(durations.detached_grace, durations.poll, authority, || {
-                stopped_detached(authority, &target.project_lock, identity.pid)
+                stopped_detached(authority, &target.build_lock, identity.pid)
             })? {
                 return Ok(ForceStopOutcome::Graceful);
             }
             authority.signal_group(identity.pid, libc::SIGKILL)?;
             anyhow::ensure!(
                 wait_until(durations.escalation_wait, durations.poll, authority, || {
-                    stopped_detached(authority, &target.project_lock, identity.pid)
+                    stopped_detached(authority, &target.build_lock, identity.pid)
                 },)?,
                 "resident process group {} remained after SIGKILL",
                 identity.pid
@@ -125,7 +125,7 @@ fn force_stop_with(
         ResidentAuthority::SystemdUnit { unit } => {
             run_systemctl_action(authority, &["stop", unit], "stop", unit)?;
             if wait_until(durations.systemd_grace, durations.poll, authority, || {
-                stopped_systemd(authority, &target.project_lock, unit)
+                stopped_systemd(authority, &target.build_lock, unit)
             })? {
                 return Ok(ForceStopOutcome::Graceful);
             }
@@ -137,7 +137,7 @@ fn force_stop_with(
             )?;
             anyhow::ensure!(
                 wait_until(durations.escalation_wait, durations.poll, authority, || {
-                    stopped_systemd(authority, &target.project_lock, unit)
+                    stopped_systemd(authority, &target.build_lock, unit)
                 },)?,
                 "systemd unit {unit} remained active or retained its project lock after forced termination"
             );
@@ -339,7 +339,7 @@ mod tests {
         RuntimeTarget {
             logical_root: PathBuf::from("/tmp/project"),
             requested_entry: None,
-            project_lock: PathBuf::from("/tmp/project/.phoxal/project.lock"),
+            build_lock: PathBuf::from("/tmp/project/.phoxal/run/build.lock"),
             supervisor_socket: PathBuf::from("/tmp/project/.phoxal/run/supervisor.sock"),
             zenoh_socket: PathBuf::from("/tmp/project/.phoxal/run/zenoh.sock"),
             zenoh_endpoint: "unixsock-stream//tmp/project/.phoxal/run/zenoh.sock".to_string(),

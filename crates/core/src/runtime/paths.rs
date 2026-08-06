@@ -41,9 +41,20 @@ impl RuntimePaths {
         }
     }
 
+    /// The lock every bundle-mutating command takes. A live execution holds
+    /// [`Self::supervisor_lock`] for its whole lifetime, so a build can never
+    /// replace a running daemon's files.
     #[must_use]
-    pub fn project_lock(&self) -> PathBuf {
-        self.state_root.join("project.lock")
+    pub fn build_lock(&self) -> PathBuf {
+        self.volatile_root.join("build.lock")
+    }
+
+    /// The lock one `phoxald` holds for its complete lifetime. Its presence
+    /// under an exclusive holder - not the socket's existence - is what
+    /// "an execution is live" means.
+    #[must_use]
+    pub fn supervisor_lock(&self) -> PathBuf {
+        self.volatile_root.join("supervisor.lock")
     }
 
     #[must_use]
@@ -82,8 +93,12 @@ mod tests {
         assert_eq!(paths.state_root, Path::new("/tmp/robot/.phoxal"));
         assert_eq!(paths.volatile_root, Path::new("/tmp/robot/.phoxal/run"));
         assert_eq!(
-            paths.project_lock(),
-            Path::new("/tmp/robot/.phoxal/project.lock")
+            paths.build_lock(),
+            Path::new("/tmp/robot/.phoxal/run/build.lock")
+        );
+        assert_eq!(
+            paths.supervisor_lock(),
+            Path::new("/tmp/robot/.phoxal/run/supervisor.lock")
         );
         assert_eq!(
             paths.supervisor_socket(),

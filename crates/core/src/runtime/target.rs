@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct RuntimeTarget {
     pub logical_root: PathBuf,
     pub requested_entry: Option<PathBuf>,
-    pub project_lock: PathBuf,
+    pub build_lock: PathBuf,
     pub supervisor_socket: PathBuf,
     pub zenoh_socket: PathBuf,
     pub zenoh_endpoint: String,
