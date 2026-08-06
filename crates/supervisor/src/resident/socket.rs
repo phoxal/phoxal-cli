@@ -111,8 +111,14 @@ pub fn supervisor_socket_path(project: &Path) -> Result<PathBuf> {
         std::env::current_dir()?.join(path)
     };
     let bytes = OsStr::new(&absolute).as_bytes();
-    let maximum =
-        std::mem::size_of::<libc::sockaddr_un>() - std::mem::size_of::<libc::sa_family_t>() - 1;
+    // The bindable maximum is the `sun_path` array itself minus its NUL
+    // terminator. Computed from the field offset rather than by subtracting
+    // `sa_family_t`, because macOS puts an extra `sun_len` byte before the
+    // family field - the subtraction form was one byte too permissive there
+    // and let a 104-byte path through to fail at the raw bind(2).
+    let maximum = std::mem::size_of::<libc::sockaddr_un>()
+        - std::mem::offset_of!(libc::sockaddr_un, sun_path)
+        - 1;
     if bytes.len() > maximum {
         bail!(
             "project supervisor socket path is {} bytes but this platform supports at most {maximum}: {}; move the project to a shorter path",
@@ -150,6 +156,46 @@ mod tests {
                 .to_string()
                 .contains("shorter")
         );
+    }
+
+    /// Boundary proof that the precheck agrees with the platform: the longest
+    /// path the precheck accepts must actually bind, and one byte more must be
+    /// rejected by the precheck (not by a raw bind(2) failure later). Binding
+    /// for real is what breaks circularity with the precheck's own formula -
+    /// the old `sa_family_t` subtraction accepted a length macOS then refused.
+    #[test]
+    fn socket_path_precheck_boundary_matches_a_real_bind() {
+        let suffix = "/.phoxal/run/supervisor.sock";
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let base = scratch.path().to_str().expect("utf-8 scratch path");
+
+        // Find the accepted maximum empirically from the precheck itself.
+        let pad_for = |total: usize| -> PathBuf {
+            let pad = total - base.len() - 1 - suffix.len();
+            PathBuf::from(format!("{base}/{}", "p".repeat(pad)))
+        };
+        let mut accepted_max = None;
+        for total in (60..160).rev() {
+            if supervisor_socket_path(&pad_for(total)).is_ok() {
+                accepted_max = Some(total);
+                break;
+            }
+        }
+        let accepted_max = accepted_max.expect("some socket path length must be accepted");
+
+        // One byte longer: the precheck must reject with its actionable error.
+        let over = supervisor_socket_path(&pad_for(accepted_max + 1))
+            .expect_err("one byte past the maximum must fail the precheck");
+        assert!(over.to_string().contains("shorter"));
+
+        // The accepted maximum must genuinely bind on this platform.
+        let project = pad_for(accepted_max);
+        let path = supervisor_socket_path(&project).expect("precheck accepts the maximum");
+        std::fs::create_dir_all(path.parent().expect("socket parent")).expect("create run dir");
+        let listener = std::os::unix::net::UnixListener::bind(&path)
+            .expect("precheck-accepted maximum-length path must bind");
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// End-to-end proof for the close/delivery blocker: a connected
