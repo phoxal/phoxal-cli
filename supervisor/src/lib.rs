@@ -45,6 +45,7 @@ impl WaitBudget {
     }
 }
 
+pub mod daemon;
 pub mod lock;
 pub mod resident;
 pub mod router;
@@ -63,13 +64,12 @@ pub use lock::{
     ProjectLock, ProjectLockIdentity, ProjectLockStatus, ProjectOperation, active_execution,
 };
 pub(crate) use process::child::ManagedChild;
-pub use process::child::maybe_run_guardian;
 pub use process::spec::{
     RequestedStop, SupervisorAction, SupervisorActionReceiver, SupervisorOptions,
 };
 pub use process::stages::{SupervisionStage, stages_for_run, stages_for_simulation};
 pub use process::supervise::supervise_until_shutdown;
-pub use router::{EmbeddedRouter, start_embedded_router};
+pub use router::{EmbeddedRouter, RouterLost, start_embedded_router};
 pub use serve::start_supervisor_session;
 pub use state::SupervisorState;
 pub use state::readiness::default_connect_endpoint;

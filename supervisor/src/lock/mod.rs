@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use phoxal_cli_core::identity::ExecutionId;
 use serde::{Deserialize, Serialize};
 
-mod advisory;
+pub(crate) mod advisory;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};

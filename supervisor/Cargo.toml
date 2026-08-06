@@ -6,6 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+# The durable headless execution supervisor. It takes one finalized bundle root
+# and nothing else (organization#978): no mode flags, no driver flags, and no
+# subcommands - `phoxal` builds, `phoxald` validates and executes.
+[[bin]]
+name = "phoxald"
+path = "src/main.rs"
+
+# Transitional: the `phoxal` binary still links this library for the old
+# in-process resident path until that path is cut over. Nothing new should
+# depend on the library target.
+[lib]
+name = "phoxal_cli_supervisor"
+path = "src/lib.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 getrandom = { workspace = true }
@@ -14,8 +28,10 @@ libc = { workspace = true }
 # The supervisor is the only crate in the workspace that enables it.
 phoxal-api = { workspace = true }
 phoxal-bus = { workspace = true, features = ["router"] }
+phoxal-manifest = { workspace = true }
 phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
+phoxal-supervisor-api = { workspace = true }
 phoxal-cli-catalog = { workspace = true }
 phoxal-cli-core = { workspace = true }
 phoxal-cli-protocol = { workspace = true }
@@ -24,8 +40,12 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [dev-dependencies]
+# The real attachment client, so the served contract is proven against the code
+# `phoxal attach` actually runs rather than against a hand-rolled stand-in.
+phoxal-supervisor-client = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

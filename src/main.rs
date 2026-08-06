@@ -9,9 +9,6 @@ use phoxal_cli::cli::{AppContext, Cli, SessionAwareWriter, Ui, tracing_ansi_enab
 
 #[tokio::main()]
 async fn main() -> ExitCode {
-    if let Some(exit) = phoxal_cli_supervisor::maybe_run_guardian() {
-        return exit;
-    }
     let cli = Cli::parse();
     init_tracing();
 

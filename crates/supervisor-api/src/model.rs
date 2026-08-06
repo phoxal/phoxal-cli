@@ -44,9 +44,9 @@ pub enum ExecutionMode {
 /// The identity of one supervised process within an execution.
 ///
 /// The variant *is* the participant kind, so there is no second `kind` field to
-/// contradict it. A driver and a simulator are both bound to a component
-/// instance and are distinguishable only by variant, which is exactly the
-/// distinction the daemon derives from the finalized manifest.
+/// contradict it, and the segment each variant carries is the identity that
+/// kind is actually selected by: a driver by the component instance whose
+/// `driver:` block derived it, everything else by its participant id.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum ProcessKey {
@@ -57,9 +57,13 @@ pub enum ProcessKey {
     /// A component instance's driver, derived because that instance kept its
     /// `driver:` block through finalization.
     Driver { instance: Name },
-    /// A component instance's simulator, derived because the manifest says
+    /// The world-clock owner, derived because the manifest says
     /// `clock: simulated`.
-    Simulator { instance: Name },
+    ///
+    /// It is identified by participant id, not by a component instance: one
+    /// simulator owns simulated time and drives every simulated component of
+    /// the robot, so there is no per-instance simulator to bind.
+    Simulator { id: Name },
 }
 
 impl ProcessKey {
@@ -79,8 +83,8 @@ impl ProcessKey {
     #[must_use]
     pub const fn component_instance(&self) -> Option<&Name> {
         match self {
-            Self::Brain | Self::Service { .. } => None,
-            Self::Driver { instance } | Self::Simulator { instance } => Some(instance),
+            Self::Brain | Self::Service { .. } | Self::Simulator { .. } => None,
+            Self::Driver { instance } => Some(instance),
         }
     }
 }
@@ -91,14 +95,14 @@ impl std::fmt::Display for ProcessKey {
             Self::Brain => formatter.write_str("brain"),
             Self::Service { id } => write!(formatter, "service:{id}"),
             Self::Driver { instance } => write!(formatter, "driver:{instance}"),
-            Self::Simulator { instance } => write!(formatter, "simulator:{instance}"),
+            Self::Simulator { id } => write!(formatter, "simulator:{id}"),
         }
     }
 }
 
-/// The component a driver or simulator process serves. `instance` repeats the
-/// key's segment; `component_type` is the frozen definition it resolved to, so
-/// a client can render "base (ddsm115)" without reading the manifest.
+/// The component a driver process serves. `instance` repeats the key's segment;
+/// `component_type` is the frozen definition it resolved to, so a client can
+/// render "base (ddsm115)" without reading the manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComponentBinding {
@@ -142,6 +146,10 @@ pub enum ProcessFailureKind {
     Exit,
     ReadinessTimeout,
     Cleanup,
+    /// A failure the supervisor could not attribute to one of the steps above.
+    /// `detail` carries the evidence, exactly as [`DaemonFailureReason::Internal`]
+    /// does for the execution as a whole.
+    Other,
 }
 
 /// How a process ended, as the host reported it.
@@ -178,7 +186,7 @@ pub struct ProcessFailure {
 #[serde(deny_unknown_fields)]
 pub struct Process {
     pub key: ProcessKey,
-    /// Present exactly for the component-bound kinds.
+    /// Present exactly for a driver, the one component-bound kind.
     pub component: Option<ComponentBinding>,
     pub startup: StartupRequirement,
     pub desired: DesiredState,
@@ -523,10 +531,10 @@ mod tests {
             ),
             (
                 ProcessKey::Simulator {
-                    instance: Name::new("base"),
+                    id: Name::new("webots"),
                 },
                 ParticipantKind::Simulator,
-                Some("base"),
+                None,
             ),
         ];
         for (key, kind, instance) in cases {

@@ -1200,6 +1200,13 @@ async fn cancel_startup_wait(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Losing the router fails the session on the board. `phoxald` records a typed
+/// `RouterLost` failure instead; this transitional in-process path keeps the
+/// behaviour it had.
+pub(crate) fn board_router_loss(board: SupervisorState) -> phoxal_cli_supervisor::RouterLost {
+    Arc::new(move |reason| board.fail(&reason))
+}
+
 pub(crate) async fn live_run_setup(
     prepared: PreparedRun,
     ui: crate::cli::Ui,
@@ -1223,7 +1230,7 @@ pub(crate) async fn live_run_setup(
         run.execution(),
         connect.clone(),
         prepared.router.config.as_deref(),
-        prepared.board.clone(),
+        board_router_loss(prepared.board.clone()),
     )
     .await
     {

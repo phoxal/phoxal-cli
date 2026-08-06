@@ -134,7 +134,7 @@ mod setup {
             run.execution(),
             connect.clone(),
             prepared.router.config.as_deref(),
-            board.clone(),
+            crate::application::run::board_router_loss(board.clone()),
         )
         .await
         {

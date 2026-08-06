@@ -12,9 +12,14 @@
 //! supervisor's own observer session reach it as ordinary clients over the
 //! endpoint it listens on.
 
-use crate::SupervisorState;
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::sync::Arc;
+
+/// What to do when the fabric disappears under a running session. It receives
+/// the rendered reason rather than a shared state handle, so the caller decides
+/// what losing the router means to it.
+pub type RouterLost = Arc<dyn Fn(String) + Send + Sync>;
 
 /// The running embedded router. Holding it keeps the fabric up; dropping or
 /// [`EmbeddedRouter::close`]ing it takes every link down with it.
@@ -61,11 +66,16 @@ impl EmbeddedRouter {
 /// `endpoint` must be a plain endpoint string: a per-endpoint config fragment
 /// (`tcp/…#exit_on_failure=false`) would override the pinned listen settings
 /// that make a successful open mean "bound".
+///
+/// `on_lost` is called if the fabric disappears under a running session. It
+/// receives the rendered reason rather than a shared state handle so the
+/// caller decides what losing the router means to it: for `phoxald` it is a
+/// typed `RouterLost` failure that terminates the execution.
 pub async fn start_embedded_router(
     execution: phoxal_cli_core::identity::ExecutionId,
     endpoint: String,
     config: Option<&Path>,
-    board: SupervisorState,
+    on_lost: RouterLost,
 ) -> Result<EmbeddedRouter> {
     anyhow::ensure!(
         !endpoint.contains('#'),
@@ -97,7 +107,7 @@ pub async fn start_embedded_router(
     let lost_endpoint = endpoint.clone();
     let watch = phoxal_bus::RouterWatch::open(&endpoint, move || {
         tracing::error!("the router at {lost_endpoint} is gone; the robot graph is unreachable");
-        board.fail(&format!(
+        on_lost(format!(
             "the embedded router at {lost_endpoint} went away while the session was running"
         ));
     })
@@ -122,6 +132,21 @@ fn unixsock_stream_path(endpoint: &str) -> Option<&Path> {
 mod tests {
     use super::*;
 
+    /// A loss sink that records the reason, standing in for whatever the
+    /// caller does with it.
+    fn recorder() -> (RouterLost, Arc<std::sync::Mutex<Vec<String>>>) {
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&recorded);
+        (
+            Arc::new(move |reason| sink.lock().expect("loss sink").push(reason)),
+            recorded,
+        )
+    }
+
+    fn ignored() -> RouterLost {
+        Arc::new(|_| {})
+    }
+
     #[test]
     fn a_unix_socket_endpoint_yields_its_path() {
         assert_eq!(
@@ -139,7 +164,7 @@ mod tests {
             phoxal_cli_core::identity::ExecutionId::mint(),
             "tcp/127.0.0.1:7447#exit_on_failure=false".into(),
             None,
-            SupervisorState::new(),
+            ignored(),
         )
         .await
         .expect_err("a per-endpoint config fragment must be rejected");
@@ -163,7 +188,7 @@ mod tests {
             phoxal_cli_core::identity::ExecutionId::mint(),
             endpoint.clone(),
             None,
-            SupervisorState::new(),
+            ignored(),
         )
         .await
         .expect("the router creates its socket directory and binds");
@@ -176,28 +201,28 @@ mod tests {
     }
 
     /// The whole point of the watch: if the fabric disappears under a running
-    /// session, the supervisor learns immediately rather than waiting for every
+    /// session, the caller learns immediately rather than waiting for every
     /// participant to go stale.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn losing_the_router_fails_the_session() {
+    async fn losing_the_router_reports_the_loss_to_its_caller() {
         let dir = tempfile::Builder::new()
             .prefix("phoxal-router-loss-")
             .tempdir_in("/tmp")
             .expect("short-path temp dir for the unix socket");
         let endpoint = format!("unixsock-stream/{}", dir.path().join("r.sock").display());
-        let board = SupervisorState::new();
+        let (on_lost, recorded) = recorder();
 
         let router = start_embedded_router(
             phoxal_cli_core::identity::ExecutionId::mint(),
             endpoint,
             None,
-            board.clone(),
+            on_lost,
         )
         .await
         .expect("router opens");
         assert!(
-            board.supervisor_snapshot().failure.is_none(),
-            "a healthy router must not fail the session"
+            recorded.lock().expect("loss sink").is_empty(),
+            "a healthy router must not report a loss"
         );
 
         // Drop the router without closing the watch first - the failure this
@@ -205,22 +230,17 @@ mod tests {
         let EmbeddedRouter { router, watch, .. } = router;
         router.close().await.expect("close the router");
 
-        let mut failed = false;
+        let mut reason = None;
         for _ in 0..100 {
-            if board.supervisor_snapshot().failure.is_some() {
-                failed = true;
+            if let Some(recorded) = recorded.lock().expect("loss sink").first() {
+                reason = Some(recorded.clone());
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(failed, "losing the router must fail the session");
         assert!(
-            board
-                .supervisor_snapshot()
-                .failure
-                .expect("failure recorded")
-                .contains("went away"),
-            "the failure must say the router went away"
+            reason.is_some_and(|reason| reason.contains("went away")),
+            "losing the router must be reported, and must say what happened"
         );
         let _ = watch.close().await;
     }

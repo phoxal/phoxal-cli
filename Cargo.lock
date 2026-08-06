@@ -3291,14 +3291,18 @@ dependencies = [
  "phoxal-cli-catalog",
  "phoxal-cli-core",
  "phoxal-cli-protocol",
+ "phoxal-manifest",
  "phoxal-model",
  "phoxal-runtime-contract",
+ "phoxal-supervisor-api",
+ "phoxal-supervisor-client",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

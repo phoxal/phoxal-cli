@@ -18,10 +18,10 @@ members = [
     "crates/observation",
     "crates/project",
     "crates/protocol",
-    "crates/supervisor",
     "crates/supervisor-api",
     "crates/supervisor-client",
     "crates/ui",
+    "supervisor",
 ]
 default-members = [
     ".",
@@ -31,10 +31,10 @@ default-members = [
     "crates/observation",
     "crates/project",
     "crates/protocol",
-    "crates/supervisor",
     "crates/supervisor-api",
     "crates/supervisor-client",
     "crates/ui",
+    "supervisor",
 ]
 
 [workspace.dependencies]
@@ -86,7 +86,7 @@ phoxal-cli-core = { path = "crates/core" }
 phoxal-cli-observation = { path = "crates/observation" }
 phoxal-cli-project = { path = "crates/project" }
 phoxal-cli-protocol = { path = "crates/protocol" }
-phoxal-cli-supervisor = { path = "crates/supervisor" }
+phoxal-cli-supervisor = { path = "supervisor" }
 phoxal-cli-ui = { path = "crates/ui" }
 phoxal-supervisor-api = { path = "crates/supervisor-api" }
 phoxal-supervisor-client = { path = "crates/supervisor-client" }

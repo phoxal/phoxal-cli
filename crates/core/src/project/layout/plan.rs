@@ -76,7 +76,13 @@ impl RuntimeLayout {
 
     /// Construct the launch plan from an already-inspected selected-binary set,
     /// keyed by canonical `bin/` name.
-    fn construct_plan_from_selected(
+    ///
+    /// `phoxald` inspects the bundle before it mints an execution identity - a
+    /// bundle that fails validation never gets a router - so it opens the
+    /// layout, inspects it, and only then calls this with the identity it
+    /// minted. Re-inspecting through [`Self::construct_plan`] would read every
+    /// selected binary a second time to learn nothing new.
+    pub fn construct_plan_from_selected(
         &self,
         selected: &BTreeMap<String, SelectedBinary>,
         run: RunIdentity,
