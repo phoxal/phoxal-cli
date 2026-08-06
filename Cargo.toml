@@ -19,6 +19,8 @@ members = [
     "crates/project",
     "crates/protocol",
     "crates/supervisor",
+    "crates/supervisor-api",
+    "crates/supervisor-client",
     "crates/ui",
 ]
 default-members = [
@@ -30,6 +32,8 @@ default-members = [
     "crates/project",
     "crates/protocol",
     "crates/supervisor",
+    "crates/supervisor-api",
+    "crates/supervisor-client",
     "crates/ui",
 ]
 

@@ -3371,6 +3371,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "phoxal-supervisor-api"
+version = "0.35.0"
+dependencies = [
+ "phoxal-api",
+ "phoxal-bus",
+ "phoxal-macros",
+ "phoxal-runtime-contract",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "phoxal-supervisor-client"
+version = "0.35.0"
+dependencies = [
+ "async-trait",
+ "phoxal-bus",
+ "phoxal-runtime-contract",
+ "phoxal-supervisor-api",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
