@@ -34,13 +34,13 @@ impl Service {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match &self.command {
             ServiceSubcommand::Install(_) => {
-                crate::application::run::service_install_command(app).await
+                crate::application::service::service_install_command(app).await
             }
             ServiceSubcommand::Uninstall(_) => {
-                crate::application::run::service_uninstall_command(app).await
+                crate::application::service::service_uninstall_command(app).await
             }
             ServiceSubcommand::Status(_) => {
-                crate::application::run::service_status_command(app).await
+                crate::application::service::service_status_command(app).await
             }
         }
     }

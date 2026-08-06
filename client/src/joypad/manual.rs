@@ -39,10 +39,14 @@ impl ManualDrive {
         if !(wheel_base_m.is_finite() && wheel_base_m > 0.0) {
             return Err(ManualDriveUnsupported::UnusableWheelBase);
         }
-        let limits = robot
-            .motion_limits
-            .validate()
-            .map_err(|_| ManualDriveUnsupported::MissingMotionLimits)?;
+        let limits = &robot.motion_limits;
+        if !(limits.max_linear_speed_mps.is_finite()
+            && limits.max_linear_speed_mps > 0.0
+            && limits.max_angular_speed_radps.is_finite()
+            && limits.max_angular_speed_radps > 0.0)
+        {
+            return Err(ManualDriveUnsupported::MissingMotionLimits);
+        }
         Ok(Self {
             wheel_base_m,
             // Whichever authored limit binds first is the one that decides

@@ -29,8 +29,8 @@ async fn feed(context: &FeedContext) -> Result<()> {
     loop {
         let state = subscriber.recv().await?.body;
         let motion = MotionObservation {
-            linear_x_mps: state.linear_x_mps,
-            angular_z_radps: state.angular_z_radps,
+            linear_x_mps: state.final_target.linear_x_mps,
+            angular_z_radps: state.final_target.angular_z_radps,
         };
         let observation = {
             context.stores.motion.write().await.record(motion);

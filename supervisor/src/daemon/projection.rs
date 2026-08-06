@@ -222,13 +222,7 @@ mod tests {
     #[test]
     fn a_process_the_store_has_not_touched_reports_starting_with_no_producer() {
         let facts = facts();
-        let snapshot = project(
-            1,
-            &facts,
-            &[],
-            None,
-            &SupervisorState::new().snapshot(),
-        );
+        let snapshot = project(1, &facts, &[], None, &SupervisorState::new().snapshot());
         for process in &snapshot.processes {
             assert_eq!(process.state, ProcessState::Starting, "{}", process.key);
             assert_eq!(process.producer, None, "{}", process.key);

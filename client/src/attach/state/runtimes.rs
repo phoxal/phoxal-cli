@@ -26,14 +26,6 @@ impl RuntimeStore {
         }
     }
 
-    pub fn replace_epoch(&mut self, epoch: AttachmentEpoch) {
-        self.epoch = epoch;
-        self.revision = StoreRevision(self.revision.0.wrapping_add(1));
-        self.invalidation_pending = false;
-        self.capacity_evictions = 0;
-        self.rows.clear();
-    }
-
     /// Install one reconciled page as the complete retained history.
     pub fn install_snapshot(
         &mut self,
@@ -46,10 +38,11 @@ impl RuntimeStore {
         }
         self.rows.clear();
         self.capacity_evictions = status.capacity_evictions;
-        self.rows.extend(samples.into_iter().map(|sample| RuntimeRow {
-            sample,
-            capacity_evictions: self.capacity_evictions,
-        }));
+        self.rows
+            .extend(samples.into_iter().map(|sample| RuntimeRow {
+                sample,
+                capacity_evictions: self.capacity_evictions,
+            }));
         while self.rows.len() > CAPACITY {
             self.rows.pop_front();
         }
@@ -170,18 +163,17 @@ mod tests {
         let window = read(&mut store, epoch);
         assert_eq!(window.rows.len(), 2);
         assert!(
-            window
-                .rows
-                .iter()
-                .all(|row| row.capacity_evictions == 3),
+            window.rows.iter().all(|row| row.capacity_evictions == 3),
             "every retained row reports the collector's eviction count"
         );
 
+        // The read above cleared the pending invalidation, so the next page
+        // announces a fresh revision - and replaces the history rather than
+        // appending to it.
         assert!(
             store
                 .install_snapshot(epoch, [sample("drive", 4)], status)
-                .is_none(),
-            "a page installed while a read is still pending does not re-announce"
+                .is_some()
         );
         assert_eq!(read(&mut store, epoch).rows.len(), 1);
     }
@@ -193,8 +185,7 @@ mod tests {
         let old = AttachmentEpoch::new(ExecutionId::mint());
         let new = AttachmentEpoch::new(ExecutionId::mint());
         let status = RuntimeFeedStatus::default();
-        let mut store = RuntimeStore::new(old);
-        store.replace_epoch(new);
+        let mut store = RuntimeStore::new(new);
         assert_eq!(store.record(old, sample("drive", 1), status), None);
         assert!(store.record(new, sample("drive", 2), status).is_some());
     }

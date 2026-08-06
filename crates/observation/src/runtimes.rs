@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-
 use crate::{ObservationQuery, ObservationWindow, WindowDirection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

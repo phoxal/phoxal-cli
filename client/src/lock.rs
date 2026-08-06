@@ -1,10 +1,8 @@
 //! Stable project-operation authority for execution and artifact mutation.
 
 use anyhow::{Context, Result, bail};
-use phoxal_cli_core::identity::ExecutionId;
 use serde::{Deserialize, Serialize};
 
-pub(crate) mod advisory;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -15,15 +13,6 @@ pub struct ProjectLockIdentity {
     pub entry: PathBuf,
     pub operation: ProjectOperation,
     pub pid: u32,
-    /// The supervised run this lock holder started, for a `Run` operation.
-    ///
-    /// The bus key root is execution-scoped (#952 section B), so an ad hoc
-    /// inspector has to join the *running* execution rather than mint its own -
-    /// otherwise it subscribes a root nobody publishes on. The lock is written
-    /// when the run starts and released when it ends, which is exactly the
-    /// execution's lifetime, so it is the natural place to publish the id.
-    #[serde(default)]
-    pub execution: Option<ExecutionId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,29 +47,8 @@ impl ProjectLockIdentity {
             entry,
             operation,
             pid: std::process::id(),
-            execution: None,
         }
     }
-
-    /// Record the supervised run this holder is about to start.
-    #[must_use]
-    pub fn in_execution(mut self, execution: ExecutionId) -> Self {
-        self.execution = Some(execution);
-        self
-    }
-}
-
-/// The execution an ad hoc client should join to observe the running project.
-///
-/// `None` means nothing is running, which is a better error for the caller than
-/// silently subscribing an empty root.
-pub fn active_execution(project: &Path) -> Result<Option<ExecutionId>> {
-    Ok(match ProjectLock::inspect(project)? {
-        ProjectLockStatus::Held(identity) if identity.operation == ProjectOperation::Run => {
-            identity.execution
-        }
-        ProjectLockStatus::Held(_) | ProjectLockStatus::Free => None,
-    })
 }
 
 fn best_effort_absolute(path: &Path) -> PathBuf {
@@ -102,47 +70,10 @@ pub struct ProjectLock {
     path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProjectLockStatus {
-    Free,
-    Held(ProjectLockIdentity),
-}
-
 impl ProjectLock {
     #[must_use]
     pub fn lock_path(project: &Path) -> PathBuf {
         phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project).build_lock()
-    }
-
-    pub fn inspect(project: &Path) -> Result<ProjectLockStatus> {
-        Self::inspect_path(&Self::lock_path(project))
-    }
-
-    pub fn inspect_path(path: &Path) -> Result<ProjectLockStatus> {
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(windows)]
-        options.write(true);
-        let mut file = match options.open(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(ProjectLockStatus::Free);
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
-            }
-        };
-        match advisory::try_advisory_lock(&file, true) {
-            Ok(()) => {
-                advisory::unlock_advisory(&file)?;
-                Ok(ProjectLockStatus::Free)
-            }
-            Err(_) => Ok(ProjectLockStatus::Held(
-                read_identity(&mut file).with_context(|| {
-                    format!("failed to read active operation from {}", path.display())
-                })?,
-            )),
-        }
     }
 
     pub fn acquire(identity: ProjectLockIdentity) -> Result<Self> {
@@ -162,7 +93,7 @@ impl ProjectLock {
             .truncate(false)
             .open(path)
             .with_context(|| format!("failed to open project-operation lock {}", path.display()))?;
-        if let Err(error) = advisory::try_advisory_lock(&file, true) {
+        if let Err(error) = phoxal_cli_core::advisory::try_advisory_lock(&file, true) {
             let active = read_identity(&mut file).ok();
             if let Some(active) = active {
                 bail!(
@@ -201,7 +132,7 @@ impl Drop for ProjectLock {
     fn drop(&mut self) {
         // The inode is intentionally permanent. Unlinking a locked file lets a
         // competing process create and lock a different inode at the same path.
-        let _ = advisory::unlock_advisory(&self.file);
+        let _ = phoxal_cli_core::advisory::unlock_advisory(&self.file);
     }
 }
 
@@ -235,7 +166,6 @@ mod tests {
                 ProjectOperation::Run
             },
             pid,
-            execution: None,
         }
     }
 
@@ -309,7 +239,6 @@ mod tests {
             entry: PathBuf::from("/project/robot.yaml"),
             operation: ProjectOperation::Validate,
             pid: 7,
-            execution: None,
         };
         let restored: ProjectLockIdentity =
             serde_json::from_slice(&serde_json::to_vec(&identity)?)?;

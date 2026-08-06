@@ -83,10 +83,7 @@ impl SupervisorState {
         let robot_key = ProcessKey::robot(instance.robot.clone(), instance.participant.clone());
         let project_key = ProcessKey::project(&instance.participant);
         let key = {
-            let board = self
-                .board
-                .lock()
-                .expect("supervisor board mutex poisoned");
+            let board = self.board.lock().expect("supervisor board mutex poisoned");
             if board.processes.contains_key(&robot_key) {
                 robot_key
             } else if board.processes.contains_key(&project_key) {
@@ -345,10 +342,7 @@ impl SupervisorState {
     }
 
     fn modify(&self, update: impl FnOnce(&mut Board)) {
-        let mut board = self
-            .board
-            .lock()
-            .expect("supervisor board mutex poisoned");
+        let mut board = self.board.lock().expect("supervisor board mutex poisoned");
         update(&mut board);
         board.revision = board.revision.saturating_add(1);
         self.publisher.send_replace(board.clone());
@@ -361,9 +355,7 @@ impl SupervisorState {
             .get(key)
             .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"))
             .filter(|tail| !tail.is_empty())
-            .map(|tail| {
-                BoundedString::with_max_bytes(tail, StderrTail::MAX_BYTES)
-            })
+            .map(|tail| BoundedString::with_max_bytes(tail, StderrTail::MAX_BYTES))
     }
 }
 
@@ -408,10 +400,7 @@ mod tests {
         };
         // A starting process has no producer at all: nothing mints one, so the
         // snapshot reports "no session yet" rather than an intention.
-        assert_eq!(
-            state.snapshot().processes[&key].status.producer,
-            None
-        );
+        assert_eq!(state.snapshot().processes[&key].status.producer, None);
 
         // The liveliness token is where the producer is learned, and it makes
         // the process ready in the same update.
@@ -481,10 +470,7 @@ mod tests {
                 .as_ref()
                 .is_some_and(|tail| !tail.as_str().is_empty())
         );
-        assert!(
-            failure.stderr_tail.unwrap().as_str().len()
-                <= StderrTail::MAX_BYTES
-        );
+        assert!(failure.stderr_tail.unwrap().as_str().len() <= StderrTail::MAX_BYTES);
     }
 
     #[tokio::test]
@@ -521,10 +507,7 @@ mod tests {
         state.fail(&"x".repeat(1_000_000));
         let snapshot = state.snapshot();
         assert_eq!(snapshot.lifecycle, ProjectLifecycle::Failed);
-        assert!(
-            snapshot.failure.expect("reason recorded").len()
-                <= Detail::MAX_BYTES
-        );
+        assert!(snapshot.failure.expect("reason recorded").len() <= Detail::MAX_BYTES);
     }
 
     #[test]

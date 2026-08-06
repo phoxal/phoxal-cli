@@ -4,8 +4,8 @@
 //! gamepad: [`super::Joypad`] reads the four trigger values from `gilrs` and
 //! hands them here.
 
-use phoxal_api::v0_1 as api;
 use super::manual::ManualDrive;
+use phoxal_api::v0_1 as api;
 
 /// Below this, a resting trigger reads as zero rather than as creep.
 const TRIGGER_DEADZONE: f32 = 0.08;

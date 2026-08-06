@@ -197,7 +197,6 @@ fn startup_timeline(
                     text: format!(
                         "{} steps complete",
                         startup
-                    
                             .iter()
                             .filter(|step| step.state == StartupStepState::Done)
                             .count()
@@ -205,23 +204,26 @@ fn startup_timeline(
                     state: None,
                 },
                 |step| StartupTimelineLine {
-                    text: step.detail.as_ref().map(phoxal_supervisor_api::Detail::as_str).map_or_else(
-                        || format!("active: {}", startup_step_label(step.kind)),
-                        |detail| {
-                            format!(
-                                "active: {} · {}",
-                                startup_step_label(step.kind),
-                                sanitize(detail)
-                            )
-                        },
-                    ),
+                    text: step
+                        .detail
+                        .as_ref()
+                        .map(phoxal_supervisor_api::Detail::as_str)
+                        .map_or_else(
+                            || format!("active: {}", startup_step_label(step.kind)),
+                            |detail| {
+                                format!(
+                                    "active: {} · {}",
+                                    startup_step_label(step.kind),
+                                    sanitize(detail)
+                                )
+                            },
+                        ),
                     state: Some(step.state),
                 },
             );
         return vec![line];
     }
     startup
-
         .iter()
         .map(|step| {
             let marker = startup_marker(step.state, unicode);

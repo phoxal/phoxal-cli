@@ -22,9 +22,9 @@
 //! reports, and a command fenced on a fact the supervisor does not have is a
 //! command it cannot safely apply.
 
+use crate::state::Board;
 use phoxal_bus::{Bus, ServerQueryable};
 use phoxal_cli_core::runtime::{ProcessKey as CoreProcessKey, ProjectLifecycle};
-use crate::state::Board;
 use phoxal_supervisor_api::{Command, CommandOutcome, CommandRejection, supervisor};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -96,11 +96,7 @@ pub(crate) async fn serve(
         "command",
         |request: supervisor::command::Request| {
             let supervisor::command::Request::V0 { command } = request;
-            let outcome = match decide(
-                &command,
-                &state.roster(),
-                &state.board().snapshot(),
-            ) {
+            let outcome = match decide(&command, &state.roster(), &state.board().snapshot()) {
                 Decision::Rejected(reason) => {
                     tracing::debug!(?reason, "rejected a supervisor command");
                     CommandOutcome::Rejected { reason }

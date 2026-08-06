@@ -644,13 +644,13 @@ mod tests {
         );
     }
 
+    /// A robot that cannot be driven manually is a structural fact carried as
+    /// a typed reason, not a rejected user action (organization#978).
     #[test]
     fn structural_unavailability_is_separate_from_a_transient_rejection() {
         let mut registry = Registry {
             selected: Some("pad".to_string()),
-            unavailable_reason: Some(
-                "manual input requires differential robot kinematics".to_string(),
-            ),
+            unsupported: Some(ManualDriveUnsupported::NoDifferentialBase),
             last_error: Some("old transient error".to_string()),
             ..Registry::default()
         };
@@ -659,8 +659,8 @@ mod tests {
         assert!(!registry.enabled);
         assert!(registry.last_error.is_none());
         assert_eq!(
-            registry.sample().unavailable_reason.as_deref(),
-            Some("manual input requires differential robot kinematics")
+            registry.sample().unsupported,
+            Some(ManualDriveUnsupported::NoDifferentialBase)
         );
     }
 

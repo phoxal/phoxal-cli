@@ -17,7 +17,6 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-
 use std::time::{Duration, Instant};
 
 // Four bytes per character preserves the observation crate's 4,096-character

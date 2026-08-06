@@ -223,11 +223,11 @@ mod tests {
     use std::sync::Arc;
 
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_supervisor_api::{ExecutionMode, Lifecycle, Name, RobotIdentity};
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, LogWindow, QueryToken, StoreChanged, StoreRevision,
         SupervisorObservation,
     };
+    use phoxal_supervisor_api::{ExecutionMode, Lifecycle, Name, RobotIdentity};
 
     use super::*;
 

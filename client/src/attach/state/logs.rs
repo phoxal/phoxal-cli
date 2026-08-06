@@ -26,13 +26,6 @@ impl LogStore {
         }
     }
 
-    pub fn replace_epoch(&mut self, epoch: AttachmentEpoch) {
-        self.epoch = epoch;
-        self.revision = StoreRevision(self.revision.0.wrapping_add(1));
-        self.invalidation_pending = false;
-        self.rows.clear();
-    }
-
     pub fn record(&mut self, epoch: AttachmentEpoch, row: LogRow) -> Option<StoreRevision> {
         if epoch != self.epoch {
             return None;
@@ -172,8 +165,7 @@ mod tests {
     fn a_row_from_a_previous_execution_is_rejected() {
         let old = epoch();
         let new = epoch();
-        let mut store = LogStore::new(old);
-        store.replace_epoch(new);
+        let mut store = LogStore::new(new);
         assert_eq!(store.record(old, row(1)), None);
         assert!(store.record(new, row(2)).is_some());
     }

@@ -1,7 +1,7 @@
 //! The typed ports the terminal application drives one session through.
 
-pub(crate) mod input;
 mod events;
+pub(crate) mod input;
 mod logs;
 mod runtimes;
 

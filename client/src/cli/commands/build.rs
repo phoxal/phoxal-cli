@@ -89,9 +89,9 @@ impl Build {
                 "unknown --builder `{other}`; expected `local`, `container`, or `ssh://user@host`"
             ),
         };
-        let built = crate::application::run::build_command(
+        let built = crate::application::build::build_command(
             app,
-            crate::application::run::BuildRequest {
+            crate::application::build::BuildRequest {
                 project: self.project.clone(),
                 backend,
                 output: self.output.clone(),

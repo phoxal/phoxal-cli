@@ -19,8 +19,8 @@ pub use event::{
     FreshnessSet, PhaseId, PhaseOutcome, RuntimeEvent,
 };
 pub use input::{
-    InputObservation, JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, ManualDriveUnsupported,
-    MotionObservation, MotionSample,
+    InputObservation, JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample,
+    ManualDriveUnsupported, MotionObservation, MotionSample,
 };
 pub use logs::{
     LogAnchor, LogFilters, LogQuery, LogRead, LogRow, LogSeverity, LogSource, LogWindow,

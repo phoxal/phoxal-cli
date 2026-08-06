@@ -26,7 +26,7 @@ pub enum ReportFormat {
 
 impl Validate {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let report = crate::application::run::validate_command(app).await?;
+        let report = crate::application::build::validate_command(app).await?;
         app.ui.success(format!(
             "validated {} with {} official services",
             report.robot_path.display(),

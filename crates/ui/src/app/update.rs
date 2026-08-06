@@ -538,12 +538,7 @@ fn handle_runtimes_key(model: &mut AppModel, panel: RuntimesPanelId, key: KeyEve
 }
 
 fn move_process_candidate(model: &mut AppModel, delta: isize) {
-    let keys: Vec<_> = model
-        .overview
-        .processes
-        .keys()
-        .cloned()
-        .collect();
+    let keys: Vec<_> = model.overview.processes.keys().cloned().collect();
     if keys.is_empty() {
         model.runtimes.candidate = None;
         return;
@@ -800,15 +795,15 @@ mod tests {
     use std::time::Instant;
 
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_runtime_contract::ProducerId;
-    use phoxal_supervisor_api::{
-        DaemonFailure, DaemonFailureReason, DesiredState, Detail, ExecutionMode, Name, Process,
-        ProcessKey, ProcessState, RobotIdentity, StartupRequirement,
-    };
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, Freshness, InputObservation, JoypadDevice,
         JoypadDeviceStatus, JoypadDevicesSample, LogSeverity, LogSource, LogWindow,
         ObservationWindow, ProcessObservation, SupervisorObservation,
+    };
+    use phoxal_runtime_contract::ProducerId;
+    use phoxal_supervisor_api::{
+        DaemonFailure, DaemonFailureReason, DesiredState, Detail, ExecutionMode, Name, Process,
+        ProcessKey, ProcessState, RobotIdentity, StartupRequirement,
     };
 
     use super::*;
@@ -1175,15 +1170,12 @@ mod tests {
         );
         assert_eq!(
             model.exit,
-            model
-                .exit
-                .clone()
-                .filter(|exit| matches!(
-                    exit,
-                    AttachmentOutcome::ExecutionFailed { reason: Some(failure) }
-                        if failure.detail.as_str()
-                            == "catalog train floor not supported: 0.41.2 < 0.42.0"
-                ))
+            model.exit.clone().filter(|exit| matches!(
+                exit,
+                AttachmentOutcome::ExecutionFailed { reason: Some(failure) }
+                    if failure.detail.as_str()
+                        == "catalog train floor not supported: 0.41.2 < 0.42.0"
+            ))
         );
     }
 
@@ -1266,8 +1258,12 @@ mod tests {
 
     #[test]
     fn runtime_candidate_tracks_identity_and_never_retargets_a_removed_row() {
-        let alpha = ProcessKey::Service { id: Name::new("alpha") };
-        let beta = ProcessKey::Service { id: Name::new("beta") };
+        let alpha = ProcessKey::Service {
+            id: Name::new("alpha"),
+        };
+        let beta = ProcessKey::Service {
+            id: Name::new("beta"),
+        };
         let mut processes = BTreeMap::from([
             (alpha.clone(), process(alpha.clone())),
             (beta.clone(), process(beta.clone())),
@@ -1334,7 +1330,9 @@ mod tests {
 
     #[test]
     fn restart_without_a_live_producer_is_a_visible_diagnostic() {
-        let key = ProcessKey::Service { id: Name::new("drive") };
+        let key = ProcessKey::Service {
+            id: Name::new("drive"),
+        };
         let mut process = process(key.clone());
         process.row.producer = None;
         let mut model = AppModel {
@@ -1356,7 +1354,9 @@ mod tests {
 
     #[test]
     fn runtime_log_jump_resets_every_stale_filter_and_pause() {
-        let key = ProcessKey::Service { id: Name::new("drive") };
+        let key = ProcessKey::Service {
+            id: Name::new("drive"),
+        };
         let mut model = AppModel {
             route: FocusRoute::Content {
                 panel: PanelId::Runtimes(RuntimesPanelId::Processes),

@@ -42,12 +42,14 @@ async fn feed(
     let topic = Topic::<Publish<api::motion::ManualCommand>>::new_static(
         <api::motion::ManualCommand as ContractBody>::TOPIC,
     );
-    let publisher =
-        CommandPublisher::<api::motion::ManualCommand>::new(context.attachment.bus().clone(), &topic)
-            .context("failed to attach the manual command publisher")?;
+    let publisher = CommandPublisher::<api::motion::ManualCommand>::new(
+        context.attachment.bus().clone(),
+        &topic,
+    )
+    .context("failed to attach the manual command publisher")?;
 
     let mut joypad = Joypad::open(drive.ok(), drive.err());
-    publish_joypad(context, &joypad).await?;
+    publish_joypad(context, joypad.sample()).await?;
     context.health(SOURCE, SourceStatus::Live).await;
 
     let mut ticker = tokio::time::interval(Duration::from_secs_f64(1.0 / POLL_HZ));
@@ -70,7 +72,7 @@ async fn feed(
                     publish_stop(&publisher, &mut pending_stops, &mut dropped_commands);
                 }
                 if polled.changed || derived.changed {
-                    publish_joypad(context, &joypad).await?;
+                    publish_joypad(context, joypad.sample()).await?;
                 }
                 if let Some(command) = command
                     && publisher.send(command).is_err()
@@ -97,21 +99,28 @@ async fn feed(
                 }
                 // Re-observing IS the acknowledgement, including for a request
                 // the registry rejected.
-                publish_joypad(context, &joypad).await?;
+                publish_joypad(context, joypad.sample()).await?;
             }
         }
     }
 }
 
-/// Publish the current device inventory as one input observation.
-async fn publish_joypad(context: &FeedContext, joypad: &Joypad) -> Result<()> {
+/// Publish one device inventory as an input observation.
+///
+/// It takes the sample by value rather than the pad: the `gilrs` handle is
+/// neither `Send` nor `Sync`, so holding a reference to it across an await
+/// would make this whole feed unspawnable.
+async fn publish_joypad(
+    context: &FeedContext,
+    sample: phoxal_cli_observation::JoypadDevicesSample,
+) -> Result<()> {
     let motion = context.stores.motion.read().await.current();
     let observation = context
         .stores
         .input
         .write()
         .await
-        .record_joypads(joypad.sample(), motion);
+        .record_joypads(sample, motion);
     context
         .events
         .send(AttachmentEvent::InputChanged {
@@ -166,7 +175,7 @@ const fn stop() -> api::motion::ManualCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_bus::{BusConfig, Subscribe, Subscriber};
+    use phoxal_bus::{Bus, BusConfig, Subscribe, Subscriber};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_queued_stop_reaches_the_manual_contract() {

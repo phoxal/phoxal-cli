@@ -4,8 +4,8 @@ use super::{ParticipantSpec, RunningParticipant, SupervisorOptions, SupervisorSt
 use anyhow::Result;
 use anyhow::bail;
 use phoxal_cli_core::runtime::{ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement};
-use std::sync::Arc;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::time::MissedTickBehavior;

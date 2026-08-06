@@ -2,8 +2,7 @@
 
 use super::{
     ParticipantSpec, ProcessState, RestartPolicy, SupervisorState, ensure_process_group_stopped,
-    join_reader, send_process_group_signal,
-    send_process_signal, spawn_output_reader, stop_child,
+    join_reader, send_process_group_signal, send_process_signal, spawn_output_reader, stop_child,
 };
 use crate::ManagedChild;
 use anyhow::Context;

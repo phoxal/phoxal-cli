@@ -13,6 +13,6 @@ pub struct Install {
 
 impl Install {
     pub async fn run(&self, app: &crate::cli::AppContext) -> Result<()> {
-        crate::application::run::install_command(app, &self.archive).await
+        crate::application::installation::install_command(app, &self.archive).await
     }
 }

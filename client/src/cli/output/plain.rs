@@ -97,16 +97,7 @@ impl Ui {
     #[must_use]
     pub fn from_env() -> Self {
         use std::io::IsTerminal;
-        Self::new(
-            std::io::stderr().is_terminal(),
-            phoxal_cli_supervisor::resident::has_private_bootstrap(),
-        )
-    }
-
-    /// Whether this `Ui` may draw interactive terminal decoration.
-    #[must_use]
-    pub const fn interactive(&self) -> bool {
-        self.interactive
+        Self::new(std::io::stderr().is_terminal(), false)
     }
 
     fn theme(&self) -> Theme {

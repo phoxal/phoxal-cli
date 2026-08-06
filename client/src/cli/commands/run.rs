@@ -1,4 +1,4 @@
-//! Clap-facing entry point for local robot sessions.
+//! `phoxal run` - create a fresh execution and attach to it.
 
 use std::path::PathBuf;
 
@@ -11,12 +11,6 @@ use crate::cli::AppContext;
 pub struct Run {
     #[arg(value_name = "PROJECT")]
     target: Option<PathBuf>,
-    #[arg(
-        short = 'd',
-        long,
-        help = "Start resident supervision and return after required startup readiness."
-    )]
-    pub(crate) detach: bool,
     #[arg(
         long = "driver",
         value_name = "ID",
@@ -44,16 +38,44 @@ impl Run {
         if self.drivers == DriversMode::Off && !self.drivers_subset.is_empty() {
             bail!("--driver cannot be combined with --drivers off");
         }
-        crate::application::run::run_command(
+        crate::application::lifecycle::run_command(
             app,
             self.target.as_deref(),
-            self.detach,
-            match self.drivers {
-                DriversMode::On => crate::application::run::DriversMode::On,
-                DriversMode::Off => crate::application::run::DriversMode::Off,
+            crate::application::lifecycle::RunOptions {
+                drivers: match self.drivers {
+                    DriversMode::On => crate::application::lifecycle::DriversMode::On,
+                    DriversMode::Off => crate::application::lifecycle::DriversMode::Off,
+                },
+                drivers_subset: self.drivers_subset.clone(),
             },
-            self.drivers_subset.clone(),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cli::args::{Cli, RootCommand};
+    use clap::Parser;
+
+    /// `run` always creates a fresh execution, so there is no detach flag: an
+    /// operator who wants a launched execution and their terminal back runs
+    /// `start` (organization#978).
+    #[test]
+    fn run_takes_driver_selection_and_no_detach_flag() {
+        let cli = Cli::try_parse_from(["phoxal", "run", "--drivers", "off"]).expect("run parses");
+        assert!(matches!(cli.command, RootCommand::Run(_)));
+        assert!(Cli::try_parse_from(["phoxal", "run", "-d"]).is_err());
+        assert!(Cli::try_parse_from(["phoxal", "run", "--detach"]).is_err());
+        // A remote endpoint on `run` would mean building here and executing
+        // there, which this command cannot do.
+        assert!(Cli::try_parse_from(["phoxal", "run", "--endpoint", "tcp/robot:7447"]).is_err());
+    }
+
+    #[test]
+    fn a_driver_subset_contradicts_drivers_off() {
+        let cli = Cli::try_parse_from(["phoxal", "run", "--drivers", "off", "--driver", "base"])
+            .expect("the combination parses and is rejected at run time");
+        assert!(matches!(cli.command, RootCommand::Run(_)));
     }
 }

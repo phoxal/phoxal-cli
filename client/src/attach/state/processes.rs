@@ -39,7 +39,8 @@ impl ProcessStore {
                     old.and_then(|old| old.first_ready_at)
                 }
                 .or((row.state == ProcessState::Ready).then_some(now));
-                let ended_at = if matches!(row.state, ProcessState::Failed | ProcessState::Stopped) {
+                let ended_at = if matches!(row.state, ProcessState::Failed | ProcessState::Stopped)
+                {
                     old.and_then(|old| old.ended_at).or(Some(now))
                 } else {
                     None
@@ -58,10 +59,6 @@ impl ProcessStore {
             })
             .collect();
         self.table.clone()
-    }
-
-    pub fn clear(&mut self) {
-        self.table.clear();
     }
 }
 

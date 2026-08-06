@@ -48,10 +48,7 @@ pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     let output = crate::cli::output::OutputContext::compute(terminal);
     let app = &AppContext {
         output,
-        ui: Ui::new(
-            output.decorated(),
-            phoxal_cli_supervisor::resident::has_private_bootstrap(),
-        ),
+        ui: Ui::new(output.decorated(), false),
         ..app.clone()
     };
     cli.command.run(app).await

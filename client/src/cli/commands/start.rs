@@ -1,23 +1,10 @@
-//! The headless robot-instance verb `phoxal start` (#936).
+//! `phoxal start` - create a fresh execution, wait for readiness, and exit.
 //!
-//! `start` runs the same universal pipeline as `run` - classify the root, refresh
-//! staging when it is a source project, then supervise the staged layout - but it
-//! is headless: it never mounts the TUI or takes interactive flags.
-//! It has two invocation modes:
-//!
-//! - **interactive** (no `NOTIFY_SOCKET`): behaves like `run -d`. It spawns the
-//!   detached resident, waits for required startup readiness, prints how to attach
-//!   and stop, and returns.
-//! - **under systemd** (`NOTIFY_SOCKET` set, `Type=notify`): it stays the
-//!   in-process foreground resident that owns `sd_notify`. After required
-//!   readiness it sends `READY=1`, and while it runs it pings `WATCHDOG=1` at half
-//!   the `WATCHDOG_USEC` interval. `phoxal.service` uses
-//!   `ExecStart=phoxal start /var/phoxal` (#930).
-//!
-//! Every spawned child (the router and all participants) has `NOTIFY_SOCKET` and
-//! the watchdog variables removed from its environment - only the resident owns
-//! notify authority - which `ManagedChild`'s environment scrub does at the single
-//! spawn boundary for both modes.
+//! `start` runs the same build/publish/launch path as `run`; it differs only
+//! in what it does once the daemon answers. It never mounts the TUI, and it
+//! never becomes the supervisor: `phoxald` is a separate executable and the
+//! systemd unit starts it directly, so readiness and the watchdog belong to
+//! the daemon, not to this command (organization#978).
 
 use std::path::PathBuf;
 
@@ -34,6 +21,6 @@ pub struct Start {
 
 impl Start {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        crate::application::run::start_command(app, self.target.as_deref()).await
+        crate::application::lifecycle::start_command(app, self.target.as_deref()).await
     }
 }

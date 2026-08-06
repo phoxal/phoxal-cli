@@ -1,227 +1,208 @@
-//! Live-session orchestration for simulation.
+//! The client-owned simulation session.
+//!
+//! `phoxal simulation webots run <ROBOT_YAML> <WORLD>` owns the whole session.
+//! The daemon has no simulation concept at all (organization#978): the bundle
+//! this command finalizes says `clock: simulated`, has its driver blocks
+//! stripped, and stages the simulator, and `phoxald` derives the participant
+//! set and the clock source from that manifest exactly as it does for any other
+//! bundle. It is launched on the bundle root with no flags.
+//!
+//! What is genuinely different is lifetime coordination: this client owns the
+//! Webots application, so two processes have to end together in either order,
+//! and there is no detach - leaving would strand a simulator with no operator.
 
-use crate::cli::AppContext;
-use anyhow::Context;
-use anyhow::Result;
 use std::path::Path;
+use std::time::Duration;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SimulateOptions {
-    pub world: String,
-    pub offline: bool,
-    pub train: String,
-}
+use anyhow::{Context, Result, bail};
+
+use super::daemon::{self, LaunchedDaemon};
+use super::lifecycle::Target;
+use super::session::{self, Detachable};
+use super::webots::Webots;
+use crate::attach::Session;
+use crate::cli::AppContext;
+use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
+
+/// How long the daemon is given to answer connect after Webots is up.
+const HANDSHAKE_BUDGET: Duration = Duration::from_secs(2 * 60);
 
 pub(crate) async fn run_command(
     app: &AppContext,
     world: String,
     project: Option<&Path>,
-    detach: bool,
 ) -> Result<()> {
-    let target = crate::application::attachment::resolve_target(project, app.project.root())?;
-    let train = phoxal_cli_core::project::train::resolve_locked_train(&target.project, app.offline)
+    let target = Target::resolve(project, app.project.root())?;
+    phoxal_cli_core::project::train::resolve_locked_train(&target.project, app.offline)
         .with_context(|| {
             format!(
                 "simulation requires a buildable source project; {} is not a source project",
                 target.project.display()
             )
         })?;
-    // SAFETY: no task that reads the project-root environment has been spawned
-    // on this simulation path.
-    unsafe {
-        std::env::set_var(phoxal_cli_project::PROJECT_ROOT_ENV, &target.project);
-    }
-    let options = SimulateOptions {
-        world,
-        offline: app.offline,
-        train: train.version,
-    };
-    let resident_in_process = crate::application::run::should_run_resident_in_process(
-        app.output.interactive,
-        detach,
-        phoxal_cli_supervisor::resident::has_private_bootstrap(),
-    );
-    if resident_in_process {
-        return crate::application::run::run_webots_resident_supervision(
-            app,
-            target.project,
-            options,
-        )
+
+    let _lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
+        &target.project,
+        ProjectOperation::Run,
+    ))
+    .context("failed to acquire the project build lock for simulation")?;
+
+    // The client finalizes the simulated bundle: `clock: simulated`, driver
+    // blocks stripped, simulators staged. The daemon is handed the result and
+    // told nothing about it.
+    let webots = webots_host()?;
+    let runtime_target =
+        phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;
+    let (reporter, signal_task) =
+        crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
+    let prepared =
+        phoxal_cli_project::prepare_simulation(phoxal_cli_project::PrepareSimulationRequest {
+            target: runtime_target,
+            run: phoxal_cli_core::project::launch_plan::RunIdentity::mint_or_adopt(None),
+            world,
+            offline: app.offline,
+            webots,
+            reporter,
+        })
         .await;
-    }
-    if detach {
-        let (mut launched, feed, _) = crate::application::run::connect_to_detached_resident_feed(
-            &target.project,
-            app.offline,
-        )
-        .await?;
-        return crate::application::run::wait_for_startup(
-            app,
-            &target,
-            &feed,
-            &mut launched.child,
-            crate::application::run::StartupWaitMode::Detached,
-        )
-        .await;
-    }
-    crate::application::run::launch_foreground_client(app, target).await
-}
+    signal_task.abort();
+    let prepared = prepared?;
+    let simulation = prepared
+        .simulation
+        .as_ref()
+        .context("simulation preparation returned no simulation data")?;
 
-mod setup {
+    app.ui.info(format!(
+        "world: {}; bundle: {}",
+        simulation.world.display(),
+        prepared.staged_root.display()
+    ));
 
-    use anyhow::{Context, Result};
-    use phoxal_cli_core::project::launch_plan::RunIdentity;
-    use tokio::sync::mpsc;
+    // Webots first: the daemon's graph waits on a world clock that only the
+    // simulator produces, so a daemon started first would sit in readiness
+    // with nothing yet able to satisfy it.
+    let webots_spec = prepared
+        .participants
+        .iter()
+        .find(|participant| participant.kind == phoxal_cli_core::runtime::ParticipantKind::Host)
+        .and_then(|participant| participant.launch.as_ref())
+        .context("simulation preparation returned no Webots launch spec")?;
+    let webots = Webots::launch(webots_spec)?;
 
-    use crate::cli::output::OutputContext;
-    use phoxal_cli_supervisor::{
-        RequestedStop, SupervisionStage, SupervisorAction, SupervisorOptions, SupervisorState,
-        start_supervisor_session,
+    let launched = daemon::spawn(&prepared.staged_root)?;
+    let session = await_simulated_attachment(&target, launched, app).await;
+    let session = match session {
+        Ok(session) => session,
+        Err(error) => {
+            // The daemon never came up, so there is nothing to stop through
+            // the supervisor API - but Webots is this client's and must not be
+            // left behind.
+            webots.stop().await?;
+            return Err(error);
+        }
     };
 
-    pub(crate) struct LiveSimSetup {
-        pub(crate) router: phoxal_cli_supervisor::EmbeddedRouter,
-        pub(crate) board: SupervisorState,
-        pub(crate) stages: Vec<SupervisionStage>,
-        pub(crate) supervisor_options: SupervisorOptions,
-        pub(crate) background_tasks: crate::application::run::AbortTasks,
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn live_simulate_setup(
-        ui: crate::cli::Ui,
-        prepared: phoxal_cli_project::PreparedExecution,
-        board: SupervisorState,
-        token: tokio_util::sync::CancellationToken,
-        output: OutputContext,
-        action_channel: Option<(
-            mpsc::Sender<SupervisorAction>,
-            mpsc::Receiver<SupervisorAction>,
-        )>,
-        run: RunIdentity,
-    ) -> Result<LiveSimSetup> {
-        let simulation = prepared
-            .simulation
-            .as_ref()
-            .context("project preparation did not return simulation data")?;
-        board.configure(
-            prepared.project_root.display().to_string(),
-            prepared.train.clone(),
-            run.execution(),
-            prepared.router.endpoint.clone(),
-        );
-        for participant in &prepared.participants {
-            let state = crate::application::run::process_state(participant.initial_state);
-            board.upsert_process(
-                participant.key.clone(),
-                participant.kind,
-                state,
-                participant.startup_requirement,
-            );
-            if participant.initial_state != phoxal_cli_core::runtime::ParticipantState::Starting
-                || participant.note.is_some()
-            {
-                board.set_state(participant.key.clone(), state, participant.note.clone());
+    // Either exit order: if Webots goes first, the execution it was the world
+    // clock for has nothing left to run on, so the daemon is asked to stop and
+    // the session ends on its terminal snapshot exactly as a confirmed stop
+    // would (organization#978).
+    let supervisor = session.ports.supervisor.clone();
+    let webots = std::sync::Arc::new(tokio::sync::Mutex::new(webots));
+    let watched = std::sync::Arc::clone(&webots);
+    let watcher = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let exited = { watched.lock().await.exited() };
+            match exited {
+                Ok(Some(status)) => {
+                    tracing::warn!("Webots exited with {status}; stopping the execution");
+                    let _ = supervisor.stop().await;
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!("failed to poll the Webots process: {error:#}");
+                    return;
+                }
             }
         }
-        let connect = prepared.router.endpoint.clone();
-        board.step_active(phoxal_cli_core::runtime::StartupStepKind::Infrastructure);
-        board.step_detail(
-            phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
-            "starting router",
-        );
-        let router = match phoxal_cli_supervisor::start_embedded_router(
-            run.execution(),
-            connect.clone(),
-            prepared.router.config.as_deref(),
-            crate::application::run::board_router_loss(board.clone()),
-        )
-        .await
+    });
+
+    let outcome = session::drive(app, &target.project, session, Detachable::No).await;
+    watcher.abort();
+    let webots = std::sync::Arc::into_inner(webots)
+        .expect("the Webots watcher is aborted before the handle is reclaimed")
+        .into_inner();
+
+    // The UI's stop already asked the daemon to end and waited for its
+    // terminal snapshot, so by the time the session returns the graph is down
+    // (or the daemon is gone, which is the same fact); only then does Webots
+    // go, and gracefully.
+    webots.stop().await?;
+    super::lifecycle::report_outcome(&target, outcome?)
+}
+
+/// Resolve the Webots installation this session will drive.
+fn webots_host() -> Result<phoxal_cli_project::WebotsHost> {
+    phoxal_cli_project::host::doctor::preflight()
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .context("Webots preflight failed; simulation cannot launch the simulator")?;
+    let executable = phoxal_cli_project::host::doctor::webots_executable_path()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let home = phoxal_cli_project::host::doctor::webots_home_path()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(phoxal_cli_project::WebotsHost {
+        executable,
+        home: Some(home),
+    })
+}
+
+/// Wait for the daemon while a simulated bundle's graph comes up.
+///
+/// A simulated bundle has a longer road to connect than a real one - Webots
+/// has to open the world before the world clock exists - so the budget is
+/// larger, but the rule is the same: the completed handshake is readiness, and
+/// an early child exit is reported with the daemon's own diagnostics.
+async fn await_simulated_attachment(
+    target: &Target,
+    mut launched: LaunchedDaemon,
+    app: &AppContext,
+) -> Result<Session> {
+    let deadline = tokio::time::Instant::now() + HANDSHAKE_BUDGET;
+    loop {
+        if let Some(status) = launched.exited()? {
+            bail!(launched.early_exit_message(status));
+        }
+        if let Ok(session) =
+            Session::open(&target.endpoint, target.project.display().to_string()).await
         {
-            Ok(router) => router,
-            Err(error) => {
-                board.step_failed(
-                    phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
-                    format!("{error:#}"),
-                );
-                return Err(error);
+            return Ok(session);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            if let Some(status) = launched.exited()? {
+                bail!(launched.early_exit_message(status));
             }
-        };
-        board.step_detail(
-            phoxal_cli_core::runtime::StartupStepKind::Infrastructure,
-            format!("router {connect}"),
-        );
-        board.set_router_endpoint(connect.clone());
-        board.set_manual_input(prepared.manual_input.clone());
-        board.set_simulation_info("webots", simulation.world.display().to_string());
-        ui.info(format!(
-            "Webots profile: webots; world: {}; project: {}",
-            simulation.world.display(),
-            simulation.stage_root.display()
-        ));
-
-        let specs = prepared
-            .participants
-            .iter()
-            .filter_map(|participant| participant.launch.clone())
-            .collect::<Vec<_>>();
-        let requested_spec = specs
-            .iter()
-            .find(|spec| spec.key == simulation.stop_first)
-            .context("simulation stop-first participant has no launch spec")?;
-        let requested_stop =
-            RequestedStop::new(requested_spec.key.clone(), requested_spec.shutdown_grace);
-        ui.info(format!(
-            "simulation launch plan resolved: {} robot(s)",
-            prepared.plan.robots.len()
-        ));
-        ui.info(format!("router ready on {connect}"));
-        crate::application::run::report_launch_commands(&prepared.plan, &specs, &ui)?;
-
-        // The supervisor stages this root, so it is the authority for it. Discovery
-        // failing is not fatal: a bundle may legitimately declare no assets, and a
-        // malformed tree should not stop a robot from running - it makes asset
-        // queries answer `Missing` instead.
-        let assets = phoxal_model::ParticipantAssetResolver::discover(
-            prepared
-                .staged_root
-                .join(phoxal_cli_core::project::layout::ASSETS_DIR),
-        )
-        .unwrap_or_else(|error| {
-            tracing::warn!("serving no declared assets: {error}");
-            phoxal_model::ParticipantAssetResolver::default()
-        });
-        let mut background_tasks = crate::application::run::AbortTasks::default();
-        background_tasks.extend(prepared.plan.robots.iter().map(|robot| {
-            start_supervisor_session(
-                robot.namespace.clone(),
-                robot.id.clone(),
-                connect.clone(),
-                run.execution(),
-                board.clone(),
-                assets.clone(),
-            )
-        }));
-        let (_action_tx, action_rx) = action_channel.unwrap_or_else(|| mpsc::channel(16));
-        let stages = phoxal_cli_supervisor::stages_for_simulation(
-            specs,
-            output.wait_budget(super::super::SIMULATE_READINESS_TIMEOUT),
-        );
-        Ok(LiveSimSetup {
-            router,
-            board,
-            stages,
-            supervisor_options: SupervisorOptions {
-                action_rx: Some(phoxal_cli_supervisor::SupervisorActionReceiver::new(
-                    action_rx,
-                )),
-                requested_stop: Some(requested_stop),
-                token,
-                publishes_running_on_startup_complete: true,
-            },
-            background_tasks,
-        })
+            let diagnostics = launched.diagnostics();
+            app.ui.warn(diagnostics.trim());
+            bail!(
+                "timed out after {}s waiting for the simulated execution to answer at {}",
+                HANDSHAKE_BUDGET.as_secs(),
+                target.endpoint
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
-pub(crate) use setup::live_simulate_setup;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A simulation session is never detachable: this client owns Webots, so
+    /// leaving would strand a simulator with no operator (organization#978).
+    #[test]
+    fn a_simulation_session_is_never_detachable() {
+        assert_ne!(Detachable::No, Detachable::Yes);
+        assert!(HANDSHAKE_BUDGET > Duration::ZERO);
+    }
+}

@@ -23,15 +23,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use phoxal_cli_observation::{AttachmentEpoch, AttachmentEvent, ConnectionObservation};
-use phoxal_supervisor_api::{BundleGetOutcome, Command, CommandOutcome, ProcessKey};
 use phoxal_runtime_contract::ProducerId;
+use phoxal_supervisor_api::{BundleGetOutcome, Command, CommandOutcome, ProcessKey};
 use phoxal_supervisor_client::{Attachment, AttachmentConfig};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::joypad::manual::ManualDrive;
-use ports::input::InputCommand;
 use ports::{AttachmentEvents, InputCommands, LogReader, RuntimeReader};
 use state::Stores;
 
@@ -45,7 +44,7 @@ const INPUT_CAPACITY: usize = 64;
 /// The finalized `robot.yaml` this client fetched, already parsed.
 #[derive(Debug, Clone)]
 pub(crate) struct AttachedManifest {
-    pub(crate) manifest: phoxal_manifest::source::robot::v0::Manifest,
+    pub(crate) manifest: phoxal_manifest::source::robot::Manifest,
 }
 
 impl AttachedManifest {
@@ -143,7 +142,6 @@ pub(crate) struct SessionPorts {
 pub(crate) struct Session {
     pub(crate) ports: SessionPorts,
     attachment: Arc<Attachment>,
-    manifest: AttachedManifest,
     cancellation: CancellationToken,
     tasks: JoinSet<()>,
 }
@@ -156,9 +154,8 @@ impl Session {
     /// Any handshake failure, or a running bundle whose manifest does not
     /// match the identity the supervisor connected as.
     pub(crate) async fn open(endpoint: &str, project: String) -> Result<Self> {
-        let attachment = Arc::new(
-            Attachment::open(&AttachmentConfig::new(endpoint, CLIENT_PARTICIPANT)).await?,
-        );
+        let attachment =
+            Arc::new(Attachment::open(&AttachmentConfig::new(endpoint, CLIENT_PARTICIPANT)).await?);
         let manifest = AttachedManifest::fetch(&attachment).await?;
         let epoch = AttachmentEpoch::new(attachment.execution());
         let stores = Stores::new(epoch);
@@ -200,20 +197,51 @@ impl Session {
                 runtimes: RuntimeReader::new(stores.runtimes.clone()),
             },
             attachment,
-            manifest,
             cancellation,
             tasks,
         })
     }
 
-    /// What the supervisor told this client at connect.
-    pub(crate) fn connected(&self) -> &phoxal_supervisor_client::Connected {
-        self.attachment.connected()
+    /// Observe the highest-revision snapshot this session has installed.
+    pub(crate) fn snapshots(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<phoxal_supervisor_api::Snapshot>> {
+        self.attachment.snapshots()
     }
 
-    /// The finalized manifest this session verified against.
-    pub(crate) const fn manifest(&self) -> &AttachedManifest {
-        &self.manifest
+    /// The most recent snapshot, without awaiting.
+    pub(crate) fn snapshot(&self) -> Option<phoxal_supervisor_api::Snapshot> {
+        self.attachment.snapshot()
+    }
+
+    /// Resolve when the supervisor's identity token is lost.
+    pub(crate) async fn disconnected(&self) {
+        self.attachment.disconnected().await;
+    }
+
+    /// End the execution.
+    pub(crate) async fn stop(&self) -> Result<CommandOutcome> {
+        Ok(self.attachment.command(Command::Stop).await?)
+    }
+
+    /// One backward page of the supervisor's bounded log history.
+    pub(crate) async fn logs(
+        &self,
+        participant: Option<phoxal_supervisor_api::Name>,
+        limit: u32,
+        before_sequence: Option<u64>,
+    ) -> Result<phoxal_supervisor_api::supervisor::logs::Snapshot> {
+        Ok(self
+            .attachment
+            .logs(participant, limit, before_sequence)
+            .await?)
+    }
+
+    /// The live log stream that continues a [`Self::logs`] page.
+    pub(crate) async fn follow_logs(
+        &self,
+    ) -> Result<phoxal_bus::Subscriber<phoxal_supervisor_api::supervisor::logs::Follow>> {
+        Ok(self.attachment.follow_logs().await?)
     }
 
     /// Detach: stop every feed, then close the session. The daemon is

@@ -1,11 +1,11 @@
 //! Main supervision loop, actions, and orderly shutdown.
 
+use super::stages::StageReporter;
 use super::{
     ProcessState, RunningParticipant, SupervisionStage, SupervisorAction, SupervisorOptions,
     SupervisorState, await_stage_ready, join_reader, maybe_publish_startup_outcome,
     spawn_until_pending, stop_child,
 };
-use super::stages::StageReporter;
 use crate::WaitBudget;
 use anyhow::Result;
 use phoxal_cli_core::runtime::{ProjectLifecycle, RuntimeFailurePolicy};
@@ -274,9 +274,6 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            state.snapshot().lifecycle,
-            ProjectLifecycle::Stopped
-        );
+        assert_eq!(state.snapshot().lifecycle, ProjectLifecycle::Stopped);
     }
 }

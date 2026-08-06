@@ -1,58 +1,78 @@
+//! `phoxal status` - render the supervisor's authoritative snapshot.
+
+use std::path::PathBuf;
+
 use anyhow::Result;
-use clap::{Args, Subcommand};
-use phoxal_cli_core::identity::ExecutionId;
-use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
+use clap::Args;
 
-use crate::application::attachment::StatusQuery;
 use crate::cli::AppContext;
-
-#[derive(Debug, Clone, Args)]
-pub struct BusTargetArgs {
-    #[arg(long, value_name = "ENDPOINT", default_value = DEFAULT_ROUTER_CONNECT)]
-    pub connect: String,
-    #[arg(long, value_name = "NAMESPACE")]
-    pub namespace: Option<String>,
-    #[arg(long = "robot-id", value_name = "ID")]
-    pub robot_id: Option<String>,
-    #[arg(long, value_name = "EXECUTION", value_parser = parse_execution)]
-    pub execution: Option<ExecutionId>,
-}
-
-fn parse_execution(value: &str) -> Result<ExecutionId, String> {
-    ExecutionId::parse(value).map_err(|error| error.to_string())
-}
-
-impl BusTargetArgs {
-    pub(crate) fn request(&self) -> crate::application::attachment::BusTargetRequest {
-        crate::application::attachment::BusTargetRequest {
-            connect: self.connect.clone(),
-            namespace: self.namespace.clone(),
-            robot_id: self.robot_id.clone(),
-            execution: self.execution,
-        }
-    }
-}
 
 #[derive(Debug, Args)]
 pub struct Status {
-    #[command(subcommand)]
-    pub command: StatusSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum StatusSubcommand {
-    Safety(BusTargetArgs),
-    Motion(BusTargetArgs),
-    Localization(BusTargetArgs),
+    #[arg(value_name = "PROJECT_OR_ENTRY")]
+    pub target: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "ZENOH_ENDPOINT",
+        help = "Report the execution at an explicit endpoint instead of this project's."
+    )]
+    endpoint: Option<String>,
 }
 
 impl Status {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        let (target, query) = match &self.command {
-            StatusSubcommand::Safety(target) => (target, StatusQuery::Safety),
-            StatusSubcommand::Motion(target) => (target, StatusQuery::Motion),
-            StatusSubcommand::Localization(target) => (target, StatusQuery::Localization),
+        crate::application::lifecycle::status_command(
+            app,
+            self.target.as_deref(),
+            self.endpoint.clone(),
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cli::args::{Cli, RootCommand};
+    use clap::Parser;
+
+    /// `status` reports one execution's snapshot. The old robot-domain
+    /// subcommands went with the finite bus client they were built on
+    /// (organization#978).
+    #[test]
+    fn status_takes_a_target_or_an_endpoint_and_no_domain_subcommand() {
+        assert!(matches!(
+            Cli::try_parse_from(["phoxal", "status"])
+                .expect("bare status parses")
+                .command,
+            RootCommand::Status(_)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["phoxal", "status", "--endpoint", "tcp/robot:7447"])
+                .expect("an explicit endpoint parses")
+                .command,
+            RootCommand::Status(_)
+        ));
+        // The old robot-domain subcommands went with the finite bus client
+        // they were built on: what follows `status` is a project, never a
+        // domain to query.
+        let RootCommand::Status(status) = Cli::try_parse_from(["phoxal", "status", "safety"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected status")
         };
-        crate::application::attachment::status_command(app, &target.request(), query).await
+        assert_eq!(
+            status.target.as_deref(),
+            Some(std::path::Path::new("safety"))
+        );
+        for removed in [
+            vec!["phoxal", "status", "safety", "--connect", "tcp/robot:7447"],
+            vec!["phoxal", "status", "motion", "--execution", "2b"],
+        ] {
+            assert!(
+                Cli::try_parse_from(removed.clone()).is_err(),
+                "removed status surface unexpectedly parsed: {removed:?}"
+            );
+        }
     }
 }

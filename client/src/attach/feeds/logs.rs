@@ -95,7 +95,10 @@ async fn apply(context: &FeedContext, outcome: ReconcileOutcome<Follow>) -> Resu
         ReconcileOutcome::Installed { snapshot, replay } => {
             context.stores.logs.write().await.install_snapshot(
                 context.epoch,
-                snapshot.into_iter().chain(replay).map(|item| row(item.record)),
+                snapshot
+                    .into_iter()
+                    .chain(replay)
+                    .map(|item| row(item.record)),
             )
         }
         ReconcileOutcome::Append(item) => context

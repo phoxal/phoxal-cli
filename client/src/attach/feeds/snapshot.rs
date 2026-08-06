@@ -53,9 +53,9 @@ async fn publish(context: &FeedContext, snapshot: &Snapshot) -> Result<(), ()> {
     let processes = context.stores.processes.write().await.replace(snapshot);
     context
         .events
-        .send(AttachmentEvent::SupervisorChanged(Arc::new(
-            observation(context, snapshot),
-        )))
+        .send(AttachmentEvent::SupervisorChanged(Arc::new(observation(
+            context, snapshot,
+        ))))
         .await
         .map_err(|_| ())?;
     context

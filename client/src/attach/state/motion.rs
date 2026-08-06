@@ -12,8 +12,4 @@ impl MotionStore {
     pub fn current(&self) -> MotionObservation {
         self.0
     }
-
-    pub fn clear(&mut self) {
-        self.0 = MotionObservation::default();
-    }
 }

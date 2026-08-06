@@ -1,9 +1,7 @@
 //! The execution-level observation, projected from one supervisor snapshot.
 
 use phoxal_cli_core::identity::ExecutionId;
-use phoxal_supervisor_api::{
-    DaemonFailure, ExecutionMode, Lifecycle, RobotIdentity, StartupStep,
-};
+use phoxal_supervisor_api::{DaemonFailure, ExecutionMode, Lifecycle, RobotIdentity, StartupStep};
 
 /// What an attached client knows about the execution as a whole.
 ///

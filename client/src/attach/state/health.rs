@@ -18,8 +18,4 @@ impl HealthStore {
         self.health.sources.insert(source.to_string(), status);
         Some(self.health.clone())
     }
-
-    pub fn clear(&mut self) {
-        self.health = SourceHealth::default();
-    }
 }

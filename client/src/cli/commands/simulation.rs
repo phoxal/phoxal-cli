@@ -44,12 +44,6 @@ pub struct SimulationRun {
         help = "Source project directory or robot.yaml. Defaults to upward discovery."
     )]
     pub(crate) project: Option<PathBuf>,
-    #[arg(
-        short = 'd',
-        long,
-        help = "Start resident supervision and return after required startup readiness."
-    )]
-    pub(crate) detach: bool,
 }
 
 impl Simulation {
@@ -61,7 +55,6 @@ impl Simulation {
                         app,
                         command.world.clone(),
                         command.project.as_deref(),
-                        command.detach,
                     )
                     .await
                 }

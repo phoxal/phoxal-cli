@@ -8,6 +8,6 @@ pub struct Doctor {}
 
 impl Doctor {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        crate::application::run::doctor_command(app).await
+        crate::application::doctor::doctor_command(app).await
     }
 }

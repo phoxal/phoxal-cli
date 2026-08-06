@@ -27,7 +27,7 @@ pub struct Deploy {
 
 impl Deploy {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        crate::application::run::deploy_command(
+        crate::application::deployment::deploy_command(
             app,
             self.target.clone(),
             self.project.clone(),

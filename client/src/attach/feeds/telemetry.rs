@@ -36,7 +36,6 @@ async fn feed(context: &FeedContext) -> Result<()> {
     let mut reconciler = Reconciler::new(BUFFER);
     let mut local_drops = subscriber.dropped();
     let mut backoff = RetryBackoff::new(Duration::from_millis(10), Duration::from_millis(250));
-    let mut evictions = 0;
 
     'query: loop {
         reconciler.begin_query();
@@ -46,7 +45,7 @@ async fn feed(context: &FeedContext) -> Result<()> {
             capacity_evictions,
             ..
         } = attachment.telemetry(None, PAGE, None).await?;
-        evictions = capacity_evictions;
+        let evictions = capacity_evictions;
         let anchor = Cursor {
             generation: cursor.generation.as_str().to_string(),
             sequence: cursor.sequence,
@@ -70,7 +69,6 @@ async fn feed(context: &FeedContext) -> Result<()> {
             let received = subscriber.recv().await?;
             let observed = subscriber.dropped();
             if observed != local_drops {
-                local_drops = observed;
                 let _ = reconciler.local_drop();
                 while subscriber.try_recv().is_some() {}
                 local_drops = subscriber.dropped();
@@ -102,24 +100,25 @@ async fn apply(
     capacity_evictions: u64,
 ) -> Result<()> {
     let status = RuntimeFeedStatus { capacity_evictions };
-    let revision = match outcome {
-        ReconcileOutcome::Installed { snapshot, replay } => {
-            context.stores.runtimes.write().await.install_snapshot(
+    let revision =
+        match outcome {
+            ReconcileOutcome::Installed { snapshot, replay } => {
+                context.stores.runtimes.write().await.install_snapshot(
+                    context.epoch,
+                    snapshot
+                        .into_iter()
+                        .chain(replay)
+                        .map(|item| sample(item.record)),
+                    status,
+                )
+            }
+            ReconcileOutcome::Append(item) => context.stores.runtimes.write().await.record(
                 context.epoch,
-                snapshot
-                    .into_iter()
-                    .chain(replay)
-                    .map(|item| sample(item.record)),
+                sample(item.record),
                 status,
-            )
-        }
-        ReconcileOutcome::Append(item) => context.stores.runtimes.write().await.record(
-            context.epoch,
-            sample(item.record),
-            status,
-        ),
-        ReconcileOutcome::Buffered | ReconcileOutcome::Requery => return Ok(()),
-    };
+            ),
+            ReconcileOutcome::Buffered | ReconcileOutcome::Requery => return Ok(()),
+        };
     if let Some(revision) = revision {
         context
             .events

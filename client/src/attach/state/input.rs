@@ -22,8 +22,4 @@ impl InputStore {
             motion: Some(motion),
         }
     }
-
-    pub fn clear(&mut self) {
-        self.joypads = JoypadDevicesSample::default();
-    }
 }
