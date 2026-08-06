@@ -615,6 +615,50 @@ mod tests {
         Ok(())
     }
 
+    /// Staging renames the verified root executable to the canonical
+    /// `bin/brain` regardless of the Cargo package/bin target name it was
+    /// built under, and never collides with a user service
+    /// (organization#973).
+    #[test]
+    fn the_brain_is_staged_canonically_as_bin_brain_without_collision() -> Result<()> {
+        let staged = tempfile::tempdir()?;
+        std::fs::create_dir_all(staged.path().join("bin"))?;
+        let built = tempfile::tempdir()?;
+
+        // The root package builds `testbot-robot`; the user service builds
+        // `mission`. Only the former becomes `bin/brain`.
+        let brain_binary = built.path().join("testbot-robot");
+        std::fs::write(
+            &brain_binary,
+            synthesize_binary_with_id(host_architecture(), "brain", "brain"),
+        )?;
+        let mission_binary = built.path().join("mission");
+        std::fs::write(
+            &mission_binary,
+            synthesize_binary_with_id(host_architecture(), "mission", "service"),
+        )?;
+
+        let participants = [
+            SourceParticipant::brain(built.path().to_path_buf(), "testbot-robot"),
+            SourceParticipant::user_service("mission", built.path().to_path_buf()),
+        ];
+        let artifacts = SourceArtifacts::for_test_pairs(&[
+            ("brain", brain_binary.clone()),
+            ("mission", mission_binary.clone()),
+        ]);
+        stage_complete_bin_store(staged.path(), &participants, &artifacts)?;
+
+        let staged_brain = staged.path().join("bin/brain");
+        assert!(staged_brain.is_file(), "{}", staged_brain.display());
+        assert_eq!(std::fs::read(&staged_brain)?, std::fs::read(&brain_binary)?);
+        assert!(
+            !staged.path().join("bin/testbot-robot").exists(),
+            "the Cargo bin target name must never reach the staged store"
+        );
+        assert!(staged.path().join("bin/mission").is_file());
+        Ok(())
+    }
+
     #[test]
     fn a_foreign_arch_staged_binary_fails_precisely_naming_the_identity() -> Result<()> {
         let staged = tempfile::tempdir()?;

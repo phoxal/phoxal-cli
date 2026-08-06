@@ -922,6 +922,61 @@ robot:
         Ok(())
     }
 
+    /// The mandatory brain is a checked robot-graph participant in BOTH
+    /// modes: expected by parity, admitted by the launch filter (never
+    /// excluded as a simulator), and planned exactly once - including in the
+    /// Webots resolved-source path, where physical drivers are excluded
+    /// (organization#973).
+    #[test]
+    fn the_brain_is_expected_and_planned_exactly_once_in_run_and_webots() -> anyhow::Result<()> {
+        let mut resolved = empty_bundle_plan("testbot")?;
+        resolved.components.push(ResolvedComponent {
+            instance: "left_drive".to_string(),
+            source_name: "ddsm115".to_string(),
+            assets_root: PathBuf::from("/tmp/ddsm115"),
+            driver: Some(ResolvedComponentDriver::Local {
+                crate_dir: PathBuf::from("/tmp/ddsm115"),
+            }),
+        });
+        let webots = LaunchMode::Webots {
+            world: PathBuf::from("/tmp/default.wbt"),
+        };
+        let brain = brain_checked();
+        assert!(is_robot_launch_participant(&webots, &brain));
+        assert!(is_robot_launch_participant(&LaunchMode::Run, &brain));
+        for mode in [LaunchMode::Run, webots.clone()] {
+            assert!(
+                expected_checked_participant_ids(&mode, &resolved).contains("brain"),
+                "{mode:?}"
+            );
+        }
+
+        // The simulation path's plan carries exactly one brain, under its
+        // canonical staged binary name and the simulated clock.
+        let plan = build_launch_plan(
+            webots,
+            &[CheckedRobotLaunchInput {
+                project_root: Path::new("/tmp/robot"),
+                resolved: &resolved,
+                checked_participants: &[brain],
+                source_participants: &[brain_source()],
+            }],
+            RunIdentity::default(),
+        )?;
+        let planned = plan.robots[0]
+            .participants
+            .iter()
+            .filter(|participant| {
+                matches!(participant.execution, ParticipantExecution::Brain { .. })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(planned.len(), 1, "{planned:?}");
+        assert_eq!(planned[0].execution.binary_name(), "brain");
+        assert_eq!(planned[0].launch.clock, ClockMode::Simulation);
+        assert_eq!(planned[0].launch.config, None);
+        Ok(())
+    }
+
     #[test]
     fn parity_rejects_missing_and_extra_checked_metadata() -> anyhow::Result<()> {
         let mut resolved = empty_bundle_plan("testbot")?;

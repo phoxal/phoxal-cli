@@ -44,6 +44,16 @@ impl SourceArtifacts {
             by_participant: [(name.into(), binary)].into_iter().collect(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_pairs(pairs: &[(&str, PathBuf)]) -> Self {
+        Self {
+            by_participant: pairs
+                .iter()
+                .map(|(name, binary)| ((*name).to_string(), binary.clone()))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -945,6 +955,42 @@ mod prebuilt_tests {
             &crate::SilentReporter,
         )?;
         assert_eq!(artifacts.binary_named("worker")?, worker);
+        Ok(())
+    }
+
+    /// The container path looks the brain's prebuilt binary up by its
+    /// Cargo-metadata-derived bin target, and keys the result under the
+    /// canonical `brain` identity - never the other way round
+    /// (organization#973).
+    #[test]
+    fn prebuilt_lookup_uses_the_brains_metadata_bin_target_not_its_identity() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let crate_dir = dir.path().join("robot");
+        std::fs::create_dir_all(crate_dir.join("src"))?;
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"testbot-robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )?;
+        std::fs::write(crate_dir.join("src/main.rs"), "fn main() {}")?;
+        let target = dir.path().join("target");
+        let built = target
+            .join("debug")
+            .join(binary_name_with_suffix("testbot-robot"));
+        std::fs::create_dir_all(built.parent().expect("binary parent"))?;
+        std::fs::write(&built, b"prebuilt")?;
+        // No `bin/brain` exists anywhere: a lookup by the canonical identity
+        // would fail outright.
+        let participants = [SourceParticipant::brain(crate_dir, "testbot-robot")];
+
+        let artifacts = build_selected_source_artifacts(
+            &participants,
+            None,
+            Profile::Debug,
+            Some(&target),
+            true,
+            &crate::SilentReporter,
+        )?;
+        assert_eq!(artifacts.binary_named("brain")?, built);
         Ok(())
     }
 

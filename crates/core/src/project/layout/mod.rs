@@ -887,6 +887,111 @@ services:
         Ok(())
     }
 
+    /// The bundle-format invariant made executable: every staged layout
+    /// requires exactly one `bin/brain`, derived from the format itself rather
+    /// than from authored `robot.yaml` or Cargo source, and carrying no config
+    /// (organization#973).
+    #[test]
+    fn the_root_brain_is_required_exactly_once_with_no_config() -> Result<()> {
+        let dir = write_layout(ROBOT_YAML)?;
+        let layout = RuntimeLayout::open(dir.path())?;
+        let brains = layout
+            .required_runtimes(&DriverSelection::All)
+            .into_iter()
+            .filter(|runtime| runtime.kind == RequiredRuntimeKind::Brain)
+            .collect::<Vec<_>>();
+        assert_eq!(brains.len(), 1, "{brains:?}");
+        assert_eq!(brains[0].identity, "brain");
+        assert_eq!(brains[0].binary_name, "brain");
+        assert_eq!(brains[0].config, None);
+
+        // Driver policy never gates it.
+        assert_eq!(
+            layout
+                .required_runtimes(&DriverSelection::None)
+                .into_iter()
+                .filter(|runtime| runtime.kind == RequiredRuntimeKind::Brain)
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    /// A source-free bundle missing `bin/brain`, or carrying service metadata
+    /// there, is invalid even when every other runtime is present.
+    #[test]
+    fn a_bundle_without_a_valid_brain_binary_is_rejected() -> Result<()> {
+        let dir = write_layout(ROBOT_YAML)?;
+        let layout = RuntimeLayout::open(dir.path())?;
+        let required = layout.required_runtimes(&DriverSelection::All);
+        let brain = required
+            .iter()
+            .find(|runtime| runtime.kind == RequiredRuntimeKind::Brain)
+            .context("the brain is required")?;
+
+        let message = layout
+            .resolve_binary(brain)
+            .expect_err("a bundle with no bin/brain is invalid")
+            .to_string();
+        assert!(message.contains("brain"), "{message}");
+
+        // Service metadata at the canonical brain path is the wrong kind.
+        write_bin(
+            dir.path(),
+            "brain",
+            &synthesize_binary(
+                host_architecture(),
+                &metadata("brain", "service", serde_json::json!({"type":"null"})),
+            ),
+        )?;
+        let message = format!(
+            "{:#}",
+            layout
+                .inspect_for(brain, LayoutInspection::Host)
+                .expect_err("service metadata at bin/brain must be rejected")
+        );
+        assert!(message.contains("Service"), "{message}");
+        assert!(message.contains("Brain"), "{message}");
+
+        // A brain binary declaring another id is the wrong binary.
+        write_bin(
+            dir.path(),
+            "brain",
+            &synthesize_binary(
+                host_architecture(),
+                &metadata("mission", "brain", serde_json::json!({"type":"null"})),
+            ),
+        )?;
+        let message = format!(
+            "{:#}",
+            layout
+                .inspect_for(brain, LayoutInspection::Host)
+                .expect_err("a brain declaring the wrong id must be rejected")
+        );
+        assert!(message.contains("mission"), "{message}");
+
+        // The correct record passes and carries the unit config schema.
+        write_bin(
+            dir.path(),
+            "brain",
+            &synthesize_binary(
+                host_architecture(),
+                &metadata("brain", "brain", serde_json::json!({"type":"null"})),
+            ),
+        )?;
+        let selected = layout.inspect_for(brain, LayoutInspection::Host)?;
+        assert_eq!(selected.meta.id, "brain");
+        assert_eq!(
+            selected.meta.kind,
+            phoxal_runtime_contract::ParticipantKind::Brain
+        );
+        assert_eq!(
+            selected.meta.config_schema,
+            serde_json::json!({"type": "null"})
+        );
+        Ok(())
+    }
+
     #[test]
     fn component_participants_must_match_a_canonical_model_instance() -> Result<()> {
         let dir = write_layout(ROBOT_YAML)?;

@@ -782,6 +782,47 @@ services:
         Ok(())
     }
 
+    /// The layout-driven source-free constructor plans exactly one brain, as
+    /// an explicit `ParticipantExecution::Brain` record with no config, the
+    /// layout path's real service clock, required startup, and the
+    /// stop-project terminal-failure policy (organization#973).
+    #[test]
+    fn the_layout_plan_carries_exactly_one_explicit_brain_record() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let layout_root = runtime_layout_dir(project.path());
+        stage_layout(&layout_root, &[])?;
+        let constructed = RuntimeLayout::construct_plan(
+            &layout_root,
+            &PlanOptions::default(),
+            RunIdentity::default(),
+        )?;
+        let brains = constructed.plan.robots[0]
+            .participants
+            .iter()
+            .filter(|participant| {
+                matches!(participant.execution, ParticipantExecution::Brain { .. })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(brains.len(), 1, "{brains:?}");
+        let brain = brains[0];
+        assert_eq!(brain.launch.participant_id, "brain");
+        assert_eq!(brain.execution.binary_name(), "brain");
+        assert_eq!(brain.launch.config, None);
+        assert_eq!(brain.launch.clock, ClockMode::Real);
+        assert_eq!(brain.startup_requirement, StartupRequirement::Required);
+        assert_eq!(brain.runtime_failure, RuntimeFailurePolicy::StopProject);
+        // The brain has no config side channel, so it is never schema-paired.
+        assert!(
+            constructed
+                .user_runtime_configs
+                .iter()
+                .all(|config| config.runtime_id != "brain"),
+            "{:?}",
+            constructed.user_runtime_configs
+        );
+        Ok(())
+    }
+
     #[test]
     fn one_driver_binary_serves_every_instance() -> Result<()> {
         let project = tempfile::tempdir()?;

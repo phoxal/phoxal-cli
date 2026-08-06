@@ -1518,6 +1518,23 @@ mod tests {
         process_with_kind(key, ParticipantKind::Service)
     }
 
+    /// The mandatory root brain is a runtime row like any other graph
+    /// participant, and a host process still is not (organization#973).
+    #[test]
+    fn the_brain_is_presented_as_a_runtime_row() {
+        let brain = process_with_kind(
+            ProcessKey::robot(RobotKey::new("dev", "testbot"), "brain"),
+            ParticipantKind::Brain,
+        );
+        assert!(process_is_runtime(&brain));
+        assert_eq!(brain.kind.label(), "brain");
+        let host = process_with_kind(
+            ProcessKey::robot(RobotKey::new("dev", "testbot"), "webots"),
+            ParticipantKind::Host,
+        );
+        assert!(!process_is_runtime(&host));
+    }
+
     fn process_with_kind(key: ProcessKey, kind: ParticipantKind) -> ProcessObservation {
         ProcessObservation {
             key: key.clone(),
