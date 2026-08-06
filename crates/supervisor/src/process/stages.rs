@@ -21,7 +21,8 @@ pub fn stages_for_run(
     for spec in specs {
         match spec.kind {
             phoxal_cli_core::runtime::ParticipantKind::Host => infrastructure.push(spec),
-            phoxal_cli_core::runtime::ParticipantKind::Driver
+            phoxal_cli_core::runtime::ParticipantKind::Brain
+            | phoxal_cli_core::runtime::ParticipantKind::Driver
             | phoxal_cli_core::runtime::ParticipantKind::Service
             | phoxal_cli_core::runtime::ParticipantKind::Simulator => graph.push(spec),
         }
@@ -352,6 +353,33 @@ mod tests {
         assert_eq!(stages[0].specs[0].id, "webots");
         assert_eq!(stages[1].step, StartupStepKind::Graph);
         assert_eq!(stages[1].specs[0].id, "service");
+    }
+
+    /// The mandatory root brain is a robot-graph participant, never project
+    /// infrastructure (organization#973).
+    #[test]
+    fn the_brain_starts_in_the_robot_graph_stage_not_infrastructure() {
+        let stages = stages_for_run(
+            vec![
+                spec("webots", ParticipantKind::Host),
+                spec("brain", ParticipantKind::Brain),
+            ],
+            crate::WaitBudget::Unbounded,
+        );
+        assert_eq!(stages[0].step, StartupStepKind::Infrastructure);
+        assert!(stages[0].specs.iter().all(|spec| spec.id != "brain"));
+        assert_eq!(stages[1].step, StartupStepKind::Graph);
+        assert!(stages[1].specs.iter().any(|spec| spec.id == "brain"));
+
+        let stages = stages_for_simulation(
+            vec![
+                spec(WEBOTS_PROCESS_ID, ParticipantKind::Simulator),
+                spec("brain", ParticipantKind::Brain),
+            ],
+            crate::WaitBudget::Unbounded,
+        );
+        assert_eq!(stages[1].step, StartupStepKind::Graph);
+        assert!(stages[1].specs.iter().any(|spec| spec.id == "brain"));
     }
 
     #[test]

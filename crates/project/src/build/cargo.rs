@@ -44,6 +44,16 @@ impl SourceArtifacts {
             by_participant: [(name.into(), binary)].into_iter().collect(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_pairs(pairs: &[(&str, PathBuf)]) -> Self {
+        Self {
+            by_participant: pairs
+                .iter()
+                .map(|(name, binary)| ((*name).to_string(), binary.clone()))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -97,8 +107,11 @@ pub(crate) fn build_selected_source_artifacts(
     if let Some(target_dir) = prebuilt_target_dir {
         let mut by_participant = BTreeMap::new();
         for participant in participants {
-            let binary_name =
-                source_binary_name_from_manifest(&participant.crate_dir, &participant.name)?;
+            let binary_name = source_binary_name_from_manifest(
+                &participant.crate_dir,
+                participant.bin_target.as_deref(),
+                &participant.name,
+            )?;
             let binary = locate_prebuilt_binary(&binary_name, target_dir, target, profile)?;
             if by_participant
                 .insert(participant.name.clone(), binary)
@@ -134,7 +147,11 @@ pub(crate) fn build_selected_source_artifacts(
             metadata.last().expect("inserted workspace metadata")
         };
         let package = workspace.package_for(&crate_dir)?;
-        let binary = package.binary_for(&participant.name)?;
+        // The root brain's Cargo bin target is project-specific and comes from
+        // the locked metadata, never from its canonical `brain` identity
+        // (organization#973); every other participant's target name IS its
+        // identity, so this is the same lookup for them.
+        let binary = package.binary_for(participant.bin_target.as_deref(), &participant.name)?;
         let group_key = SourceBuildGroupKey {
             workspace_root: workspace.workspace_root.clone(),
             target: cross.clone(),
@@ -227,7 +244,21 @@ pub(crate) fn build_selected_source_artifacts(
     Ok(SourceArtifacts { by_participant })
 }
 
-fn source_binary_name_from_manifest(crate_dir: &Path, preferred: &str) -> Result<String> {
+/// The Cargo binary target to stage for one participant, projected from its
+/// manifest for the container path (host builds read `cargo metadata`).
+///
+/// `required` is a bin target the caller ALREADY knows from Cargo metadata -
+/// today only the root brain's (organization#973). It is an exact demand: if
+/// that target is not among the package's bins, the manifest and the locked
+/// metadata disagree, so this fails rather than silently staging whichever
+/// single binary happens to exist. `preferred` is the softer,
+/// identity-derived guess used when no metadata-derived target is known; it
+/// keeps the historical "the only bin, whatever it is called" inference.
+fn source_binary_name_from_manifest(
+    crate_dir: &Path,
+    required: Option<&str>,
+    preferred: &str,
+) -> Result<String> {
     let manifest_path = crate_dir.join("Cargo.toml");
     let contents = fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
@@ -265,6 +296,21 @@ fn source_binary_name_from_manifest(crate_dir: &Path, preferred: &str) -> Result
     }
     binaries.sort();
     binaries.dedup();
+    if let Some(required) = required {
+        if binaries.iter().any(|name| name == required) {
+            return Ok(required.to_owned());
+        }
+        bail!(
+            "{} declares binary targets ({}) but not the required target `{required}`; the \
+             manifest and the locked Cargo metadata disagree",
+            manifest_path.display(),
+            if binaries.is_empty() {
+                "none".to_string()
+            } else {
+                binaries.join(", ")
+            },
+        );
+    }
     if binaries.iter().any(|name| name == preferred) {
         return Ok(preferred.to_owned());
     }
@@ -346,9 +392,23 @@ impl WorkspaceMetadata {
 }
 
 impl SourcePackageMetadata {
-    fn binary_for(&self, preferred: &str) -> Result<String> {
+    /// See [`source_binary_name_from_manifest`] for the `required` versus
+    /// `preferred` split: a metadata-derived target is an exact demand, an
+    /// identity-derived guess still falls back to the package's only bin.
+    fn binary_for(&self, required: Option<&str>, preferred: &str) -> Result<String> {
         // `binaries` stores Cargo's target declarations rather than parsing
         // Cargo.toml again after metadata has already resolved the package.
+        if let Some(required) = required {
+            if self.binaries.iter().any(|binary| binary == required) {
+                return Ok(required.to_string());
+            }
+            bail!(
+                "selected package {} declares binary targets ({}) but not the required target \
+                 `{required}`",
+                self.package_id,
+                self.binaries.join(", ")
+            );
+        }
         if self.binaries.iter().any(|binary| binary == preferred) {
             return Ok(preferred.to_string());
         }
@@ -942,6 +1002,42 @@ mod prebuilt_tests {
         Ok(())
     }
 
+    /// The container path looks the brain's prebuilt binary up by its
+    /// Cargo-metadata-derived bin target, and keys the result under the
+    /// canonical `brain` identity - never the other way round
+    /// (organization#973).
+    #[test]
+    fn prebuilt_lookup_uses_the_brains_metadata_bin_target_not_its_identity() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let crate_dir = dir.path().join("robot");
+        std::fs::create_dir_all(crate_dir.join("src"))?;
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"testbot-robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )?;
+        std::fs::write(crate_dir.join("src/main.rs"), "fn main() {}")?;
+        let target = dir.path().join("target");
+        let built = target
+            .join("debug")
+            .join(binary_name_with_suffix("testbot-robot"));
+        std::fs::create_dir_all(built.parent().expect("binary parent"))?;
+        std::fs::write(&built, b"prebuilt")?;
+        // No `bin/brain` exists anywhere: a lookup by the canonical identity
+        // would fail outright.
+        let participants = [SourceParticipant::brain(crate_dir, "testbot-robot")];
+
+        let artifacts = build_selected_source_artifacts(
+            &participants,
+            None,
+            Profile::Debug,
+            Some(&target),
+            true,
+            &crate::SilentReporter,
+        )?;
+        assert_eq!(artifacts.binary_named("brain")?, built);
+        Ok(())
+    }
+
     #[test]
     fn prebuilt_manifest_projection_rejects_an_ambiguous_auto_bin_selection() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -954,9 +1050,28 @@ mod prebuilt_tests {
         std::fs::write(crate_dir.join("src/main.rs"), "fn main() {}")?;
         std::fs::write(crate_dir.join("src/bin/worker.rs"), "fn main() {}")?;
 
-        let error = source_binary_name_from_manifest(&crate_dir, "missing")
+        let error = source_binary_name_from_manifest(&crate_dir, None, "missing")
             .expect_err("an absent preferred name must not guess among auto bins");
         assert!(format!("{error:#}").contains("2 binary targets (svc, worker)"));
+
+        // A metadata-derived target is an exact demand: it must never fall
+        // back to "the only bin", even in a single-bin package.
+        let single = dir.path().join("solo");
+        std::fs::create_dir_all(single.join("src"))?;
+        std::fs::write(
+            single.join("Cargo.toml"),
+            "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )?;
+        std::fs::write(single.join("src/main.rs"), "fn main() {}")?;
+        assert_eq!(
+            source_binary_name_from_manifest(&single, Some("solo"), "solo")?,
+            "solo"
+        );
+        let error = source_binary_name_from_manifest(&single, Some("stale-target"), "solo")
+            .expect_err("a required target absent from the manifest must be a hard error");
+        let message = format!("{error:#}");
+        assert!(message.contains("stale-target"), "{message}");
+        assert!(message.contains("required target"), "{message}");
         Ok(())
     }
 
@@ -1075,8 +1190,21 @@ mod prebuilt_tests {
         assert_eq!(workspace.workspace_root, Path::new("/robot"));
         let alpha = workspace.package_for(Path::new("/robot/alpha"))?;
         let beta = workspace.package_for(Path::new("/robot/beta"))?;
-        assert_eq!(alpha.binary_for("alpha")?, "alpha");
-        assert_eq!(beta.binary_for("beta")?, "beta-runtime");
+        assert_eq!(alpha.binary_for(None, "alpha")?, "alpha");
+        assert_eq!(beta.binary_for(None, "beta")?, "beta-runtime");
+        // A metadata-derived target is exact: `beta`'s only bin is
+        // `beta-runtime`, so demanding `beta` fails instead of falling back.
+        assert_eq!(
+            beta.binary_for(Some("beta-runtime"), "beta")?,
+            "beta-runtime"
+        );
+        let error = format!(
+            "{:#}",
+            beta.binary_for(Some("beta"), "beta").expect_err(
+                "a required target absent from the package's bins must be a hard error"
+            )
+        );
+        assert!(error.contains("required target"), "{error}");
 
         let group = SourceBuildGroup {
             key: SourceBuildGroupKey {

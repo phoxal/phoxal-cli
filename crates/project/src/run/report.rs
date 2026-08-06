@@ -114,7 +114,7 @@ pub(crate) fn report_excluded_drivers(
 /// Surface workspace runtime crates that are present but not declared in
 /// robot.yaml (#950): legal drift, not built or launched. One advisory line
 /// naming each crate and the map that would declare it, so authors notice a
-/// service or tool they forgot to declare. No output when there is no drift.
+/// service they forgot to declare. No output when there is no drift.
 pub(crate) fn report_undeclared_runtimes(
     undeclared: &[phoxal_cli_core::project::resolver::UndeclaredRuntime],
     ui: &dyn crate::Reporter,

@@ -36,7 +36,6 @@ pub const RUNTIME_HEADER_ASSET: &str = "runtime.json";
 pub const PARTICIPANTS_PATH: &str = "assets/participants.json";
 pub const ROUTER_CONFIG_PATH: &str = "assets/router/config.json5";
 pub const RUNTIME_HEADER_PATH: &str = "assets/runtime.json";
-const BEHAVIOR_CATALOG_ASSET: &str = "behavior/catalog.json";
 const PARTICIPANTS_SCHEMA: &str = "phoxal/participants/v0";
 const BIN_DIR: &str = "bin";
 
@@ -108,6 +107,10 @@ impl DriverSelection {
 /// (organization#978).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequiredRuntimeKind {
+    /// The one mandatory root brain. Derived from the bundle-format invariant
+    /// itself, not from authored `robot.yaml` or Cargo source: every staged
+    /// layout carries exactly one `bin/brain` (organization#973).
+    Brain,
     OfficialService,
     UserService,
     ComponentDriver,
@@ -174,11 +177,6 @@ impl RuntimeLayout {
         validate_model_assets(root, &robot)?;
         let participants = decode_participants(&root.join(ASSETS_DIR).join(PARTICIPANTS_ASSET))?;
         validate_participant_model_membership(&robot, &participants)?;
-        if participants.iter().any(|participant| {
-            participant.kind == ParticipantKind::Service && participant.id == "behavior"
-        }) {
-            validate_bundle_asset(root, BEHAVIOR_CATALOG_ASSET, "compiled behavior catalog")?;
-        }
         Ok(Self {
             root: root.to_path_buf(),
             robot,
@@ -219,6 +217,16 @@ impl RuntimeLayout {
         let mut required = Vec::new();
         let official_services = official_service_short_names();
 
+        // The mandatory root brain, always first and always exactly once. It
+        // takes no config: `#[phoxal::brain]` fixes `Config = ()`, so there is
+        // no brain config side channel to carry here.
+        required.push(RequiredRuntime {
+            identity: crate::check::source::BRAIN_ID.to_string(),
+            binary_name: crate::check::source::BRAIN_ID.to_string(),
+            kind: RequiredRuntimeKind::Brain,
+            config: None,
+        });
+
         // Native official set only: the layout constructor serves `run`/
         // `start`/`build`, which exclude simulator binaries. Simulation still
         // constructs its plan on the legacy resolved-robot path; its layout
@@ -235,16 +243,9 @@ impl RuntimeLayout {
                 // The catalog carries no component drivers.
                 ArtifactKind::ComponentDriver => continue,
             };
-            // Official runtimes take no authored service-map configuration.
-            // The framework compiler does, however, own the behavior service's
-            // typed `{root, autostart}` declaration.
-            let config = self
-                .participants
-                .iter()
-                .find(|participant| {
-                    participant.kind == ParticipantKind::Service && participant.id == short
-                })
-                .and_then(|participant| participant.config.clone());
+            // Official runtimes take no authored service-map configuration and
+            // no compiler-owned configuration either.
+            let config = None;
             required.push(RequiredRuntime {
                 identity: short.clone(),
                 binary_name: official_binary_name(official.kind, &short),
@@ -360,6 +361,7 @@ impl RuntimeLayout {
             );
         }
         let expected_kind = match required.kind {
+            RequiredRuntimeKind::Brain => phoxal_runtime_contract::ParticipantKind::Brain,
             RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => {
                 phoxal_runtime_contract::ParticipantKind::Service
             }
@@ -377,6 +379,20 @@ impl RuntimeLayout {
             required.identity,
             expected_kind,
         );
+        if required.kind == RequiredRuntimeKind::Brain {
+            // `#[phoxal::brain]` fixes `Config = ()`, so the brain's embedded
+            // schema is exactly the unit schema. A binary claiming any other
+            // config surface at `bin/brain` is not a brain, whatever it
+            // declares (organization#973).
+            ensure!(
+                meta.config_schema == serde_json::json!({"type": "null"}),
+                "staged runtime layout {} binary bin/{} declares config schema {}, but the root \
+                 brain takes no config at all and must declare {{\"type\":\"null\"}}",
+                self.root.display(),
+                required.binary_name,
+                meta.config_schema,
+            );
+        }
         Ok(SelectedBinary { path, meta })
     }
 }
@@ -485,6 +501,16 @@ fn validate_participants(participants: &[Participant]) -> Result<()> {
     let mut user_namespace = BTreeMap::new();
     let official_names = official_service_short_names();
     for participant in participants {
+        // `brain` is reserved across every compiled participant kind, so a
+        // malformed or hand-edited participants.json cannot create a user
+        // runtime that would overwrite the mandatory `bin/brain`
+        // (organization#973).
+        anyhow::ensure!(
+            participant.id != crate::check::source::BRAIN_ID,
+            "compiled participant '{}' claims the reserved root-brain identity; the brain is the \
+             root Cargo package's binary and is never a compiled participant declaration",
+            participant.id
+        );
         let kind = match participant.kind {
             ParticipantKind::Service => "service",
             ParticipantKind::Driver => "driver",
@@ -506,11 +532,8 @@ fn validate_participants(participants: &[Participant]) -> Result<()> {
                     "compiled {kind} participant '{}' must not name a component instance",
                     participant.id
                 );
-                let compiler_owned_behavior = participant.kind == ParticipantKind::Service
-                    && participant.id == "behavior"
-                    && participant.config.is_some();
                 anyhow::ensure!(
-                    !official_names.contains(participant.id.as_str()) || compiler_owned_behavior,
+                    !official_names.contains(participant.id.as_str()),
                     "compiled {kind} participant '{}' collides with a catalog-owned runtime",
                     participant.id
                 );
@@ -592,6 +615,12 @@ fn validate_participant_model_membership(
 /// any workspace scanning) and by [`RuntimeLayout::open`] (so a hand-edited
 /// bundle cannot smuggle a forbidden declaration past the loader):
 ///
+/// - `brain` is never declared - the mandatory root brain IS the root Cargo
+///   package's binary, discovered from Cargo metadata and staged as
+///   `bin/brain` (organization#973). This is the single owner of the
+///   actionable authored-name rejection on every CLI validation/resolve path;
+///   `phoxal-manifest`'s own reservation stays as defense for direct compiler
+///   consumers outside the CLI.
 /// - official identities are never declared - official runtimes are
 ///   catalog-owned, always run, and take no authored configuration. A
 ///   workspace crate overriding an official identity does so WITHOUT a
@@ -600,6 +629,12 @@ pub fn validate_runtime_declarations(
     robot: &phoxal_manifest::source::robot::v0::Manifest,
 ) -> Result<()> {
     for name in robot.services.keys() {
+        if name == crate::check::source::BRAIN_ID {
+            bail!(
+                "{}",
+                phoxal_manifest::source::robot::v0::reserved_brain_id_message("services")
+            );
+        }
         if official_service_short_names().contains(name.as_str()) {
             bail!(
                 "robot.yaml declares services.{name}, but '{name}' is an official service; \
@@ -631,7 +666,7 @@ fn official_service_short_names() -> BTreeSet<&'static str> {
 #[cfg(test)]
 pub(crate) fn write_test_layout(root: &Path, robot_yaml: &str) -> Result<()> {
     let source = tempfile::tempdir()?;
-    let parsed = phoxal_manifest::source::robot::parse_from_string(robot_yaml)?;
+    let parsed = crate::project::resolver::parse_robot_from_string(robot_yaml)?;
     let fixture_yaml = parsed
         .robot
         .components
@@ -647,8 +682,8 @@ pub(crate) fn write_test_layout(root: &Path, robot_yaml: &str) -> Result<()> {
                 )
             },
         );
-    let manifest = phoxal_manifest::source::robot::parse_from_string(&fixture_yaml)?;
-    phoxal_manifest::source::robot::write_to_dir(&manifest, source.path())?;
+    let manifest = crate::project::resolver::parse_robot_from_string(&fixture_yaml)?;
+    crate::project::resolver::write_robot_to_dir(&manifest, source.path())?;
     let structure_path = source.path().join(&manifest.robot.structure);
     if let Some(parent) = structure_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -696,14 +731,12 @@ pub(crate) fn write_test_layout(root: &Path, robot_yaml: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use phoxal_manifest::source::robot as robot_source;
-
     #[test]
     fn official_identities_are_rejected_in_either_map_across_namespaces() -> anyhow::Result<()> {
         use phoxal_manifest::source::robot::v0::{Manifest as RobotManifest, UserService};
 
         let base = || -> RobotManifest {
-            robot_source::parse_from_string(
+            crate::project::resolver::parse_robot_from_string(
                 r#"schema: robot/v0
 robot:
   id: bot
@@ -732,6 +765,18 @@ robot:
             .to_string();
         assert!(error.contains("official service"), "{error}");
 
+        // `services.brain` is reserved for the mandatory root brain and gets
+        // the same actionable shape as official-identity rejection (#973).
+        let mut robot = base();
+        robot
+            .services
+            .insert("brain".to_string(), UserService { config: None });
+        let error = super::validate_runtime_declarations(&robot)
+            .expect_err("the reserved brain identity in services: is rejected")
+            .to_string();
+        assert!(error.contains("services.brain is reserved"), "{error}");
+        assert!(error.contains("#[phoxal::brain]"), "{error}");
+
         // A non-official user name is accepted.
         let mut robot = base();
         robot
@@ -753,26 +798,23 @@ robot:
     }
 
     #[test]
-    fn compiled_official_names_are_rejected_except_typed_behavior_policy() {
-        let service = |id: &str, config| phoxal_manifest::Participant {
+    fn compiled_official_names_and_the_reserved_brain_identity_are_rejected() {
+        let service = |id: &str| phoxal_manifest::Participant {
             id: id.to_string(),
             kind: phoxal_manifest::ParticipantKind::Service,
             component_instance: None,
-            config,
+            config: None,
         };
-        let error = encode_participants(&[service("drive", None)])
+        let error = encode_participants(&[service("drive")])
             .expect_err("catalog-owned service declarations must fail closed")
             .to_string();
         assert!(error.contains("catalog-owned runtime"), "{error}");
-        let error = encode_participants(&[service("behavior", None)])
-            .expect_err("the behavior compiler declaration must carry typed policy")
+        // A hand-edited or malformed participants.json must not be able to
+        // create a user runtime that would overwrite `bin/brain`.
+        let error = encode_participants(&[service("brain")])
+            .expect_err("the reserved root-brain identity must fail closed")
             .to_string();
-        assert!(error.contains("catalog-owned runtime"), "{error}");
-        encode_participants(&[service(
-            "behavior",
-            Some(serde_json::json!({"root": "system.root", "autostart": true})),
-        )])
-        .expect("typed compiler-owned behavior policy is accepted");
+        assert!(error.contains("reserved root-brain identity"), "{error}");
     }
 
     use super::*;
@@ -859,37 +901,130 @@ services:
         Ok(())
     }
 
+    /// The bundle-format invariant made executable: every staged layout
+    /// requires exactly one `bin/brain`, derived from the format itself rather
+    /// than from authored `robot.yaml` or Cargo source, and carrying no config
+    /// (organization#973).
     #[test]
-    fn behavior_policy_requires_its_compiled_catalog_and_configures_the_official_service()
-    -> Result<()> {
+    fn the_root_brain_is_required_exactly_once_with_no_config() -> Result<()> {
         let dir = write_layout(ROBOT_YAML)?;
-        let participants_path = dir.path().join(ASSETS_DIR).join(PARTICIPANTS_ASSET);
-        let mut participants = decode_participants(&participants_path)?;
-        let config = serde_json::json!({"root": "system.root", "autostart": true});
-        participants.push(phoxal_manifest::Participant {
-            id: "behavior".to_string(),
-            kind: phoxal_manifest::ParticipantKind::Service,
-            component_instance: None,
-            config: Some(config.clone()),
-        });
-        fs::write(&participants_path, encode_participants(&participants)?)?;
-
-        let error = RuntimeLayout::open(dir.path())
-            .expect_err("behavior policy without its compiler asset must fail")
-            .to_string();
-        assert!(error.contains("compiled behavior catalog"), "{error}");
-
-        let catalog = dir.path().join(ASSETS_DIR).join(BEHAVIOR_CATALOG_ASSET);
-        fs::create_dir_all(catalog.parent().context("behavior catalog has no parent")?)?;
-        fs::write(&catalog, b"{}")?;
         let layout = RuntimeLayout::open(dir.path())?;
-        let behavior = layout
+        let brains = layout
             .required_runtimes(&DriverSelection::All)
             .into_iter()
-            .find(|runtime| runtime.identity == "behavior")
-            .context("behavior service is required")?;
-        assert_eq!(behavior.kind, RequiredRuntimeKind::OfficialService);
-        assert_eq!(behavior.config, Some(config));
+            .filter(|runtime| runtime.kind == RequiredRuntimeKind::Brain)
+            .collect::<Vec<_>>();
+        assert_eq!(brains.len(), 1, "{brains:?}");
+        assert_eq!(brains[0].identity, "brain");
+        assert_eq!(brains[0].binary_name, "brain");
+        assert_eq!(brains[0].config, None);
+
+        // Driver policy never gates it.
+        assert_eq!(
+            layout
+                .required_runtimes(&DriverSelection::None)
+                .into_iter()
+                .filter(|runtime| runtime.kind == RequiredRuntimeKind::Brain)
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    /// A source-free bundle missing `bin/brain`, or carrying service metadata
+    /// there, is invalid even when every other runtime is present.
+    #[test]
+    fn a_bundle_without_a_valid_brain_binary_is_rejected() -> Result<()> {
+        let dir = write_layout(ROBOT_YAML)?;
+        let layout = RuntimeLayout::open(dir.path())?;
+        let required = layout.required_runtimes(&DriverSelection::All);
+        let brain = required
+            .iter()
+            .find(|runtime| runtime.kind == RequiredRuntimeKind::Brain)
+            .context("the brain is required")?;
+
+        let message = layout
+            .resolve_binary(brain)
+            .expect_err("a bundle with no bin/brain is invalid")
+            .to_string();
+        assert!(message.contains("brain"), "{message}");
+
+        // Service metadata at the canonical brain path is the wrong kind.
+        write_bin(
+            dir.path(),
+            "brain",
+            &synthesize_binary(
+                host_architecture(),
+                &metadata("brain", "service", serde_json::json!({"type":"null"})),
+            ),
+        )?;
+        let message = format!(
+            "{:#}",
+            layout
+                .inspect_for(brain, LayoutInspection::Host)
+                .expect_err("service metadata at bin/brain must be rejected")
+        );
+        assert!(message.contains("Service"), "{message}");
+        assert!(message.contains("Brain"), "{message}");
+
+        // A brain binary declaring another id is the wrong binary.
+        write_bin(
+            dir.path(),
+            "brain",
+            &synthesize_binary(
+                host_architecture(),
+                &metadata("mission", "brain", serde_json::json!({"type":"null"})),
+            ),
+        )?;
+        let message = format!(
+            "{:#}",
+            layout
+                .inspect_for(brain, LayoutInspection::Host)
+                .expect_err("a brain declaring the wrong id must be rejected")
+        );
+        assert!(message.contains("mission"), "{message}");
+
+        // A brain declaring a real config surface is not a brain: its
+        // `Config` is fixed to `()`.
+        write_bin(
+            dir.path(),
+            "brain",
+            &synthesize_binary(
+                host_architecture(),
+                &metadata(
+                    "brain",
+                    "brain",
+                    serde_json::json!({"type":"object","properties":{"speed":{"type":"integer"}}}),
+                ),
+            ),
+        )?;
+        let message = format!(
+            "{:#}",
+            layout
+                .inspect_for(brain, LayoutInspection::Host)
+                .expect_err("a brain declaring a config surface must be rejected")
+        );
+        assert!(message.contains("takes no config at all"), "{message}");
+
+        // The correct record passes and carries the unit config schema.
+        write_bin(
+            dir.path(),
+            "brain",
+            &synthesize_binary(
+                host_architecture(),
+                &metadata("brain", "brain", serde_json::json!({"type":"null"})),
+            ),
+        )?;
+        let selected = layout.inspect_for(brain, LayoutInspection::Host)?;
+        assert_eq!(selected.meta.id, "brain");
+        assert_eq!(
+            selected.meta.kind,
+            phoxal_runtime_contract::ParticipantKind::Brain
+        );
+        assert_eq!(
+            selected.meta.config_schema,
+            serde_json::json!({"type": "null"})
+        );
         Ok(())
     }
 

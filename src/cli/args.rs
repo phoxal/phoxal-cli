@@ -15,7 +15,18 @@ use super::commands::{
     version = version::long_version(),
     about = "Build, check, and simulate Phoxal robot projects.",
     long_about = "Build, check, and simulate Phoxal robot projects.\n\n\
-                  phoxal reads robot.yaml and materializes official services, tools, and component drivers with `cargo install` against the phoxal registry, pinned exactly to the Cargo.lock-selected framework train, then drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes."
+                  phoxal reads robot.yaml and materializes official services and component drivers with `cargo install` against the phoxal registry, pinned exactly to the Cargo.lock-selected framework train, then drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes.\n\n\
+                  Every robot project's ROOT Cargo package is its one mandatory brain: a non-published workspace member depending on `phoxal`, with exactly one binary target and no library. The minimal root source is:\n\n\
+                  \x20 // src/main.rs\n\
+                  \x20 use phoxal::prelude::*;\n\
+                  \x20 #[phoxal::brain]\n\
+                  \x20 struct Brain;\n\
+                  \x20 impl Participant for Brain {\n\
+                  \x20     async fn setup(&self, _ctx: &mut SetupContext<Self>, _config: Self::Config)\n\
+                  \x20         -> Result<(Self::State, Self::Api)> { Ok(((), ())) }\n\
+                  \x20 }\n\
+                  \x20 fn main() -> phoxal::Result<()> { phoxal::run::<Brain>() }\n\n\
+                  The CLI discovers it from Cargo metadata, always builds it, stages it as `bin/brain`, and launches it in every native and Webots graph. It is never declared under robot.yaml `services:` - `brain` is a reserved identity there. A project whose root is still a code-less `src/lib.rs` anchor is rejected with the exact migration instruction."
 )]
 pub struct Cli {
     #[arg(
@@ -57,9 +68,9 @@ pub enum RootCommand {
     #[command(about = "Activate an older installed runtime release.")]
     Rollback(rollback::Rollback),
     #[command(
-        about = "Validate robot.yaml structure, Cargo workspace runtime ownership, and declared service/tool config.",
-        long_about = "Validate that this project is well-formed: robot.yaml structure, Cargo workspace runtime ownership (every declared services/tools entry has a matching workspace crate), and every declared service's/tool's config against the JSON Schema its own participant type embeds.\n\n\
-                      The config-schema check compiles the declared service/tool crates (never the official set, never a staged bundle) to read their embedded schema - the one part of `validate` that is not free. A robot.yaml with no declared services/tools compiles nothing."
+        about = "Validate robot.yaml structure, the root brain, Cargo workspace runtime ownership, and declared service config.",
+        long_about = "Validate that this project is well-formed: robot.yaml structure, the mandatory root brain, Cargo workspace runtime ownership (every declared services entry has a matching workspace crate), and every declared service's config against the JSON Schema its own participant type embeds.\n\n\
+                      The check compiles the root brain and the declared service crates (never the official set, never a staged bundle) to read their embedded metadata and schemas - the one part of `validate` that is not free. The root brain is always compiled, so its declared id, kind, and unit config schema are proven here."
     )]
     Validate(validate::Validate),
     #[command(about = "Generate portable JSON Schemas for authored YAML editors.")]
@@ -222,7 +233,6 @@ mod tests {
             vec!["phoxal", "status", "--message-format", "json", "safety"],
             vec!["phoxal", "version", "--message-format", "json"],
             vec!["phoxal", "self", "upgrade", "--message-format", "json"],
-            vec!["phoxal", "behavior", "validate", "--message-format", "json"],
         ] {
             assert!(
                 Cli::try_parse_from(args.clone()).is_err(),

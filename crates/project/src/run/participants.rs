@@ -85,7 +85,11 @@ pub(crate) fn stage_complete_bin_store(
     // the candidate-wide planner, so they are skipped here.
     for participant in source_participants {
         let binary_name = match participant.kind {
-            SourceParticipantKind::UserService => participant.name.clone(),
+            // The canonical staged name, never the Cargo package or bin target
+            // name the root package happens to use (organization#973).
+            SourceParticipantKind::Brain | SourceParticipantKind::UserService => {
+                participant.name.clone()
+            }
             SourceParticipantKind::ComponentDriver => official_binary_name(
                 ArtifactKind::ComponentDriver,
                 &participant.expected_artifact_id,
@@ -318,6 +322,9 @@ pub(crate) fn prepare_robot_participants(
 /// officials stay vendored (#936, finding 10). See [`build_layout_specs`].
 pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (ParticipantKind, bool) {
     match execution {
+        // The brain is always the robot's own code and stays its own kind:
+        // never collapsed into Service after inspection (organization#973).
+        ParticipantExecution::Brain { .. } => (ParticipantKind::Brain, true),
         ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
         ParticipantExecution::UserService { .. } => (ParticipantKind::Service, true),
         ParticipantExecution::ComponentDriver { .. } => (ParticipantKind::Driver, true),
@@ -374,6 +381,12 @@ fn resolve_participant_source(
         return Ok(prepared);
     }
     match &participant.execution {
+        ParticipantExecution::Brain { .. } => {
+            source_dirs.get(id).ok_or_else(|| {
+                anyhow!("staged plan is missing the root package directory for the brain")
+            })?;
+            source_artifacts.binary_named(id).map(PathBuf::from)
+        }
         ParticipantExecution::UserService { .. } => {
             source_dirs.get(id).ok_or_else(|| {
                 anyhow!("staged plan is missing the source crate directory for user runtime {id}")
@@ -468,9 +481,9 @@ pub(crate) fn source_cwd(
 ) -> Option<PathBuf> {
     let id = &participant.launch.participant_id;
     match &participant.execution {
-        ParticipantExecution::UserService { .. } | ParticipantExecution::ComponentDriver { .. } => {
-            source_dirs.get(id).cloned()
-        }
+        ParticipantExecution::Brain { .. }
+        | ParticipantExecution::UserService { .. }
+        | ParticipantExecution::ComponentDriver { .. } => source_dirs.get(id).cloned(),
         ParticipantExecution::OfficialArtifact { .. } => resolved
             .platform_runtimes
             .iter()
@@ -602,6 +615,50 @@ mod tests {
         Ok(())
     }
 
+    /// Staging renames the verified root executable to the canonical
+    /// `bin/brain` regardless of the Cargo package/bin target name it was
+    /// built under, and never collides with a user service
+    /// (organization#973).
+    #[test]
+    fn the_brain_is_staged_canonically_as_bin_brain_without_collision() -> Result<()> {
+        let staged = tempfile::tempdir()?;
+        std::fs::create_dir_all(staged.path().join("bin"))?;
+        let built = tempfile::tempdir()?;
+
+        // The root package builds `testbot-robot`; the user service builds
+        // `mission`. Only the former becomes `bin/brain`.
+        let brain_binary = built.path().join("testbot-robot");
+        std::fs::write(
+            &brain_binary,
+            synthesize_binary_with_id(host_architecture(), "brain", "brain"),
+        )?;
+        let mission_binary = built.path().join("mission");
+        std::fs::write(
+            &mission_binary,
+            synthesize_binary_with_id(host_architecture(), "mission", "service"),
+        )?;
+
+        let participants = [
+            SourceParticipant::brain(built.path().to_path_buf(), "testbot-robot"),
+            SourceParticipant::user_service("mission", built.path().to_path_buf()),
+        ];
+        let artifacts = SourceArtifacts::for_test_pairs(&[
+            ("brain", brain_binary.clone()),
+            ("mission", mission_binary.clone()),
+        ]);
+        stage_complete_bin_store(staged.path(), &participants, &artifacts)?;
+
+        let staged_brain = staged.path().join("bin/brain");
+        assert!(staged_brain.is_file(), "{}", staged_brain.display());
+        assert_eq!(std::fs::read(&staged_brain)?, std::fs::read(&brain_binary)?);
+        assert!(
+            !staged.path().join("bin/testbot-robot").exists(),
+            "the Cargo bin target name must never reach the staged store"
+        );
+        assert!(staged.path().join("bin/mission").is_file());
+        Ok(())
+    }
+
     #[test]
     fn a_foreign_arch_staged_binary_fails_precisely_naming_the_identity() -> Result<()> {
         let staged = tempfile::tempdir()?;
@@ -696,6 +753,7 @@ services:
                     host_architecture(),
                     &required.identity,
                     match required.kind {
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::Brain => "brain",
                         phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialService
                         | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserService => {
                             "service"
@@ -765,6 +823,7 @@ services:
                     host_architecture(),
                     &required.identity,
                     match required.kind {
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::Brain => "brain",
                         phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialService
                         | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserService => {
                             "service"

@@ -14,7 +14,9 @@ fn locked_project_root() -> anyhow::Result<tempfile::TempDir> {
         root.path().join("Cargo.toml"),
         "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\nmembers = [\".\", \"components/fixture\"]\nresolver = \"2\"\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
     )?;
-    std::fs::write(root.path().join("src/lib.rs"), "")?;
+    // The root package IS the mandatory brain: one auto-discovered bin target
+    // and no library (organization#973).
+    std::fs::write(root.path().join("src/main.rs"), "fn main() {}")?;
     std::fs::write(
         root.path().join("train/phoxal/Cargo.toml"),
         "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -63,7 +65,7 @@ fn write_lock(root: &std::path::Path, extra_packages: &[&str]) -> anyhow::Result
 }
 
 /// Turn `root`'s plain train-anchor package into a real Cargo workspace
-/// listing itself plus `member` (a `services/`, `tools/`, or `components/`
+/// listing itself plus `member` (a `services/` or `components/`
 /// crate a test just created). `locked_project_root` deliberately declares no
 /// `[workspace]` table - a glob member errors when a test's temp dir has no
 /// matching crate yet - so a test that adds one calls this with the exact
@@ -91,7 +93,7 @@ fn minimal_robot_with_components(components: &str, extra: &str) -> anyhow::Resul
     } else {
         (components, "[left_drive.motor]")
     };
-    phoxal_manifest::source::robot::parse_from_string(&format!(
+    phoxal_cli_core::project::resolver::parse_robot_from_string(&format!(
         r#"schema: robot/v0
 robot:
   id: testbot
@@ -114,7 +116,7 @@ robot:
 /// resolution fork. Keeping the source tree explicit exercises the same
 /// single compiler path as `check`, `run`, `simulate`, and `build`.
 fn write_compiler_sources(root: &std::path::Path, robot: &Robot) -> anyhow::Result<()> {
-    phoxal_manifest::source::robot::write_to_dir(robot, root)?;
+    phoxal_cli_core::project::resolver::write_robot_to_dir(robot, root)?;
     let structure = root.join(&robot.robot.structure);
     if let Some(parent) = structure.parent() {
         std::fs::create_dir_all(parent)?;
@@ -240,7 +242,7 @@ fn container_snapshot_uses_the_live_registry_cache_for_components_and_metadata()
         "",
     )?;
     let snapshot = locked_project_root()?;
-    phoxal_manifest::source::robot::write_to_dir(&robot, snapshot.path())?;
+    phoxal_cli_core::project::resolver::write_robot_to_dir(&robot, snapshot.path())?;
     std::fs::write(
         snapshot.path().join("structure.urdf"),
         r#"<robot name="fixture"><link name="base_footprint"/><link name="base_link"/><link name="base"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="base_mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
@@ -814,7 +816,7 @@ fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_dr
 "#,
         "",
     )?;
-    phoxal_manifest::source::robot::write_to_dir(&robot, project.path())?;
+    phoxal_cli_core::project::resolver::write_robot_to_dir(&robot, project.path())?;
     std::fs::write(
         project.path().join("structure.urdf"),
         r#"<robot name="fixture"><link name="base_footprint"/><link name="base_link"/><link name="base"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="base_mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,

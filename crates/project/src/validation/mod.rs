@@ -56,8 +56,8 @@ pub(crate) use metadata::{
 };
 mod build;
 pub(crate) use build::{
-    build_participant_report_from_binary, validate_artifact_identity,
-    validate_source_artifact_identity,
+    build_participant_report_from_binary, ensure_brain_declares_unit_config,
+    validate_artifact_identity, validate_source_artifact_identity,
 };
 mod errors;
 pub(crate) use errors::ensure_check_outcome_ok;

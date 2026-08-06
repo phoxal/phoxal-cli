@@ -1,6 +1,6 @@
-//! Compile-time participant metadata extraction (X-tools slice).
+//! Compile-time participant metadata extraction.
 //!
-//! A `#[phoxal::service]`/driver/simulator attribute embeds one JSON
+//! A `#[phoxal::brain]`/`service`/`driver`/`simulator` attribute embeds one JSON
 //! manifest per participant binary in a dedicated linker section -
 //! `__DATA,__phoxal_meta` on Mach-O,
 //! `.phoxal_meta` everywhere else (`phoxal-macros/src/authoring.rs`'s
@@ -27,8 +27,8 @@ pub const SECTION_NAMES: [&str; 2] = [".phoxal_meta", "__phoxal_meta"];
 /// participant metadata section, trying each candidate section
 /// name in [`SECTION_NAMES`] in turn. `Ok(None)` means the object file parsed
 /// fine but carries no such section at all. Every binary this module is asked
-/// to inspect is expected to be a compiled `#[phoxal::service]`/`driver`/
-/// `simulator` participant, so a missing section is NOT a valid
+/// to inspect is expected to be a compiled `#[phoxal::brain]`/`service`/
+/// `driver`/`simulator` participant, so a missing section is NOT a valid
 /// "no participant attribute" shape here - see
 /// [`extract_participant_metadata_from_bytes`], which turns `None` into a
 /// hard error rather than a synthesized identity. A malformed/unrecognized
@@ -56,8 +56,8 @@ fn read_meta_section(object_bytes: &[u8], describe: &str) -> Result<Option<Vec<u
 ///
 /// A binary with no metadata section at all is a hard error, not a
 /// synthesized identity: every caller of this function inspects a binary it
-/// expects to be a compiled phoxal participant (a service, driver, simulator,
-/// or simulator), and that participant's own declared `id` is what an identity
+/// expects to be a compiled phoxal participant (the root brain, a service, a
+/// driver, or a simulator), and that participant's own declared `id` is what an identity
 /// check compares against an expected artifact/participant identity
 /// afterward. Silently returning a placeholder `id: "()"` here used to let a
 /// binary with no section at all sail through that check, because the
@@ -69,7 +69,7 @@ pub fn extract_participant_metadata_from_bytes(
     let bytes = read_meta_section(object_bytes, describe)?.ok_or_else(|| {
         anyhow::anyhow!(
             "{describe} carries no phoxal participant metadata section ({}); it is not a \
-             compiled #[phoxal::service]/#[phoxal::driver]/#[phoxal::simulator]/#[phoxal::tool] \
+             compiled #[phoxal::brain]/#[phoxal::service]/#[phoxal::driver]/#[phoxal::simulator] \
              participant binary, or it is stale and needs rebuilding",
             SECTION_NAMES.join(" or ")
         )

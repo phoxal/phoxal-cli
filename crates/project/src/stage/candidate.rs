@@ -259,7 +259,7 @@ robot:
 
 #[cfg(test)]
 pub(crate) fn write_test_layout(root: &Path, robot_yaml: &str) -> Result<()> {
-    let source_manifest = phoxal_manifest::source::robot::parse_from_string(robot_yaml)?;
+    let source_manifest = phoxal_cli_core::project::resolver::parse_robot_from_string(robot_yaml)?;
     let compiled = compile_test_bundle(&source_manifest)?;
     fs::create_dir_all(root.join(ASSETS_DIR))?;
     fs::create_dir_all(root.join("bin"))?;

@@ -11,6 +11,10 @@ pub struct ParticipantApis {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ParticipantKind {
+    /// The one mandatory root brain (organization#973). A real variant, never
+    /// the lenient [`Self::Other`] fallback: the brain is a first-class kind
+    /// this CLI release understands end to end.
+    Brain,
     Service,
     Driver,
     Simulator,
@@ -21,6 +25,7 @@ impl ParticipantKind {
     #[must_use]
     pub fn parse(value: &str) -> Self {
         match value {
+            "brain" => Self::Brain,
             "service" => Self::Service,
             "driver" => Self::Driver,
             "simulator" => Self::Simulator,
@@ -31,6 +36,7 @@ impl ParticipantKind {
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
+            Self::Brain => "brain",
             Self::Service => "service",
             Self::Driver => "driver",
             Self::Simulator => "simulator",

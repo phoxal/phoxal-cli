@@ -93,27 +93,25 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         workspace.problems.join("\n")
     );
 
-    // Config-schema validation (#951 WS4 follow-up): every declared user
+    // The mandatory root brain plus config-schema validation (#951 WS4
+    // follow-up): every declared user
     // service's `services.<id>.config` must satisfy the JSON Schema its own
     // `#[phoxal::service(config = ...)]` type embeds. There is no schema
     // until that type compiles, so
     // this is the one part of `validate` that is not free - it builds
-    // ONLY the declared participant crates (never the official set, never
-    // a staged bundle), through the same check engine `build`/`run`/
-    // `simulate` already use.
+    // the root brain and ONLY the declared participant crates (never the
+    // official set, never a staged bundle), through the same check engine
+    // `build`/`run`/`simulate` already use.
     let config_participants = declared_config_source_participants(&robot, &project);
-    if !config_participants.is_empty() {
-        request.reporter.info(format!(
-            "compiling {} declared service crate{} to validate config against its \
-                 embedded schema (first build may take a while; cached afterward)",
-            config_participants.len(),
-            if config_participants.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
-        ));
-    }
+    request.reporter.info(compile_notice(
+        config_participants
+            .iter()
+            .filter(|participant| {
+                participant.kind
+                    == phoxal_cli_core::check::source::SourceParticipantKind::UserService
+            })
+            .count(),
+    ));
     let artifacts = crate::build::cargo::build_selected_source_artifacts(
         &config_participants,
         None,
@@ -153,13 +151,29 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
     })
 }
 
+/// What `validate` is about to compile, in prose. The root brain is always
+/// built (organization#973); declared service crates are built only when the
+/// robot declares any, so the brain-only case must read naturally rather than
+/// announcing "0 declared service crates".
+fn compile_notice(declared_services: usize) -> String {
+    let subject = match declared_services {
+        0 => "the root brain".to_string(),
+        1 => "the root brain and 1 declared service crate".to_string(),
+        count => format!("the root brain and {count} declared service crates"),
+    };
+    format!(
+        "compiling {subject} to validate each against its embedded schema (first build may take \
+         a while; cached afterward)"
+    )
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct WorkspaceRuntimeReport {
     problems: Vec<String>,
     successes: Vec<String>,
 }
 
-/// Compare the declared `services:`/`tools:` maps in robot.yaml against the
+/// Compare the declared `services:` map in robot.yaml against the
 /// Cargo workspace's own discovered runtime crates - pure string comparison,
 /// no compilation. `project` is the same locked resolution the public
 /// [`crate::validate`] use case already computed; declaration invariants and the resolution are the
@@ -200,8 +214,15 @@ fn workspace_runtime_report(robot: &Robot, project: &LockedProject) -> Workspace
     report
 }
 
-/// Every workspace runtime crate that can legally carry a robot.yaml `config:`
-/// value: a `services/<id>` crate whose `<id>` is a declared key in
+/// The mandatory root brain plus every workspace runtime crate that can
+/// legally carry a robot.yaml `config:` value.
+///
+/// The brain carries no config at all (`#[phoxal::brain]` fixes `Config = ()`),
+/// but it is built and inspected here anyway so `phoxal validate` proves the
+/// root package really is a brain - the right id, kind, and unit config schema -
+/// before anything else depends on it (organization#973).
+///
+/// The config-bearing half is a `services/<id>` crate whose `<id>` is a declared key in
 /// `robot.services`. An official identity can never be a declared key
 /// (`validate_runtime_declarations` rejects that at parse time), so this
 /// filter alone is enough to exclude a workspace crate that path-overrides an
@@ -215,17 +236,18 @@ fn declared_config_source_participants(
     robot: &Robot,
     project: &LockedProject,
 ) -> Vec<SourceParticipant> {
-    project
-        .runtimes
-        .iter()
-        .filter_map(|runtime| {
-            let name = runtime.crate_dir.file_name()?.to_str()?.to_string();
-            robot
-                .services
-                .contains_key(&name)
-                .then(|| SourceParticipant::user_service(name, runtime.crate_dir.clone()))
-        })
-        .collect()
+    let mut participants = vec![SourceParticipant::brain(
+        project.brain.crate_dir.clone(),
+        project.brain.bin_target.clone(),
+    )];
+    participants.extend(project.runtimes.iter().filter_map(|runtime| {
+        let name = runtime.crate_dir.file_name()?.to_str()?.to_string();
+        robot
+            .services
+            .contains_key(&name)
+            .then(|| SourceParticipant::user_service(name, runtime.crate_dir.clone()))
+    }));
+    participants
 }
 
 /// Build every declared config-bearing participant and validate its
@@ -274,6 +296,11 @@ mod tests {
                 version: "0.42.0".to_string(),
                 source: TrainSource::Registry,
             },
+            brain: phoxal_cli_core::project::train::RootBrainPackage {
+                package: "testbot-robot".to_string(),
+                crate_dir: PathBuf::from("/fake/project"),
+                bin_target: "testbot-robot".to_string(),
+            },
             runtimes,
             local_components: Vec::new(),
         }
@@ -310,7 +337,7 @@ services:
 "#;
 
     fn minimal_robot() -> Robot {
-        phoxal_manifest::source::robot::parse_from_string(MINIMAL_ROBOT)
+        phoxal_cli_core::project::resolver::parse_robot_from_string(MINIMAL_ROBOT)
             .expect("minimal fixture robot.yaml parses")
     }
 
@@ -332,6 +359,15 @@ services:
             },
             config_schema: Some(schema),
         }
+    }
+
+    /// The brain-only project is the common case for a fresh robot, so its
+    /// notice must not mention zero service crates (organization#973).
+    #[test]
+    fn the_compile_notice_reads_naturally_for_every_declared_service_count() {
+        assert!(compile_notice(0).starts_with("compiling the root brain to validate"));
+        assert!(compile_notice(1).contains("and 1 declared service crate to"));
+        assert!(compile_notice(4).contains("and 4 declared service crates to"));
     }
 
     #[test]
@@ -359,7 +395,7 @@ services:
     }
 
     #[test]
-    fn declared_config_source_participants_covers_only_declared_services() {
+    fn declared_config_source_participants_covers_the_brain_and_only_declared_services() {
         let robot = minimal_robot();
         let project = locked_project(vec![
             workspace_runtime("services/avoid"),
@@ -370,7 +406,17 @@ services:
 
         let participants = declared_config_source_participants(&robot, &project);
 
-        assert_eq!(participants.len(), 1, "{participants:?}");
+        // The mandatory root brain plus the one declared service - never the
+        // undeclared drift crate (organization#973, #950).
+        assert_eq!(participants.len(), 2, "{participants:?}");
+        let brain = &participants[0];
+        assert_eq!(brain.name, "brain");
+        assert_eq!(
+            brain.kind,
+            phoxal_cli_core::check::source::SourceParticipantKind::Brain
+        );
+        assert_eq!(brain.crate_dir, PathBuf::from("/fake/project"));
+        assert_eq!(brain.bin_target.as_deref(), Some("testbot-robot"));
         assert!(
             participants
                 .iter()

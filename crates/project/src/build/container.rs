@@ -11,7 +11,7 @@
 //! ## Officials materialize inside the container too (organization#951 WS4)
 //!
 //! The deterministic, robot-independent catalog set (every official service
-//! and tool - "every official always runs" per #945) is installed with one
+//! ("every official always runs" per #945) is installed with one
 //! multi-package `cargo install` in the SAME container invocation,
 //! not host-side: the container already runs natively on the target
 //! architecture ([`platform_for_triple`]), which is exactly the property that
@@ -191,7 +191,7 @@ pub struct ContainerBuildSpec {
     pub officials_root: PathBuf,
     /// The complete official set to install via `cargo install` inside the
     /// container, at the resolved train: the deterministic catalog set
-    /// (services, tools, the router) plus every registry-sourced component
+    /// (services) plus every registry-sourced component
     /// driver this robot declares (organization#951 WS4 review, blocker 2).
     /// Empty skips every official install; the caller then has no
     /// `officials_source` to hand to host-side staging, which materializes

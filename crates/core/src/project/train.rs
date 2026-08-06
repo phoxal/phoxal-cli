@@ -45,9 +45,26 @@ pub struct WorkspaceComponentCrate {
     pub has_library: bool,
 }
 
+/// The root Cargo package, validated as the project's one mandatory brain
+/// source (organization#973).
+///
+/// Cargo metadata is the sole authority here: the target count and the bin
+/// target name come from the already-loaded `cargo metadata --locked` graph,
+/// never from `[[bin]]` parsing, package naming, or directory naming.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RootBrainPackage {
+    pub package: String,
+    pub crate_dir: PathBuf,
+    pub bin_target: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LockedProject {
     pub train: LockedTrain,
+    /// The root package resolved as the mandatory brain source. Not optional:
+    /// a project whose root cannot be a brain fails resolution before any
+    /// build.
+    pub brain: RootBrainPackage,
     pub runtimes: Vec<WorkspaceRuntime>,
     pub local_components: Vec<WorkspaceComponentCrate>,
 }
@@ -110,6 +127,7 @@ pub fn resolve_locked_project(project_root: &Path, offline: bool) -> Result<Lock
         metadata.workspace_members.contains(&root_package.id),
         "root train-anchor package must be a member of the robot Cargo workspace"
     );
+    let brain = resolve_root_brain(&root_manifest, root_package)?;
     let packages = metadata
         .packages
         .iter()
@@ -135,8 +153,72 @@ pub fn resolve_locked_project(project_root: &Path, offline: bool) -> Result<Lock
     let local_components = discover_local_component_packages(project_root, &metadata)?;
     Ok(LockedProject {
         train,
+        brain,
         runtimes,
         local_components,
+    })
+}
+
+/// Validate the root Cargo package as the project's mandatory brain source
+/// and return its exact Cargo-metadata-reported shape (organization#973).
+///
+/// The root's publish/workspace-membership/`phoxal`-dependency invariants are
+/// already proven by the caller; what this adds is the executable half: Cargo
+/// metadata must report exactly one binary target (auto-discovered
+/// `src/main.rs` and `src/bin/*` targets included) and no library target. A
+/// project still carrying the old code-less anchor library gets the one
+/// actionable migration instruction rather than a generic target-count error.
+fn resolve_root_brain(root_manifest: &Path, root_package: &Package) -> Result<RootBrainPackage> {
+    let crate_dir = root_manifest
+        .parent()
+        .context("root Cargo.toml has no parent directory")?
+        .to_path_buf();
+    let mut binary_names = root_package
+        .targets
+        .iter()
+        .filter(|target| target.kind.iter().any(|kind| kind == "bin"))
+        .map(|target| target.name.clone())
+        .collect::<Vec<_>>();
+    binary_names.sort();
+    binary_names.dedup();
+    let has_library = root_package.targets.iter().any(|target| {
+        target.kind.iter().any(|kind| {
+            matches!(
+                kind.as_str(),
+                "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro"
+            )
+        })
+    });
+    if binary_names.is_empty() && has_library {
+        bail!(
+            "root package `{}` is a code-less anchor library; every robot project's root package \
+             IS its one mandatory brain. Migrate it: delete src/lib.rs and add src/main.rs \
+             declaring `#[phoxal::brain]` with `phoxal::run::<Brain>()`",
+            root_package.name
+        );
+    }
+    ensure!(
+        !has_library,
+        "root brain package `{}` must not define a library target; the root package is the \
+         robot's one brain binary (src/main.rs with #[phoxal::brain]) and nothing else",
+        root_package.name
+    );
+    ensure!(
+        binary_names.len() == 1,
+        "root brain package `{}` must define exactly one binary target, found {} ({}); Cargo \
+         auto-discovers src/main.rs and every src/bin/* target, so remove the extra ones",
+        root_package.name,
+        binary_names.len(),
+        if binary_names.is_empty() {
+            "none".to_string()
+        } else {
+            binary_names.join(", ")
+        }
+    );
+    Ok(RootBrainPackage {
+        package: root_package.name.clone(),
+        crate_dir,
+        bin_target: binary_names.remove(0),
     })
 }
 
@@ -346,6 +428,101 @@ mod tests {
             fs::read_to_string(root.path().join("Cargo.lock")).unwrap(),
             lock
         );
+    }
+
+    /// Cargo metadata, never `[[bin]]` parsing or directory naming, decides
+    /// the root brain's target shape (organization#973).
+    fn root_package(targets: Vec<Target>) -> Package {
+        Package {
+            id: "root".to_string(),
+            name: "testbot-robot".to_string(),
+            version: "0.1.0".to_string(),
+            source: None,
+            manifest_path: "/robot/Cargo.toml".to_string(),
+            publish: Some(Vec::new()),
+            dependencies: Vec::new(),
+            targets,
+        }
+    }
+
+    fn target(name: &str, kind: &str) -> Target {
+        Target {
+            name: name.to_string(),
+            kind: vec![kind.to_string()],
+        }
+    }
+
+    #[test]
+    fn the_root_brain_is_its_exact_metadata_bin_target_never_its_package_name() {
+        let brain = resolve_root_brain(
+            Path::new("/robot/Cargo.toml"),
+            &root_package(vec![target("testbot-robot", "bin")]),
+        )
+        .expect("a bin-only root package is the brain");
+        assert_eq!(brain.package, "testbot-robot");
+        assert_eq!(brain.bin_target, "testbot-robot");
+        assert_eq!(brain.crate_dir, Path::new("/robot"));
+
+        // The bin target need not match the package name at all; the canonical
+        // runtime identity `brain` is never derived from either.
+        let renamed = resolve_root_brain(
+            Path::new("/robot/Cargo.toml"),
+            &root_package(vec![target("rover-brain", "bin")]),
+        )
+        .expect("a project-specific bin target name is legal");
+        assert_eq!(renamed.bin_target, "rover-brain");
+    }
+
+    #[test]
+    fn a_lib_only_root_anchor_gets_the_one_actionable_migration_instruction() {
+        let error = resolve_root_brain(
+            Path::new("/robot/Cargo.toml"),
+            &root_package(vec![target("testbot-robot", "lib")]),
+        )
+        .expect_err("the old code-less anchor library is no longer a valid root");
+        let message = error.to_string();
+        assert!(message.contains("src/lib.rs"), "{message}");
+        assert!(message.contains("src/main.rs"), "{message}");
+        assert!(message.contains("#[phoxal::brain]"), "{message}");
+    }
+
+    #[test]
+    fn a_root_with_a_library_or_the_wrong_number_of_bins_is_rejected() {
+        // A binary AND a library: the root package is the brain binary and
+        // nothing else.
+        let error = resolve_root_brain(
+            Path::new("/robot/Cargo.toml"),
+            &root_package(vec![
+                target("testbot-robot", "bin"),
+                target("testbot_robot", "lib"),
+            ]),
+        )
+        .expect_err("a root that also exports a library must be rejected")
+        .to_string();
+        assert!(
+            error.contains("must not define a library target"),
+            "{error}"
+        );
+
+        // A stray `src/bin/*` target: Cargo auto-discovers it, so the brain
+        // would be ambiguous.
+        let error = resolve_root_brain(
+            Path::new("/robot/Cargo.toml"),
+            &root_package(vec![
+                target("testbot-robot", "bin"),
+                target("scratch", "bin"),
+            ]),
+        )
+        .expect_err("two bin targets make the brain ambiguous")
+        .to_string();
+        assert!(error.contains("exactly one binary target"), "{error}");
+        assert!(error.contains("scratch"), "{error}");
+
+        // No target at all.
+        let error = resolve_root_brain(Path::new("/robot/Cargo.toml"), &root_package(Vec::new()))
+            .expect_err("a root with no binary cannot be the brain")
+            .to_string();
+        assert!(error.contains("exactly one binary target"), "{error}");
     }
 
     #[test]

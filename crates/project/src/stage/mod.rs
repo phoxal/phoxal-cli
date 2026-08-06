@@ -98,13 +98,18 @@ robot:
     encoders: []
   components: {}
 "#;
-        let source_manifest = phoxal_manifest::source::robot::parse_from_string(yaml)?;
+        let source_manifest = phoxal_cli_core::project::resolver::parse_robot_from_string(yaml)?;
         let compiled = compile_test_bundle(&source_manifest)?;
         Ok(BundlePlan {
             source_manifest,
             compiled,
             train: "0.36.0".to_string(),
             target: host_target_triple(),
+            brain: phoxal_cli_core::project::resolver::ResolvedBrain {
+                crate_dir: std::path::PathBuf::from("/tmp/robot"),
+                package: "testbot-robot".to_string(),
+                bin_target: "testbot-robot".to_string(),
+            },
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
@@ -152,13 +157,8 @@ robot:
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model/meshes"))?;
-        fs::create_dir_all(project.path().join("behaviors"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
         fs::write(project.path().join("model/meshes/chassis.dae"), "mesh")?;
-        fs::write(
-            project.path().join("behaviors/default.yaml"),
-            "behavior: []",
-        )?;
         // Source-project noise that must never appear in the staged layout.
         fs::write(project.path().join("Cargo.toml"), "[workspace]\n")?;
         fs::write(project.path().join("lib.rs"), "fn main() {}\n")?;
@@ -177,7 +177,6 @@ robot:
         // `.phoxal` enter the runtime bundle.
         assert!(!staged.join("robot.yaml").exists());
         assert!(!staged.join("model").exists());
-        assert!(!staged.join("behaviors").exists());
         assert!(!staged.join("Cargo.toml").exists());
         assert!(!staged.join("lib.rs").exists());
         assert!(!staged.join(".phoxal").exists());

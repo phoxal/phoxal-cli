@@ -2,8 +2,8 @@
 //!
 //! The core [`RuntimeLayout::construct_plan`] derives the immutable launch plan
 //! from a staged runtime layout, plus the validation input this project crate
-//! owns: a config-schema pairing per compiler-owned runtime config, including
-//! behavior policy (checked with the jsonschema validator). This module is the thin glue that
+//! owns: a config-schema pairing per compiler-owned runtime config (checked
+//! with the jsonschema validator). This module is the thin glue that
 //! runs that validator over the constructor's output and returns the plan.
 //!
 //! It performs no supervisor, board, or socket construction: it is exactly the
@@ -131,6 +131,7 @@ services:
 
     fn required_kind(kind: RequiredRuntimeKind) -> &'static str {
         match kind {
+            RequiredRuntimeKind::Brain => "brain",
             RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => "service",
             RequiredRuntimeKind::ComponentDriver => "driver",
         }

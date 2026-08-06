@@ -12,14 +12,14 @@ use phoxal_manifest::source::robot::v0::Manifest as Robot;
 const PHOXAL_PROVIDER: &str = "phoxal";
 
 use phoxal_cli_core::project::resolver::{
-    BundlePlan, CompiledBundle, ResolveOptions, ResolvedComponent, ResolvedComponentDriver,
-    ResolvedPathOverride, ResolvedPathOverrideKind, ResolvedPlatformRuntime, ResolvedUserRuntime,
-    UndeclaredRuntime,
+    BundlePlan, CompiledBundle, ResolveOptions, ResolvedBrain, ResolvedComponent,
+    ResolvedComponentDriver, ResolvedPathOverride, ResolvedPathOverrideKind,
+    ResolvedPlatformRuntime, ResolvedUserRuntime, UndeclaredRuntime,
 };
 
 /// Resolve a robot manifest against the CLI-internal official catalog
 /// (organization#951 WS4): no suite fetch, no vendored artifact store. Every
-/// official service, tool, and every component
+/// official service and every component
 /// driver package materializes later via `cargo install` at exactly the
 /// locked framework train; component assets resolve directly from authored
 /// directories or the checked sparse package cache, so the manifest compiler
@@ -167,6 +167,13 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
         compiled,
         train,
         target,
+        // The root package IS the brain; locked resolution already proved its
+        // exact Cargo shape (organization#973).
+        brain: ResolvedBrain {
+            crate_dir: project.brain.crate_dir.clone(),
+            package: project.brain.package.clone(),
+            bin_target: project.brain.bin_target.clone(),
+        },
         platform_runtimes,
         simulators,
         user_runtimes: workspace.user_runtimes,

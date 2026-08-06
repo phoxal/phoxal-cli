@@ -4,9 +4,12 @@
 //! deliberately does not depend on the `phoxal` authoring facade and the split
 //! framework libraries expose no such constant. The root manifest instead pins
 //! every split `phoxal-*` library it consumes. Because those libraries share one
-//! workspace SemVer, requiring exact, identical pins gives the catalog the same
-//! train selected by a robot project's locked `phoxal` facade without restoring
-//! the forbidden dependency edge or maintaining a second version literal.
+//! workspace SemVer, requiring identical caret pins (`X.Y.Z`, i.e.
+//! `>=X.Y.Z, <X.(Y+1).0` for a 0.x train) gives the catalog the same train
+//! selected by a robot project's locked `phoxal` facade without restoring the
+//! forbidden dependency edge or maintaining a second version literal. Patch
+//! drift inside one train is allowed; the train itself is still hand-bumped,
+//! and the committed `Cargo.lock` pins the exact versions actually built.
 
 use std::{env, fs, path::PathBuf};
 
@@ -56,9 +59,11 @@ fn main() {
                     .and_then(toml::Value::as_str)
             })
             .unwrap_or_else(|| panic!("workspace dependency {package} has no version"));
-        let version = requirement.strip_prefix('=').unwrap_or_else(|| {
-            panic!("workspace dependency {package} must use an exact =X.Y.Z train pin")
-        });
+        let version = requirement;
+        assert!(
+            !version.starts_with(['=', '^', '~', '>', '<', '*']),
+            "workspace dependency {package} must use a plain X.Y.Z caret train pin, found {requirement}"
+        );
         semver::Version::parse(version)
             .unwrap_or_else(|error| panic!("workspace dependency {package} is invalid: {error}"));
 

@@ -366,7 +366,7 @@ impl Worker {
         .context("failed to resolve and compile the frozen project snapshot")?;
 
         // The deterministic, robot-independent official set - every catalog
-        // service, tool, and the router ("every official always runs" per
+        // service ("every official always runs" per
         // #945) - is known from the catalog alone. Its train comes from the
         // same frozen resolution as robot-specific drivers, so a live-tree edit
         // cannot split one container install batch across two trains.
@@ -1137,11 +1137,16 @@ robot:
   components: {}
 "#;
         BundlePlan {
-            source_manifest: phoxal_manifest::source::robot::parse_from_string(yaml)
+            source_manifest: phoxal_cli_core::project::resolver::parse_robot_from_string(yaml)
                 .expect("minimal fixture robot.yaml parses"),
             compiled: Default::default(),
             train: "0.36.0".to_string(),
             target: "aarch64-unknown-linux-gnu".to_string(),
+            brain: phoxal_cli_core::project::resolver::ResolvedBrain {
+                crate_dir: std::path::PathBuf::from("/tmp/robot"),
+                package: "testbot-robot".to_string(),
+                bin_target: "testbot-robot".to_string(),
+            },
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),
@@ -1218,10 +1223,10 @@ robot:
     fn registry_selection_excludes_path_overrides_and_includes_selected_registry_drivers() {
         let mut resolved = minimal_bundle_plan();
         resolved.platform_runtimes.push(ResolvedPlatformRuntime {
-            name: "service-behavior".to_string(),
-            package: "phoxal/service-behavior".to_string(),
+            name: "map".to_string(),
+            package: "phoxal/service-map".to_string(),
             kind: ArtifactKind::Service,
-            path_override: Some(PathBuf::from("services/behavior")),
+            path_override: Some(PathBuf::from("services/map")),
             train: resolved.train.clone(),
             target: Some(resolved.target.clone()),
         });
@@ -1237,7 +1242,7 @@ robot:
             .collect::<BTreeSet<_>>();
 
         assert!(
-            !packages.contains("phoxal-service-behavior"),
+            !packages.contains("phoxal-service-map"),
             "a path-overridden official builds from source, never from the registry"
         );
         assert!(packages.contains("phoxal-service-drive"));
@@ -1283,7 +1288,7 @@ robot:
     #[test]
     fn snapshot_containment_compares_canonical_filesystem_paths() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let selected = root.path().join("services/behavior");
+        let selected = root.path().join("services/mission");
         std::fs::create_dir_all(&selected)?;
         let canonical_selected = selected.canonicalize()?;
         assert!(canonical_path_is_within(root.path(), &canonical_selected)?);

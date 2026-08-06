@@ -54,6 +54,34 @@ pub(crate) fn expected_kind_for_source_participant(kind: SourceParticipantKind) 
     kind.shared_kind().label()
 }
 
+/// The root brain's `Config` is fixed to `()` by `#[phoxal::brain]`, so its
+/// embedded schema is exactly the unit schema (organization#973).
+///
+/// This is the check-engine half of that gate. `RuntimeLayout::inspect_for`
+/// enforces the identical rule over a staged `bin/brain`, which covers
+/// `run`/`start`/`build` and every extracted bundle; `phoxal validate` and the
+/// Webots simulation path never open a layout, so without this check a root
+/// binary hand-embedding a real config surface would pass validation and reach
+/// a resident. A binary claiming any config at all is not a brain, whatever
+/// its id and kind declare.
+pub(crate) fn ensure_brain_declares_unit_config(
+    participant: &SourceParticipant,
+    raw: &RawParticipantReport,
+) -> Result<()> {
+    let unit = serde_json::json!({"type": "null"});
+    let declared = raw.config_schema.as_ref();
+    if declared == Some(&unit) {
+        return Ok(());
+    }
+    bail!(
+        "root brain {} at {} declares config schema {}, but the brain takes no config at all and \
+         must declare {{\"type\":\"null\"}}; `#[phoxal::brain]` fixes `Config = ()`",
+        participant.name,
+        participant.crate_dir.display(),
+        declared.map_or_else(|| "none".to_string(), ToString::to_string),
+    )
+}
+
 pub(crate) fn validate_source_artifact_identity(
     participant: &SourceParticipant,
     raw: &RawParticipantReport,

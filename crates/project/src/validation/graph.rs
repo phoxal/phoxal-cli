@@ -2,7 +2,8 @@
 
 use super::{
     CheckGraphContext, CheckOutcome, PlatformArtifactRef, RawParticipantReport,
-    validate_artifact_identity, validate_source_artifact_identity, validate_user_service_config,
+    ensure_brain_declares_unit_config, validate_artifact_identity,
+    validate_source_artifact_identity, validate_user_service_config,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -80,7 +81,12 @@ pub fn run_check_with_context(
                     participant.crate_dir.display()
                 )
             })?;
-        if participant.kind == SourceParticipantKind::ComponentDriver {
+        if participant.kind == SourceParticipantKind::Brain {
+            // The brain has no config side channel, so a non-unit schema is a
+            // malformed binary rather than a user config mistake: fail hard
+            // here, before any resident startup (organization#973).
+            ensure_brain_declares_unit_config(participant, &raw)?;
+        } else if participant.kind == SourceParticipantKind::ComponentDriver {
             // A component driver is launched once per component instance. Several
             // instances of the same driver share `artifact_id` (validated against
             // the emitted artifact identity), so key graph membership and

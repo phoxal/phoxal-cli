@@ -4,8 +4,9 @@
 //! own local/registry bit alongside this enum when that distinction matters.
 use serde::{Deserialize, Serialize};
 
-/// What role a process plays in a robot's contract graph: a bus service, a
-/// component driver, a simulator (a robot's Webots controller), or a
+/// What role a process plays in a robot's contract graph: the one mandatory
+/// root brain, a bus service, a component driver, a simulator (a robot's
+/// Webots controller), or a
 /// CLI-managed host application that is not a bus participant at all (the
 /// Webots binary itself). Orthogonal to whether this particular process is
 /// running from a locally resolved directory or was materialized from the
@@ -16,6 +17,11 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum ParticipantKind {
     Host,
+    /// The one mandatory root brain (organization#973): the robot project's
+    /// composition root, built from the root Cargo package and staged as
+    /// `bin/brain`. A checked, clocked robot-graph participant, distinct from
+    /// a user service and never collapsed into one.
+    Brain,
     Service,
     Driver,
     Simulator,
@@ -26,6 +32,7 @@ impl ParticipantKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Host => "host",
+            Self::Brain => "brain",
             Self::Service => "service",
             Self::Driver => "driver",
             Self::Simulator => "simulator",
