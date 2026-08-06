@@ -103,19 +103,15 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
     // official set, never a staged bundle), through the same check engine
     // `build`/`run`/`simulate` already use.
     let config_participants = declared_config_source_participants(&robot, &project);
-    {
-        request.reporter.info(format!(
-            "compiling the root brain and {} declared service crate{} to validate the brain and \
-                 each config against its embedded schema (first build may take a while; cached \
-                 afterward)",
-            config_participants.len() - 1,
-            if config_participants.len() == 2 {
-                ""
-            } else {
-                "s"
-            },
-        ));
-    }
+    request.reporter.info(compile_notice(
+        config_participants
+            .iter()
+            .filter(|participant| {
+                participant.kind
+                    == phoxal_cli_core::check::source::SourceParticipantKind::UserService
+            })
+            .count(),
+    ));
     let artifacts = crate::build::cargo::build_selected_source_artifacts(
         &config_participants,
         None,
@@ -153,6 +149,22 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
             })
             .collect(),
     })
+}
+
+/// What `validate` is about to compile, in prose. The root brain is always
+/// built (organization#973); declared service crates are built only when the
+/// robot declares any, so the brain-only case must read naturally rather than
+/// announcing "0 declared service crates".
+fn compile_notice(declared_services: usize) -> String {
+    let subject = match declared_services {
+        0 => "the root brain".to_string(),
+        1 => "the root brain and 1 declared service crate".to_string(),
+        count => format!("the root brain and {count} declared service crates"),
+    };
+    format!(
+        "compiling {subject} to validate each against its embedded schema (first build may take \
+         a while; cached afterward)"
+    )
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -347,6 +359,15 @@ services:
             },
             config_schema: Some(schema),
         }
+    }
+
+    /// The brain-only project is the common case for a fresh robot, so its
+    /// notice must not mention zero service crates (organization#973).
+    #[test]
+    fn the_compile_notice_reads_naturally_for_every_declared_service_count() {
+        assert!(compile_notice(0).starts_with("compiling the root brain to validate"));
+        assert!(compile_notice(1).contains("and 1 declared service crate to"));
+        assert!(compile_notice(4).contains("and 4 declared service crates to"));
     }
 
     #[test]
