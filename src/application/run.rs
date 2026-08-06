@@ -994,6 +994,7 @@ fn launch_kind_label(
         // A CLI-managed host process (the Webots binary) has no plan
         // execution: it is launched by the resident, not resolved from `bin/`.
         None => "host",
+        Some(phoxal_cli_core::project::launch_plan::ParticipantExecution::Brain { .. }) => "brain",
         Some(phoxal_cli_core::project::launch_plan::ParticipantExecution::OfficialArtifact {
             ..
         }) => "official",

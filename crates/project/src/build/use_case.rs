@@ -1137,7 +1137,7 @@ robot:
   components: {}
 "#;
         BundlePlan {
-            source_manifest: phoxal_manifest::source::robot::parse_from_string(yaml)
+            source_manifest: phoxal_cli_core::project::resolver::parse_robot_from_string(yaml)
                 .expect("minimal fixture robot.yaml parses"),
             compiled: Default::default(),
             train: "0.36.0".to_string(),

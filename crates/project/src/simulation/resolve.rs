@@ -403,7 +403,7 @@ services:
         crate_dir: PathBuf,
         simulator_dir: PathBuf,
     ) -> Result<BundlePlan> {
-        let mut robot = phoxal_manifest::source::robot::parse_from_string(FIXTURE_ROBOT)?;
+        let mut robot = phoxal_cli_core::project::resolver::parse_robot_from_string(FIXTURE_ROBOT)?;
         robot
             .services
             .get_mut("avoid")

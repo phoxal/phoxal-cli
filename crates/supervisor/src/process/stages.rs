@@ -21,7 +21,8 @@ pub fn stages_for_run(
     for spec in specs {
         match spec.kind {
             phoxal_cli_core::runtime::ParticipantKind::Host => infrastructure.push(spec),
-            phoxal_cli_core::runtime::ParticipantKind::Driver
+            phoxal_cli_core::runtime::ParticipantKind::Brain
+            | phoxal_cli_core::runtime::ParticipantKind::Driver
             | phoxal_cli_core::runtime::ParticipantKind::Service
             | phoxal_cli_core::runtime::ParticipantKind::Simulator => graph.push(spec),
         }

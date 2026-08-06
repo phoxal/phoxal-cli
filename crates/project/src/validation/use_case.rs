@@ -310,7 +310,7 @@ services:
 "#;
 
     fn minimal_robot() -> Robot {
-        phoxal_manifest::source::robot::parse_from_string(MINIMAL_ROBOT)
+        phoxal_cli_core::project::resolver::parse_robot_from_string(MINIMAL_ROBOT)
             .expect("minimal fixture robot.yaml parses")
     }
 

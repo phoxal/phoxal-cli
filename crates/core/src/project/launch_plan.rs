@@ -191,6 +191,13 @@ pub struct ParticipantLaunchRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "execution", rename_all = "snake_case")]
 pub enum ParticipantExecution {
+    /// The one mandatory root brain, resolved from `bin/<binary_name>`
+    /// (canonically `bin/brain`). Deliberately its own variant rather than a
+    /// reused `UserService`: simulation staging derives the canonical staged
+    /// name from the execution variant, and `run::participants::participant_kind`
+    /// derives the observable supervisor kind from it, so collapsing the brain
+    /// into a user service would erase it from both (organization#973).
+    Brain { binary_name: String },
     /// An official platform artifact - a service or a Webots simulator,
     /// vendored or built from a workspace override - resolved from
     /// `bin/<binary_name>`.
@@ -209,7 +216,8 @@ impl ParticipantExecution {
     #[must_use]
     pub fn binary_name(&self) -> &str {
         match self {
-            Self::OfficialArtifact { binary_name }
+            Self::Brain { binary_name }
+            | Self::OfficialArtifact { binary_name }
             | Self::UserService { binary_name }
             | Self::ComponentDriver { binary_name } => binary_name,
         }
@@ -410,6 +418,11 @@ fn participant_execution(
         });
     if let Some(source) = source {
         return Ok(match source.kind {
+            // The brain's Cargo package and bin target are project-specific;
+            // its staged identity never is.
+            SourceParticipantKind::Brain => ParticipantExecution::Brain {
+                binary_name: crate::check::source::BRAIN_ID.to_string(),
+            },
             SourceParticipantKind::UserService => ParticipantExecution::UserService {
                 binary_name: checked.artifact_id.clone(),
             },
@@ -538,6 +551,9 @@ fn expected_checked_participant_ids(mode: &LaunchMode, resolved: &BundlePlan) ->
             .iter()
             .map(|runtime| runtime.name.clone()),
     );
+    // The root brain is mandatory in every mode: parity stays exact rather
+    // than being relaxed to tolerate a missing one (organization#973).
+    expected.insert(crate::check::source::BRAIN_ID.to_string());
     if !matches!(mode, LaunchMode::Webots { .. }) {
         expected.extend(
             resolved
@@ -635,22 +651,26 @@ mod tests {
     #[test]
     fn launch_plan_constructor_enforces_runtime_process_bound() -> anyhow::Result<()> {
         let mut resolved = empty_bundle_plan("testbot")?;
-        let names = (0..38)
+        // 37 user services plus the mandatory brain plus the 3 bounded
+        // supervisor-owned helpers is 41 - one past the runtime bound.
+        let names = (0..37)
             .map(|index| format!("service-{index}"))
             .collect::<Vec<_>>();
         for name in &names {
             add_user_service(&mut resolved, name);
         }
-        let checked = names
+        let mut checked = names
             .iter()
             .map(|name| participant(name, name, graph_check::ParticipantScope::Graph))
             .collect::<Vec<_>>();
-        let sources = names
+        checked.push(brain_checked());
+        let mut sources = names
             .iter()
             .map(|name| {
                 SourceParticipant::user_service(name.clone(), PathBuf::from(format!("/tmp/{name}")))
             })
             .collect::<Vec<_>>();
+        sources.push(brain_source());
 
         let error = build_launch_plan(
             LaunchMode::Run,
@@ -692,15 +712,14 @@ mod tests {
                 component_instance: None,
                 config: Some(serde_json::json!({"message": "line\nquoted \"value\""})),
             });
-        let sources = vec![SourceParticipant::user_service(
-            "mission",
-            PathBuf::from("/tmp/mission"),
-        )];
-        let checked = vec![participant(
-            "mission",
-            "mission",
-            graph_check::ParticipantScope::Graph,
-        )];
+        let sources = vec![
+            brain_source(),
+            SourceParticipant::user_service("mission", PathBuf::from("/tmp/mission")),
+        ];
+        let checked = vec![
+            brain_checked(),
+            participant("mission", "mission", graph_check::ParticipantScope::Graph),
+        ];
         let plan = build_launch_plan(
             LaunchMode::Run,
             &[CheckedRobotLaunchInput {
@@ -760,7 +779,7 @@ mod tests {
     #[test]
     fn run_launch_plan_omits_authored_drivers_not_selected_by_policy() -> anyhow::Result<()> {
         let mut resolved = empty_bundle_plan("testbot")?;
-        resolved.source_manifest = phoxal_manifest::source::robot::parse_from_string(
+        resolved.source_manifest = crate::project::resolver::parse_robot_from_string(
             r#"schema: robot/v0
 robot:
   id: testbot
@@ -819,8 +838,8 @@ robot:
             &[CheckedRobotLaunchInput {
                 project_root: Path::new("/tmp/robot"),
                 resolved: &resolved,
-                checked_participants: &[left_driver],
-                source_participants: &[],
+                checked_participants: &[left_driver, brain_checked()],
+                source_participants: &[brain_source()],
             }],
             RunIdentity::default(),
         )?;
@@ -830,7 +849,7 @@ robot:
                 .iter()
                 .map(|participant| participant.launch.participant_id.as_str())
                 .collect::<Vec<_>>(),
-            ["left_drive"]
+            ["brain", "left_drive"]
         );
 
         // `--drivers off` uses the same resolved-model fact (`driver: None`)
@@ -839,12 +858,27 @@ robot:
         for component in &mut resolved.components {
             component.driver = None;
         }
+        let brain_checked = [brain_checked()];
+        let brain_source = [brain_source()];
         let disabled = build_launch_plan(
             LaunchMode::Run,
-            &[empty_checked_input(Path::new("/tmp/robot"), &resolved)],
+            &[CheckedRobotLaunchInput {
+                project_root: Path::new("/tmp/robot"),
+                resolved: &resolved,
+                checked_participants: &brain_checked,
+                source_participants: &brain_source,
+            }],
             RunIdentity::default(),
         )?;
-        assert!(disabled.robots[0].participants.is_empty());
+        // Only the mandatory brain remains: it is never gated by driver policy.
+        assert_eq!(
+            disabled.robots[0]
+                .participants
+                .iter()
+                .map(|participant| participant.launch.participant_id.as_str())
+                .collect::<Vec<_>>(),
+            ["brain"]
+        );
         Ok(())
     }
 
@@ -896,15 +930,16 @@ robot:
             path: PathBuf::from("runtimes/mission"),
             source_hash: "hash".to_string(),
         });
-        let sources = vec![SourceParticipant::user_service(
-            "mission",
-            PathBuf::from("/tmp/mission"),
-        )];
-        let checked = vec![participant(
-            "other",
-            "other",
-            graph_check::ParticipantScope::Graph,
-        )];
+        let sources = vec![
+            brain_source(),
+            SourceParticipant::user_service("mission", PathBuf::from("/tmp/mission")),
+        ];
+        // The brain resolves; `other` genuinely does not, and `mission` is
+        // expected but unchecked - parity must still reject both.
+        let checked = vec![
+            brain_checked(),
+            participant("other", "other", graph_check::ParticipantScope::Graph),
+        ];
         let error = build_launch_plan(
             LaunchMode::Run,
             &[CheckedRobotLaunchInput {
@@ -922,6 +957,24 @@ robot:
         Ok(())
     }
 
+    /// The mandatory root brain's checked participant. Every launch plan
+    /// expects exactly one, in both Run and Webots modes (organization#973).
+    fn brain_checked() -> graph_check::ParticipantApis {
+        graph_check::ParticipantApis {
+            participant_id: "brain".to_string(),
+            artifact_id: "brain".to_string(),
+            participant_kind: graph_check::ParticipantKind::Brain,
+            config_schema: None,
+            scope: graph_check::ParticipantScope::Graph,
+        }
+    }
+
+    /// The matching source record: a project-specific root crate directory,
+    /// never named `brain`.
+    fn brain_source() -> SourceParticipant {
+        SourceParticipant::brain(PathBuf::from("/tmp/robot"), "testbot-robot")
+    }
+
     fn participant(
         participant_id: &str,
         artifact_id: &str,
@@ -933,18 +986,6 @@ robot:
             participant_kind: graph_check::ParticipantKind::Service,
             config_schema: None,
             scope,
-        }
-    }
-
-    fn empty_checked_input<'a>(
-        project_root: &'a Path,
-        resolved: &'a BundlePlan,
-    ) -> CheckedRobotLaunchInput<'a> {
-        CheckedRobotLaunchInput {
-            project_root,
-            resolved,
-            checked_participants: &[],
-            source_participants: &[],
         }
     }
 
@@ -964,12 +1005,17 @@ robot:
   components: {{}}
 "#
         );
-        let robot = phoxal_manifest::source::robot::parse_from_string(&yaml)?;
+        let robot = crate::project::resolver::parse_robot_from_string(&yaml)?;
         Ok(BundlePlan {
             source_manifest: robot,
             compiled: Default::default(),
             train: "0.36.0".to_string(),
             target: host_target_triple_for_tests(),
+            brain: crate::project::resolver::ResolvedBrain {
+                crate_dir: PathBuf::from("/tmp/robot"),
+                package: "testbot-robot".to_string(),
+                bin_target: "testbot-robot".to_string(),
+            },
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),

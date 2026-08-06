@@ -154,19 +154,23 @@ pub(crate) fn source_participants_from_resolved_with_drivers(
     resolved: &BundlePlan,
     include_component_drivers: bool,
 ) -> Result<Vec<SourceParticipant>> {
-    let mut participants = resolved
-        .platform_runtimes
-        .iter()
-        .filter_map(|runtime| {
-            runtime.source_path().map(|path| {
-                SourceParticipant::official_service(
-                    runtime.name.clone(),
-                    runtime.name.clone(),
-                    path.to_path_buf(),
-                )
-            })
+    // The mandatory root brain enters every selected source build first: it is
+    // built, inspected, and staged on the same path as every other source
+    // participant, with its Cargo package/bin target kept separate from its
+    // canonical `brain` identity (organization#973).
+    let mut participants = vec![SourceParticipant::brain(
+        resolved.brain.crate_dir.clone(),
+        resolved.brain.bin_target.clone(),
+    )];
+    participants.extend(resolved.platform_runtimes.iter().filter_map(|runtime| {
+        runtime.source_path().map(|path| {
+            SourceParticipant::official_service(
+                runtime.name.clone(),
+                runtime.name.clone(),
+                path.to_path_buf(),
+            )
         })
-        .collect::<Vec<_>>();
+    }));
 
     participants.extend(resolved.user_runtimes.iter().map(|runtime| {
         SourceParticipant::user_service(

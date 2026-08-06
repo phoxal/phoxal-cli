@@ -97,8 +97,10 @@ pub(crate) fn build_selected_source_artifacts(
     if let Some(target_dir) = prebuilt_target_dir {
         let mut by_participant = BTreeMap::new();
         for participant in participants {
-            let binary_name =
-                source_binary_name_from_manifest(&participant.crate_dir, &participant.name)?;
+            let binary_name = source_binary_name_from_manifest(
+                &participant.crate_dir,
+                participant.preferred_binary_name(),
+            )?;
             let binary = locate_prebuilt_binary(&binary_name, target_dir, target, profile)?;
             if by_participant
                 .insert(participant.name.clone(), binary)
@@ -134,7 +136,11 @@ pub(crate) fn build_selected_source_artifacts(
             metadata.last().expect("inserted workspace metadata")
         };
         let package = workspace.package_for(&crate_dir)?;
-        let binary = package.binary_for(&participant.name)?;
+        // The root brain's Cargo bin target is project-specific and comes from
+        // the locked metadata, never from its canonical `brain` identity
+        // (organization#973); every other participant's target name IS its
+        // identity, so this is the same lookup for them.
+        let binary = package.binary_for(participant.preferred_binary_name())?;
         let group_key = SourceBuildGroupKey {
             workspace_root: workspace.workspace_root.clone(),
             target: cross.clone(),

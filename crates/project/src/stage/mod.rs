@@ -98,7 +98,7 @@ robot:
     encoders: []
   components: {}
 "#;
-        let source_manifest = phoxal_manifest::source::robot::parse_from_string(yaml)?;
+        let source_manifest = phoxal_cli_core::project::resolver::parse_robot_from_string(yaml)?;
         let compiled = compile_test_bundle(&source_manifest)?;
         Ok(BundlePlan {
             source_manifest,

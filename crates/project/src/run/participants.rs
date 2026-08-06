@@ -85,7 +85,11 @@ pub(crate) fn stage_complete_bin_store(
     // the candidate-wide planner, so they are skipped here.
     for participant in source_participants {
         let binary_name = match participant.kind {
-            SourceParticipantKind::UserService => participant.name.clone(),
+            // The canonical staged name, never the Cargo package or bin target
+            // name the root package happens to use (organization#973).
+            SourceParticipantKind::Brain | SourceParticipantKind::UserService => {
+                participant.name.clone()
+            }
             SourceParticipantKind::ComponentDriver => official_binary_name(
                 ArtifactKind::ComponentDriver,
                 &participant.expected_artifact_id,
@@ -318,6 +322,9 @@ pub(crate) fn prepare_robot_participants(
 /// officials stay vendored (#936, finding 10). See [`build_layout_specs`].
 pub(crate) fn participant_kind(execution: &ParticipantExecution) -> (ParticipantKind, bool) {
     match execution {
+        // The brain is always the robot's own code and stays its own kind:
+        // never collapsed into Service after inspection (organization#973).
+        ParticipantExecution::Brain { .. } => (ParticipantKind::Brain, true),
         ParticipantExecution::OfficialArtifact { .. } => (ParticipantKind::Service, false),
         ParticipantExecution::UserService { .. } => (ParticipantKind::Service, true),
         ParticipantExecution::ComponentDriver { .. } => (ParticipantKind::Driver, true),
@@ -374,6 +381,12 @@ fn resolve_participant_source(
         return Ok(prepared);
     }
     match &participant.execution {
+        ParticipantExecution::Brain { .. } => {
+            source_dirs.get(id).ok_or_else(|| {
+                anyhow!("staged plan is missing the root package directory for the brain")
+            })?;
+            source_artifacts.binary_named(id).map(PathBuf::from)
+        }
         ParticipantExecution::UserService { .. } => {
             source_dirs.get(id).ok_or_else(|| {
                 anyhow!("staged plan is missing the source crate directory for user runtime {id}")
@@ -468,9 +481,9 @@ pub(crate) fn source_cwd(
 ) -> Option<PathBuf> {
     let id = &participant.launch.participant_id;
     match &participant.execution {
-        ParticipantExecution::UserService { .. } | ParticipantExecution::ComponentDriver { .. } => {
-            source_dirs.get(id).cloned()
-        }
+        ParticipantExecution::Brain { .. }
+        | ParticipantExecution::UserService { .. }
+        | ParticipantExecution::ComponentDriver { .. } => source_dirs.get(id).cloned(),
         ParticipantExecution::OfficialArtifact { .. } => resolved
             .platform_runtimes
             .iter()

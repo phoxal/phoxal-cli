@@ -65,6 +65,10 @@ pub struct BundlePlan {
     pub compiled: CompiledBundle,
     pub train: String,
     pub target: String,
+    /// The one mandatory root brain, discovered from the root Cargo package
+    /// (organization#973). Never optional and never registry-resolved: every
+    /// supported source project has exactly one.
+    pub brain: ResolvedBrain,
     pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
     pub simulators: Vec<ResolvedPlatformRuntime>,
     pub user_runtimes: Vec<ResolvedUserRuntime>,
@@ -134,6 +138,26 @@ impl ResolvedPlatformRuntime {
     pub fn source_path(&self) -> Option<&Path> {
         self.path_override.as_deref()
     }
+}
+
+/// The robot project's root Cargo package, resolved as its one mandatory
+/// brain source (organization#973).
+///
+/// The canonical runtime identity is always `brain`; the Cargo package name
+/// and binary target stay separate, project-specific facts so staging can
+/// rename the verified executable to `bin/brain` without any of them leaking
+/// into the launch graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBrain {
+    /// The root Cargo package's own directory (the project root).
+    pub crate_dir: PathBuf,
+    /// The root Cargo package name, for diagnostics and container package
+    /// selection.
+    pub package: String,
+    /// The exact Cargo-metadata-reported binary target the root package
+    /// builds. Never inferred from `[[bin]]`, package naming, or directory
+    /// naming.
+    pub bin_target: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,10 +260,39 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Unwrap the versioned authored `robot.yaml` document to its exact body.
+///
+/// The schema tag selects the variant (framework#388), so the CLI keeps one
+/// projection point rather than destructuring the versioned enum at every
+/// call site.
+#[must_use]
+pub fn robot_manifest_body(manifest: phoxal_manifest::source::robot::Manifest) -> Robot {
+    let phoxal_manifest::source::robot::Manifest::V0(body) = manifest;
+    body
+}
+
+/// Parse authored `robot.yaml` text into its exact body.
+pub fn parse_robot_from_string(text: &str) -> Result<Robot> {
+    Ok(robot_manifest_body(
+        phoxal_manifest::source::robot::parse_from_string(text)?,
+    ))
+}
+
+/// Write an authored `robot.yaml` body back out under its versioned schema
+/// tag.
+pub fn write_robot_to_dir(robot: &Robot, dir: impl AsRef<Path>) -> Result<()> {
+    phoxal_manifest::source::robot::write_to_dir(
+        &phoxal_manifest::source::robot::Manifest::V0(robot.clone()),
+        dir,
+    )
+}
+
 pub fn load_robot(path: &Path) -> Result<Robot> {
     crate::schema::ensure_supported_revision(path, crate::schema::DocumentKind::Robot)?;
-    let robot = phoxal_manifest::source::robot::read_from_path(path)
-        .with_context(|| format!("failed to read robot file {}", path.display()))?;
+    let robot = robot_manifest_body(
+        phoxal_manifest::source::robot::read_from_path(path)
+            .with_context(|| format!("failed to read robot file {}", path.display()))?,
+    );
     validate_launch_participant_ids(&robot, path)?;
     Ok(robot)
 }

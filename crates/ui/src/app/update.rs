@@ -172,7 +172,7 @@ fn preserve_process_candidate(
 pub(crate) fn process_is_runtime(process: &ProcessObservation) -> bool {
     matches!(
         process.kind,
-        ParticipantKind::Service | ParticipantKind::Driver
+        ParticipantKind::Brain | ParticipantKind::Service | ParticipantKind::Driver
     ) && (process.user_service || !is_known_internal_id(&process.key.id))
 }
 

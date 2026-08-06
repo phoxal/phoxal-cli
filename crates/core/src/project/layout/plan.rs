@@ -68,8 +68,8 @@ pub struct ConstructedPlan {
 }
 
 /// A compiler-owned runtime config paired with the schema embedded in its
-/// selected binary. This covers declared user services and typed
-/// compiler-generated official config such as behavior `{root, autostart}`.
+/// selected binary. This covers declared user services; the root brain has no
+/// config side channel and officials take no authored configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRuntimeConfig {
     pub runtime_id: String,
@@ -149,6 +149,29 @@ impl RuntimeLayout {
 
         for required in self.required_runtimes(&options.drivers) {
             match required.kind {
+                // The mandatory root brain: an explicit launch record with no
+                // config at all, required startup, exact liveliness readiness,
+                // and the stop-project terminal-failure policy every other
+                // graph runtime gets (organization#973).
+                RequiredRuntimeKind::Brain => {
+                    let participant_id = required.identity.clone();
+                    participants.push(cli_managed_record(
+                        participant_id.clone(),
+                        ParticipantExecution::Brain {
+                            binary_name: required.binary_name.clone(),
+                        },
+                        launch(
+                            &participant_id,
+                            &namespace,
+                            &robot_id,
+                            service_clock,
+                            None,
+                            &bundle_root,
+                            None,
+                            run,
+                        ),
+                    ));
+                }
                 RequiredRuntimeKind::OfficialService => {
                     let participant_id = required.identity.clone();
                     participants.push(cli_managed_record(
@@ -407,6 +430,7 @@ services:
 
     fn required_kind(required: RequiredRuntimeKind) -> &'static str {
         match required {
+            RequiredRuntimeKind::Brain => "brain",
             RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => "service",
             RequiredRuntimeKind::ComponentDriver => "driver",
         }
@@ -448,7 +472,7 @@ services:
     /// its official set is exactly the CLI catalog the loader derives from - the
     /// only way the two legs can produce the same robot's plan.
     fn resolved_full_catalog(project_root: &Path, layout_root: &Path) -> Result<BundlePlan> {
-        let robot = phoxal_manifest::source::robot::parse_from_string(ROBOT_YAML)?;
+        let robot = crate::project::resolver::parse_robot_from_string(ROBOT_YAML)?;
         let _ = project_root;
         let platform_runtimes = catalog::NATIVE
             .iter()
@@ -464,6 +488,7 @@ services:
                 .and_then(|name| name.to_str())
                 .unwrap_or("triple")
                 .to_string(),
+            brain: test_brain(),
             platform_runtimes,
             simulators: Vec::new(),
             user_runtimes: vec![ResolvedUserRuntime {
@@ -478,6 +503,17 @@ services:
             ],
             path_overrides: Vec::new(),
         })
+    }
+
+    /// The root package resolved as the mandatory brain, with a deliberately
+    /// project-specific Cargo package and bin target so nothing may infer the
+    /// canonical `brain` identity from either (organization#973).
+    fn test_brain() -> crate::project::resolver::ResolvedBrain {
+        crate::project::resolver::ResolvedBrain {
+            crate_dir: PathBuf::from("/tmp/robot"),
+            package: "testbot-robot".to_string(),
+            bin_target: "testbot-robot".to_string(),
+        }
     }
 
     fn platform_runtime(short: &str) -> ResolvedPlatformRuntime {
@@ -532,19 +568,26 @@ services:
         // the user service and workspace drivers build from.
         let mut resolved = resolved_full_catalog(project.path(), &layout_root)?;
         resolved.compiled.participants = RuntimeLayout::open(&layout_root)?.participants().to_vec();
-        let mut checked_participants = catalog::NATIVE
-            .iter()
-            .filter(|official| official.kind == ArtifactKind::Service)
-            .map(|official| {
-                let short = catalog_short(official.package);
-                checked(
-                    short,
-                    short,
-                    graph_check::ParticipantKind::Service,
-                    graph_check::ParticipantScope::Graph,
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut checked_participants = vec![checked(
+            "brain",
+            "brain",
+            graph_check::ParticipantKind::Brain,
+            graph_check::ParticipantScope::Graph,
+        )];
+        checked_participants.extend(
+            catalog::NATIVE
+                .iter()
+                .filter(|official| official.kind == ArtifactKind::Service)
+                .map(|official| {
+                    let short = catalog_short(official.package);
+                    checked(
+                        short,
+                        short,
+                        graph_check::ParticipantKind::Service,
+                        graph_check::ParticipantScope::Graph,
+                    )
+                }),
+        );
         checked_participants.push(checked(
             "mission",
             "mission",
@@ -560,6 +603,7 @@ services:
             ));
         }
         let source_participants = vec![
+            SourceParticipant::brain(PathBuf::from("/tmp/robot"), "testbot-robot"),
             SourceParticipant::user_service("mission", PathBuf::from("services/mission")),
             SourceParticipant::component_driver_with_artifact_id(
                 "left_drive",

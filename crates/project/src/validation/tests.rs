@@ -79,7 +79,8 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
         temp.path().join("Cargo.lock"),
         "version = 4\n\n[[package]]\nname = \"ddsm115\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"mission\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"robot\"\nversion = \"0.1.0\"\ndependencies = [\"phoxal\"]\n",
     )?;
-    let mut robot = phoxal_manifest::source::robot::parse_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
+    let mut robot =
+        phoxal_cli_core::project::resolver::parse_robot_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
     robot
         .services
         .get_mut("mission")
@@ -87,7 +88,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
         .config = Some(serde_json::json!({
         "message": "line\nquoted \"value\"",
     }));
-    phoxal_manifest::source::robot::write_to_dir(&robot, temp.path())?;
+    phoxal_cli_core::project::resolver::write_robot_to_dir(&robot, temp.path())?;
     std::fs::write(
         temp.path().join("structure.urdf"),
         r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><link name="left_wheel"/><link name="right_wheel"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="left_mount" type="fixed"><parent link="base_link"/><child link="left_wheel"/></joint><joint name="right_mount" type="fixed"><parent link="base_link"/><child link="right_wheel"/></joint></robot>"#,
@@ -268,7 +269,7 @@ services:
 "#;
 
 fn robot_with_service_config(service_id: &str, config: Value) -> Result<Robot> {
-    let mut robot = phoxal_manifest::source::robot::parse_from_string(
+    let mut robot = phoxal_cli_core::project::resolver::parse_robot_from_string(
         &LAUNCH_PLAN_FIXTURE_ROBOT.replace("mission", service_id),
     )?;
     robot
@@ -1215,7 +1216,9 @@ fn raw_kind(kind: &str, id: &str) -> RawParticipantReport {
 
 fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<BundlePlan> {
     Ok(BundlePlan {
-        source_manifest: phoxal_manifest::source::robot::parse_from_string(MINIMAL_ROBOT)?,
+        source_manifest: phoxal_cli_core::project::resolver::parse_robot_from_string(
+            MINIMAL_ROBOT,
+        )?,
         compiled: Default::default(),
         train: "0.36.0".to_string(),
         target: crate::resolve::project::host_target_triple(),

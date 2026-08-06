@@ -64,6 +64,7 @@ pub(crate) fn raw_participant_report_from_extracted_metadata(
         );
     }
     let kind = match meta.kind {
+        phoxal_runtime_contract::ParticipantKind::Brain => "brain",
         phoxal_runtime_contract::ParticipantKind::Service => "service",
         phoxal_runtime_contract::ParticipantKind::Driver => "driver",
         phoxal_runtime_contract::ParticipantKind::Simulator => "simulator",
