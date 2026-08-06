@@ -379,6 +379,20 @@ impl RuntimeLayout {
             required.identity,
             expected_kind,
         );
+        if required.kind == RequiredRuntimeKind::Brain {
+            // `#[phoxal::brain]` fixes `Config = ()`, so the brain's embedded
+            // schema is exactly the unit schema. A binary claiming any other
+            // config surface at `bin/brain` is not a brain, whatever it
+            // declares (organization#973).
+            ensure!(
+                meta.config_schema == serde_json::json!({"type": "null"}),
+                "staged runtime layout {} binary bin/{} declares config schema {}, but the root \
+                 brain takes no config at all and must declare {{\"type\":\"null\"}}",
+                self.root.display(),
+                required.binary_name,
+                meta.config_schema,
+            );
+        }
         Ok(SelectedBinary { path, meta })
     }
 }
@@ -969,6 +983,28 @@ services:
                 .expect_err("a brain declaring the wrong id must be rejected")
         );
         assert!(message.contains("mission"), "{message}");
+
+        // A brain declaring a real config surface is not a brain: its
+        // `Config` is fixed to `()`.
+        write_bin(
+            dir.path(),
+            "brain",
+            &synthesize_binary(
+                host_architecture(),
+                &metadata(
+                    "brain",
+                    "brain",
+                    serde_json::json!({"type":"object","properties":{"speed":{"type":"integer"}}}),
+                ),
+            ),
+        )?;
+        let message = format!(
+            "{:#}",
+            layout
+                .inspect_for(brain, LayoutInspection::Host)
+                .expect_err("a brain declaring a config surface must be rejected")
+        );
+        assert!(message.contains("takes no config at all"), "{message}");
 
         // The correct record passes and carries the unit config schema.
         write_bin(
