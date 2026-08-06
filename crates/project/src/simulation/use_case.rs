@@ -158,7 +158,6 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
     Ok(PreparedExecution {
         target: request.target,
         project_root: resolved.project_root,
-        manual_input: crate::manual_input_from_staged_root(&staged_root),
         staged_root,
         train: resolved.resolved.train.clone(),
         plan,

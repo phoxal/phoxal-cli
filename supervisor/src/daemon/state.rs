@@ -65,7 +65,7 @@ impl ExecutionState {
                 elapsed_ms: None,
             })
             .collect();
-        let initial = project(0, &facts, &startup, None, &board.supervisor_snapshot());
+        let initial = project(0, &facts, &startup, None, &board.snapshot());
         let (published, _) = watch::channel(initial);
         Self {
             board,
@@ -215,7 +215,7 @@ impl ExecutionState {
             &self.facts_lock(),
             &self.startup_lock(),
             self.failure_lock().as_ref(),
-            &self.board.supervisor_snapshot(),
+            &self.board.snapshot(),
         );
         self.inner.published.send_replace(snapshot);
     }

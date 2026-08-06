@@ -1,11 +1,11 @@
 //! Main supervision loop, actions, and orderly shutdown.
 
 use super::{
-    ProcessState, RequestedStop, RunningParticipant, SupervisionStage, SupervisorAction,
-    SupervisorOptions, SupervisorState, await_stage_ready, join_reader,
-    maybe_publish_startup_outcome, send_process_group_terminate, send_terminate,
+    ProcessState, RunningParticipant, SupervisionStage, SupervisorAction, SupervisorOptions,
+    SupervisorState, await_stage_ready, join_reader, maybe_publish_startup_outcome,
     spawn_until_pending, stop_child,
 };
+use super::stages::StageReporter;
 use crate::WaitBudget;
 use anyhow::Result;
 use phoxal_cli_core::runtime::{ProjectLifecycle, RuntimeFailurePolicy};
@@ -17,10 +17,11 @@ use tokio::time::MissedTickBehavior;
 pub async fn supervise_until_shutdown(
     stages: Vec<SupervisionStage>,
     board: SupervisorState,
+    progress: StageReporter,
     mut options: SupervisorOptions,
 ) -> Result<()> {
     let failed_required = board
-        .supervisor_snapshot()
+        .snapshot()
         .processes
         .into_iter()
         .filter(|(_, entry)| {
@@ -36,6 +37,7 @@ pub async fn supervise_until_shutdown(
             failed_required.join(", ")
         );
         board.fail(&reason);
+        progress.failed(&reason);
         options.token.cancel();
         anyhow::bail!(reason);
     }
@@ -49,7 +51,8 @@ pub async fn supervise_until_shutdown(
     // participants' Liveliness - but the Infrastructure stage empties as its
     // tools are removed, so this keeps that case from stalling the whole
     // startup on an empty `select!` branch.
-    let mut pending_stage = spawn_until_pending(&mut running, &board, &mut stage_queue).await;
+    let mut pending_stage =
+        spawn_until_pending(&mut running, &board, &progress, &mut stage_queue).await;
     maybe_publish_startup_outcome(&board, &options, &pending_stage).await;
 
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
@@ -90,16 +93,15 @@ pub async fn supervise_until_shutdown(
                 match result {
                     Ok(()) => {
                         tracing::info!(stage = %stage.label, "supervisor startup phase ready");
-                        if stage.step == phoxal_cli_core::runtime::StartupStepKind::Graph {
-                            board.step_detail(
-                                stage.step,
-                                format!("{} participants ready", stage.ready_ids.len()),
-                            );
-                        }
-                        board.step_done(stage.step);
+                        progress.detail(format!(
+                            "{} participants ready in {}",
+                            stage.ready_ids.len(),
+                            stage.label
+                        ));
                         pending_stage = spawn_until_pending(
                             &mut running,
                             &board,
+                            &progress,
                             &mut stage_queue,
                         ).await;
                         maybe_publish_startup_outcome(&board, &options, &pending_stage).await;
@@ -107,7 +109,7 @@ pub async fn supervise_until_shutdown(
                     Err(error) => {
                         let reason = format!("stage '{}' stalled: {error:#}", stage.label);
                         tracing::error!(stage = %stage.label, error = %error, "required startup phase failed");
-                        board.step_failed(stage.step, &reason);
+                        progress.failed(&reason);
                         board.fail(&reason);
                         supervisor_error = Some(anyhow::anyhow!(reason));
                         token.cancel();
@@ -123,7 +125,7 @@ pub async fn supervise_until_shutdown(
                         break 'supervision;
                     }
                     if participant.failed
-                        && matches!(board.supervisor_snapshot().lifecycle, ProjectLifecycle::Ready | ProjectLifecycle::Degraded)
+                        && matches!(board.snapshot().lifecycle, ProjectLifecycle::Ready | ProjectLifecycle::Degraded)
                     {
                         match participant.spec.runtime_failure {
                             RuntimeFailurePolicy::KeepProjectDegraded => {
@@ -158,86 +160,12 @@ pub async fn supervise_until_shutdown(
     if supervisor_error.is_none() {
         board.set_lifecycle(ProjectLifecycle::Stopping);
     }
-    if let Some(requested_stop) = options.requested_stop.take() {
-        request_participant_stop(&mut running, &board, requested_stop).await;
-    }
     shutdown_all(&mut running, &board).await;
     if let Some(error) = supervisor_error {
         return Err(error);
     }
     board.set_lifecycle(ProjectLifecycle::Stopped);
     Ok(())
-}
-
-pub(crate) async fn request_participant_stop(
-    running: &mut [RunningParticipant],
-    board: &SupervisorState,
-    requested_stop: RequestedStop,
-) {
-    let Some(participant) = running
-        .iter_mut()
-        .find(|participant| participant.spec.key == requested_stop.key)
-    else {
-        return;
-    };
-    if participant.child.is_none() {
-        if participant.restart_at.take().is_some() {
-            participant.failed = true;
-            board.set_state(
-                &participant.spec.key,
-                ProcessState::Failed,
-                Some("crashed before requested stop while restart was pending".to_string()),
-            );
-        }
-        return;
-    }
-
-    tracing::debug!(process = %participant.spec.key, "sending SIGTERM for requested stop");
-    let Some(pid) = participant.child.as_ref().and_then(|child| child.id()) else {
-        board.set_state(
-            &participant.spec.key,
-            ProcessState::Failed,
-            Some("requested-stop child has no pid".to_string()),
-        );
-        return;
-    };
-    let terminate_sent = match if participant.spec.process_group {
-        send_process_group_terminate(pid)
-    } else {
-        send_terminate(pid)
-    } {
-        Ok(()) => {
-            tracing::debug!(process = %participant.spec.key, "SIGTERM sent; waiting for child exit");
-            true
-        }
-        Err(error) => {
-            tracing::warn!(process = %participant.spec.key, %error, "failed to send SIGTERM; waiting before fallback");
-            false
-        }
-    };
-
-    match participant
-        .wait_for_requested_stop(board, requested_stop.grace, terminate_sent)
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => {
-            if let Err(error) = participant.kill_process_group_after_timeout(board).await {
-                board.set_state(
-                    &participant.spec.key,
-                    ProcessState::Failed,
-                    Some(format!("process-group SIGKILL failed: {error:#}")),
-                );
-            }
-        }
-        Err(error) => {
-            board.set_state(
-                &participant.spec.key,
-                ProcessState::Failed,
-                Some(format!("requested-stop wait failed: {error:#}")),
-            );
-        }
-    }
 }
 
 pub(crate) async fn recv_action(
@@ -338,6 +266,7 @@ mod tests {
         supervise_until_shutdown(
             Vec::new(),
             state.clone(),
+            crate::process::stages::SilentProgress::reporter(),
             SupervisorOptions {
                 token,
                 ..SupervisorOptions::default()
@@ -346,7 +275,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            state.supervisor_snapshot().lifecycle,
+            state.snapshot().lifecycle,
             ProjectLifecycle::Stopped
         );
     }

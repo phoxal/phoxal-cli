@@ -1,7 +1,8 @@
-//! Authoritative resident state and exact spawned-participant readiness.
+//! The daemon's authoritative internal state and exact participant readiness.
 
+pub(crate) mod board;
 pub(crate) mod readiness;
-mod snapshot;
 mod store;
 
-pub use store::SupervisorState;
+pub(crate) use board::Board;
+pub(crate) use store::SupervisorState;

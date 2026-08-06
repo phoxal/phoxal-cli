@@ -26,18 +26,12 @@ pub type RouterLost = Arc<dyn Fn(String) + Send + Sync>;
 #[derive(Debug)]
 pub struct EmbeddedRouter {
     router: phoxal_bus::Router,
-    endpoint: String,
     /// Watches this router from the outside. Closed before the router is, so
     /// an ordinary shutdown is never reported as a loss.
     watch: phoxal_bus::RouterWatch,
 }
 
 impl EmbeddedRouter {
-    /// The endpoint participants dial.
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
     /// Close the router. Called on the way out of a session, after the graph
     /// has been torn down, so participants lose their links to a router that is
     /// already finished with them rather than mid-shutdown.
@@ -114,11 +108,7 @@ pub async fn start_embedded_router(
     .await
     .with_context(|| format!("failed to watch the embedded router on {endpoint}"))?;
 
-    Ok(EmbeddedRouter {
-        router,
-        endpoint,
-        watch,
-    })
+    Ok(EmbeddedRouter { router, watch })
 }
 
 /// The filesystem path behind a `unixsock-stream/` endpoint, if it is one.
@@ -192,7 +182,6 @@ mod tests {
         )
         .await
         .expect("the router creates its socket directory and binds");
-        assert_eq!(router.endpoint(), endpoint);
         assert!(
             socket.exists(),
             "a successful open must mean the endpoint is bound, not merely requested"

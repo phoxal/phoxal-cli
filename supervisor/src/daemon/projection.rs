@@ -14,7 +14,6 @@
 use std::time::SystemTime;
 
 use phoxal_cli_core::runtime as core;
-use phoxal_cli_protocol::SupervisorSnapshotV0;
 use phoxal_supervisor_api::{
     DaemonFailure, DesiredState, Detail, ExecutionMode, Lifecycle, Process, ProcessFailure,
     ProcessFailureKind, ProcessState, RobotIdentity, Snapshot, StartupStep, StderrTail, WallTime,
@@ -44,7 +43,7 @@ pub(crate) fn project(
     facts: &ExecutionFacts,
     startup: &[StartupStep],
     failure: Option<&DaemonFailure>,
-    board: &SupervisorSnapshotV0,
+    board: &crate::state::Board,
 ) -> Snapshot {
     let processes = facts
         .roster
@@ -207,7 +206,7 @@ mod tests {
             StartupRequirement::Required,
         );
 
-        let snapshot = project(7, &facts, &[], None, &board.supervisor_snapshot());
+        let snapshot = project(7, &facts, &[], None, &board.snapshot());
         assert_eq!(snapshot.revision, 7);
         assert_eq!(snapshot.mode, ExecutionMode::Simulated);
         assert_eq!(
@@ -228,7 +227,7 @@ mod tests {
             &facts,
             &[],
             None,
-            &SupervisorState::new().supervisor_snapshot(),
+            &SupervisorState::new().snapshot(),
         );
         for process in &snapshot.processes {
             assert_eq!(process.state, ProcessState::Starting, "{}", process.key);
@@ -264,7 +263,7 @@ mod tests {
             "process exited with status 101",
         );
 
-        let snapshot = project(2, &facts, &[], None, &board.supervisor_snapshot());
+        let snapshot = project(2, &facts, &[], None, &board.snapshot());
         let row = snapshot
             .processes
             .iter()

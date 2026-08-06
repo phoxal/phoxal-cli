@@ -8,29 +8,19 @@ documentation = "https://github.com/phoxal/phoxal-cli#readme"
 homepage = "https://github.com/phoxal/phoxal-cli"
 repository = "https://github.com/phoxal/phoxal-cli"
 
+# Two root applications ship from this workspace and nothing else does
+# (organization#978): `client/` builds the `phoxal` tool, `supervisor/` builds
+# the `phoxald` daemon. Everything under `crates/` is a domain-oriented library
+# both of them share. The workspace root itself is virtual - it holds no
+# package, so neither executable can accidentally become "the" root crate.
 [workspace]
 resolver = "3"
 members = [
-    ".",
+    "client",
     "crates/catalog",
-    "crates/client",
     "crates/core",
     "crates/observation",
     "crates/project",
-    "crates/protocol",
-    "crates/supervisor-api",
-    "crates/supervisor-client",
-    "crates/ui",
-    "supervisor",
-]
-default-members = [
-    ".",
-    "crates/catalog",
-    "crates/client",
-    "crates/core",
-    "crates/observation",
-    "crates/project",
-    "crates/protocol",
     "crates/supervisor-api",
     "crates/supervisor-client",
     "crates/ui",
@@ -81,12 +71,9 @@ phoxal-model = "0.55.0"
 phoxal-runtime-contract = "0.55.0"
 
 phoxal-cli-catalog = { path = "crates/catalog" }
-phoxal-cli-client = { path = "crates/client" }
 phoxal-cli-core = { path = "crates/core" }
 phoxal-cli-observation = { path = "crates/observation" }
 phoxal-cli-project = { path = "crates/project" }
-phoxal-cli-protocol = { path = "crates/protocol" }
-phoxal-cli-supervisor = { path = "supervisor" }
 phoxal-cli-ui = { path = "crates/ui" }
 phoxal-supervisor-api = { path = "crates/supervisor-api" }
 phoxal-supervisor-client = { path = "crates/supervisor-client" }
@@ -97,58 +84,3 @@ unused = "warn"
 [profile.release]
 lto = false
 codegen-units = 16
-
-[package]
-name = "phoxal-cli"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-description.workspace = true
-documentation.workspace = true
-homepage.workspace = true
-repository.workspace = true
-
-# The shipped executable is `phoxal`; the package stays `phoxal-cli` because the
-# crate name `phoxal` is taken by the framework on crates.io.
-[[bin]]
-name = "phoxal"
-path = "src/main.rs"
-
-[dependencies]
-anyhow = { workspace = true }
-clap = { workspace = true, features = ["derive", "env"] }
-console = { workspace = true }
-flate2 = { workspace = true }
-libc = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-reqwest = { workspace = true }
-semver = { workspace = true, features = ["serde"] }
-self_replace = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
-tar = { workspace = true }
-
-phoxal-cli-catalog = { workspace = true }
-phoxal-cli-client = { workspace = true }
-phoxal-cli-core = { workspace = true }
-phoxal-cli-observation = { workspace = true }
-phoxal-cli-project = { workspace = true }
-phoxal-cli-protocol = { workspace = true }
-phoxal-cli-supervisor = { workspace = true }
-phoxal-cli-ui = { workspace = true }
-phoxal-manifest = { workspace = true }
-phoxal-model = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true }
-dotenvy = "0.15.7"
-tempfile = { workspace = true }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
-
-[lints]
-workspace = true

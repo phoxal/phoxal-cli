@@ -534,7 +534,6 @@ pub(crate) fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecutio
     Ok(PreparedExecution {
         target: request.target,
         project_root: prepared.project_root,
-        manual_input: crate::manual_input_from_staged_root(&prepared.staged_root),
         staged_root: prepared.staged_root,
         train: prepared.train,
         plan,

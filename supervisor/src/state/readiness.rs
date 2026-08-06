@@ -5,7 +5,6 @@
 
 use crate::SupervisorState;
 use phoxal_bus::{LivelinessStatus, ParticipantLivelinessEvent};
-use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::runtime::{ParticipantInstanceKey, RobotKey};
 
 /// The supervisor's own participant id on the robot bus. It observes
@@ -41,11 +40,6 @@ pub(crate) fn apply_liveliness_event(
         event.key.producer(),
         event.status == LivelinessStatus::Alive,
     );
-}
-
-#[must_use]
-pub fn default_connect_endpoint() -> String {
-    DEFAULT_ROUTER_CONNECT.to_string()
 }
 
 #[cfg(test)]
@@ -91,7 +85,7 @@ mod tests {
             event("drive", LivelinessStatus::Alive),
         );
         assert_eq!(
-            board.supervisor_snapshot().processes[&key].status.actual,
+            board.snapshot().processes[&key].status.actual,
             ProcessState::Ready
         );
 
@@ -102,7 +96,7 @@ mod tests {
             event("drive", LivelinessStatus::Lost),
         );
         assert_eq!(
-            board.supervisor_snapshot().processes[&key].status.actual,
+            board.snapshot().processes[&key].status.actual,
             ProcessState::Ready,
             "Lost is observational and must not mutate process lifecycle"
         );
@@ -129,7 +123,7 @@ mod tests {
             event(SUPERVISOR_SESSION_ID, LivelinessStatus::Alive),
         );
         assert_eq!(
-            board.supervisor_snapshot().processes[&key].status.actual,
+            board.snapshot().processes[&key].status.actual,
             ProcessState::Starting
         );
     }

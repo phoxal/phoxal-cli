@@ -13,13 +13,6 @@ publish = false
 name = "phoxald"
 path = "src/main.rs"
 
-# Transitional: the `phoxal` binary still links this library for the old
-# in-process resident path until that path is cut over. Nothing new should
-# depend on the library target.
-[lib]
-name = "phoxal_cli_supervisor"
-path = "src/lib.rs"
-
 [dependencies]
 anyhow = { workspace = true }
 getrandom = { workspace = true }
@@ -34,7 +27,6 @@ phoxal-runtime-contract = { workspace = true }
 phoxal-supervisor-api = { workspace = true }
 phoxal-cli-catalog = { workspace = true }
 phoxal-cli-core = { workspace = true }
-phoxal-cli-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

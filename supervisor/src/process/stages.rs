@@ -3,9 +3,8 @@
 use super::{ParticipantSpec, RunningParticipant, SupervisorOptions, SupervisorState};
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::runtime::{
-    ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement, StartupStepKind,
-};
+use phoxal_cli_core::runtime::{ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement};
+use std::sync::Arc;
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
@@ -28,52 +27,51 @@ pub fn stages_for_run(
         }
     }
     vec![
-        SupervisionStage::new(
-            "starting project infrastructure",
-            StartupStepKind::Infrastructure,
-            infrastructure,
-            timeout,
-        ),
-        SupervisionStage::new(
-            "starting robot graph",
-            StartupStepKind::Graph,
-            graph,
-            timeout,
-        ),
+        SupervisionStage::new("starting project infrastructure", infrastructure, timeout),
+        SupervisionStage::new("starting robot graph", graph, timeout),
     ]
 }
 
-/// Build the ordered resident startup stages for a Webots run.
-pub fn stages_for_simulation(
-    specs: Vec<ParticipantSpec>,
-    timeout: crate::WaitBudget,
-) -> Vec<SupervisionStage> {
-    let mut infrastructure = Vec::new();
-    let mut graph = Vec::new();
-    for spec in specs {
-        if spec.id == phoxal_cli_core::runtime::WEBOTS_PROCESS_ID
-            || spec.kind == phoxal_cli_core::runtime::ParticipantKind::Host
-        {
-            infrastructure.push(spec);
-        } else {
-            graph.push(spec);
-        }
-    }
-    vec![
-        SupervisionStage::new(
-            "starting project infrastructure",
-            StartupStepKind::Infrastructure,
-            infrastructure,
-            timeout,
-        ),
-        SupervisionStage::new(
-            "starting robot graph",
-            StartupStepKind::Graph,
-            graph,
-            timeout,
-        ),
-    ]
+/// How supervision reports stage progress to whoever owns the startup
+/// sequence.
+///
+/// The store is not that owner: the startup sequence a client renders is the
+/// daemon's own (bundle, requirements, binaries, router, participants), and
+/// this loop only ever advances its last step (organization#978). Keeping it
+/// behind this handle is what lets the process machinery stay ignorant of the
+/// wire contract.
+pub(crate) trait StageProgress: Send + Sync {
+    /// A stage began, named by its human-readable label.
+    fn started(&self, label: &str);
+    /// A stage completed with an observation worth showing.
+    fn detail(&self, detail: String);
+    /// Every stage completed.
+    fn finished(&self);
+    /// A stage failed, and the graph is unwinding.
+    fn failed(&self, reason: &str);
 }
+
+/// A reporter that discards everything, for a caller with no startup sequence
+/// to advance (every direct stage test).
+#[cfg(test)]
+pub(crate) struct SilentProgress;
+
+#[cfg(test)]
+impl SilentProgress {
+    pub(crate) fn reporter() -> StageReporter {
+        Arc::new(Self)
+    }
+}
+
+#[cfg(test)]
+impl StageProgress for SilentProgress {
+    fn started(&self, _label: &str) {}
+    fn detail(&self, _detail: String) {}
+    fn finished(&self) {}
+    fn failed(&self, _reason: &str) {}
+}
+
+pub(crate) type StageReporter = Arc<dyn StageProgress>;
 
 /// A startup barrier containing process specs and board ids that must become
 /// ready before the next stage begins. Simulation clock is not a stage.
@@ -82,7 +80,6 @@ pub struct SupervisionStage {
     /// Human-readable name for this stage, used in stalled-stage errors and
     /// process spawn diagnostics. The typed startup step stays separate.
     pub label: String,
-    pub step: StartupStepKind,
     pub specs: Vec<ParticipantSpec>,
     /// Board ids that must be observed `Ready` before the next stage spawns:
     /// every spawned spec's own id that is a bus participant (see
@@ -99,7 +96,6 @@ impl SupervisionStage {
     #[must_use]
     pub fn new(
         label: impl Into<String>,
-        step: StartupStepKind,
         specs: Vec<ParticipantSpec>,
         timeout: crate::WaitBudget,
     ) -> Self {
@@ -120,7 +116,6 @@ impl SupervisionStage {
             .collect();
         Self {
             label: label.into(),
-            step,
             specs,
             ready_ids,
             failure_ids,
@@ -160,7 +155,6 @@ pub(crate) async fn spawn_participants_in_stage(
 /// and when it started.
 pub(crate) struct PendingStage {
     pub(crate) label: String,
-    pub(crate) step: StartupStepKind,
     pub(crate) ready_ids: Vec<ProcessKey>,
     pub(crate) failure_ids: Vec<ProcessKey>,
     pub(crate) optional_ids: Vec<ProcessKey>,
@@ -174,30 +168,27 @@ pub(crate) struct PendingStage {
 pub(crate) async fn spawn_stage(
     running: &mut Vec<RunningParticipant>,
     board: &SupervisorState,
+    progress: &StageReporter,
     stage: SupervisionStage,
 ) -> Option<PendingStage> {
     let SupervisionStage {
         label,
-        step,
         specs,
         ready_ids,
         failure_ids,
         optional_ids,
         timeout: stage_timeout,
     } = stage;
-    board.step_active(step);
+    progress.started(&label);
     if specs.is_empty() && ready_ids.is_empty() {
-        board.step_done(step);
         return None;
     }
     spawn_participants_in_stage(running, board, &label, specs).await;
     if ready_ids.is_empty() {
-        board.step_done(step);
         return None;
     }
     Some(PendingStage {
         label,
-        step,
         ready_ids,
         failure_ids,
         optional_ids,
@@ -208,12 +199,16 @@ pub(crate) async fn spawn_stage(
 pub(crate) async fn spawn_until_pending(
     running: &mut Vec<RunningParticipant>,
     board: &SupervisorState,
+    progress: &StageReporter,
     stage_queue: &mut VecDeque<SupervisionStage>,
 ) -> Option<PendingStage> {
     while let Some(stage) = stage_queue.pop_front() {
-        if let Some(pending) = spawn_stage(running, board, stage).await {
+        if let Some(pending) = spawn_stage(running, board, progress, stage).await {
             return Some(pending);
         }
+    }
+    if stage_queue.is_empty() {
+        progress.finished();
     }
     None
 }
@@ -296,7 +291,7 @@ pub(crate) async fn maybe_publish_startup_outcome(
     pending_stage: &Option<PendingStage>,
 ) {
     if options.publishes_running_on_startup_complete && pending_stage.is_none() {
-        let snapshot = board.supervisor_snapshot();
+        let snapshot = board.snapshot();
         let degraded = snapshot.processes.values().any(|entry| {
             matches!(
                 entry.status.actual,
@@ -316,7 +311,6 @@ mod tests {
     use super::*;
     use phoxal_cli_core::runtime::{
         ParticipantKind, ReadinessPolicy, RuntimeFailurePolicy, StartupRequirement,
-        WEBOTS_PROCESS_ID,
     };
     use std::path::PathBuf;
 
@@ -340,60 +334,36 @@ mod tests {
         }
     }
 
+    /// The stage split is by kind: a host process is project infrastructure
+    /// and every graph participant - the mandatory root brain included
+    /// (organization#973) - waits behind it.
     #[test]
-    fn run_assigns_host_processes_to_infrastructure_and_robot_processes_to_graph() {
-        let stages = stages_for_run(
-            vec![
-                spec("webots", ParticipantKind::Host),
-                spec("service", ParticipantKind::Service),
-            ],
-            crate::WaitBudget::Unbounded,
-        );
-        assert_eq!(stages[0].step, StartupStepKind::Infrastructure);
-        assert_eq!(stages[0].specs[0].id, "webots");
-        assert_eq!(stages[1].step, StartupStepKind::Graph);
-        assert_eq!(stages[1].specs[0].id, "service");
-    }
-
-    /// The mandatory root brain is a robot-graph participant, never project
-    /// infrastructure (organization#973).
-    #[test]
-    fn the_brain_starts_in_the_robot_graph_stage_not_infrastructure() {
+    fn run_assigns_host_processes_to_infrastructure_and_every_participant_to_the_graph() {
         let stages = stages_for_run(
             vec![
                 spec("webots", ParticipantKind::Host),
                 spec("brain", ParticipantKind::Brain),
-            ],
-            crate::WaitBudget::Unbounded,
-        );
-        assert_eq!(stages[0].step, StartupStepKind::Infrastructure);
-        assert!(stages[0].specs.iter().all(|spec| spec.id != "brain"));
-        assert_eq!(stages[1].step, StartupStepKind::Graph);
-        assert!(stages[1].specs.iter().any(|spec| spec.id == "brain"));
-
-        let stages = stages_for_simulation(
-            vec![
-                spec(WEBOTS_PROCESS_ID, ParticipantKind::Simulator),
-                spec("brain", ParticipantKind::Brain),
-            ],
-            crate::WaitBudget::Unbounded,
-        );
-        assert_eq!(stages[1].step, StartupStepKind::Graph);
-        assert!(stages[1].specs.iter().any(|spec| spec.id == "brain"));
-    }
-
-    #[test]
-    fn simulation_assigns_webots_to_infrastructure_and_robot_to_graph() {
-        let stages = stages_for_simulation(
-            vec![
-                spec(WEBOTS_PROCESS_ID, ParticipantKind::Simulator),
                 spec("service", ParticipantKind::Service),
             ],
             crate::WaitBudget::Unbounded,
         );
-        assert_eq!(stages[0].step, StartupStepKind::Infrastructure);
-        assert_eq!(stages[0].specs[0].id, WEBOTS_PROCESS_ID);
-        assert_eq!(stages[1].step, StartupStepKind::Graph);
-        assert_eq!(stages[1].specs[0].id, "service");
+        assert_eq!(stages[0].label, "starting project infrastructure");
+        assert_eq!(
+            stages[0]
+                .specs
+                .iter()
+                .map(|spec| spec.id.as_str())
+                .collect::<Vec<_>>(),
+            ["webots"]
+        );
+        assert_eq!(stages[1].label, "starting robot graph");
+        assert_eq!(
+            stages[1]
+                .specs
+                .iter()
+                .map(|spec| spec.id.as_str())
+                .collect::<Vec<_>>(),
+            ["brain", "service"]
+        );
     }
 }

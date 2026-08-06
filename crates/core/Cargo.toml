@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 hex = { workspace = true }
+libc = { workspace = true }
 object = { workspace = true }
 phoxal-api = { workspace = true }
 phoxal-bus = { workspace = true }

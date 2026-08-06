@@ -2,7 +2,6 @@
 
 use phoxal_cli_core::runtime::ProcessKey;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
@@ -15,7 +14,6 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub struct SupervisorOptions {
     pub action_rx: Option<SupervisorActionReceiver>,
-    pub requested_stop: Option<RequestedStop>,
     /// The run's root cancellation signal (the application owns the sender
     /// half): a Ctrl-C observed by the application cancels
     /// this, and this loop selects on it directly instead of its own private
@@ -36,24 +34,8 @@ impl Default for SupervisorOptions {
     fn default() -> Self {
         Self {
             action_rx: None,
-            requested_stop: None,
             token: tokio_util::sync::CancellationToken::new(),
             publishes_running_on_startup_complete: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct RequestedStop {
-    pub(crate) key: ProcessKey,
-    pub(crate) grace: Duration,
-}
-
-impl RequestedStop {
-    pub fn new(key: impl Into<ProcessKey>, grace: Duration) -> Self {
-        Self {
-            key: key.into(),
-            grace,
         }
     }
 }

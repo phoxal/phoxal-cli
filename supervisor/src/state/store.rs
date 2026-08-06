@@ -1,29 +1,31 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
-use phoxal_cli_core::identity::{ExecutionId, ProducerId};
+use phoxal_cli_core::identity::ProducerId;
 use phoxal_cli_core::runtime::{
     BoundedString, ExitDescription, ParticipantInstanceKey, ParticipantKind, ProcessDescriptor,
     ProcessEntry, ProcessFailure, ProcessFailureKind, ProcessKey, ProcessState, ProjectLifecycle,
-    StartupRequirement, StartupStatus, StartupStep, StartupStepKind, StartupStepState,
+    StartupRequirement,
 };
-use phoxal_cli_protocol::SupervisorSnapshotV0;
+use phoxal_supervisor_api::{Detail, StderrTail};
 use tokio::sync::watch;
 
-use super::snapshot::{bounded_text, initial_snapshot};
+use super::Board;
 
-/// The resident's authoritative process and lifecycle state.
+/// The daemon's authoritative process and lifecycle state.
 ///
-/// Disposable attachment projections, retained observations, logs, telemetry,
-/// and UI channels deliberately live outside this type.
+/// It is typed on the internal [`Board`], never on a wire document: the
+/// execution's identity, mode, startup sequence, and typed failure are the
+/// daemon's own facts and live in `daemon::state`, and disposable attachment
+/// projections, retained observations, logs, telemetry, and UI channels live
+/// outside the daemon entirely.
 #[derive(Debug, Clone)]
 pub struct SupervisorState {
-    snapshot: Arc<Mutex<SupervisorSnapshotV0>>,
-    publisher: watch::Sender<SupervisorSnapshotV0>,
+    board: Arc<Mutex<Board>>,
+    publisher: watch::Sender<Board>,
     exact_instances: Arc<Mutex<ExactReadiness>>,
     captured_stderr: Arc<Mutex<HashMap<ProcessKey, VecDeque<String>>>>,
-    startup_started: Arc<Mutex<HashMap<StartupStepKind, Instant>>>,
 }
 
 #[derive(Debug, Default)]
@@ -34,17 +36,16 @@ struct ExactReadiness {
 
 impl Default for SupervisorState {
     fn default() -> Self {
-        let snapshot = initial_snapshot();
-        let (publisher, _) = watch::channel(snapshot.clone());
+        let board = Board::default();
+        let (publisher, _) = watch::channel(board.clone());
         Self {
-            snapshot: Arc::new(Mutex::new(snapshot)),
+            board: Arc::new(Mutex::new(board)),
             publisher,
             exact_instances: Arc::new(Mutex::new(ExactReadiness {
                 enabled: true,
                 instances: HashSet::new(),
             })),
             captured_stderr: Arc::default(),
-            startup_started: Arc::default(),
         }
     }
 }
@@ -82,22 +83,22 @@ impl SupervisorState {
         let robot_key = ProcessKey::robot(instance.robot.clone(), instance.participant.clone());
         let project_key = ProcessKey::project(&instance.participant);
         let key = {
-            let snapshot = self
-                .snapshot
+            let board = self
+                .board
                 .lock()
-                .expect("supervisor state mutex poisoned");
-            if snapshot.processes.contains_key(&robot_key) {
+                .expect("supervisor board mutex poisoned");
+            if board.processes.contains_key(&robot_key) {
                 robot_key
-            } else if snapshot.processes.contains_key(&project_key) {
+            } else if board.processes.contains_key(&project_key) {
                 project_key
             } else {
                 return;
             }
         };
         let starting = self
-            .snapshot
+            .board
             .lock()
-            .expect("supervisor state mutex poisoned")
+            .expect("supervisor board mutex poisoned")
             .processes
             .get(&key)
             .is_some_and(|entry| entry.status.actual == ProcessState::Starting);
@@ -126,9 +127,9 @@ impl SupervisorState {
         state: ProcessState,
         startup_requirement: StartupRequirement,
     ) {
-        self.modify(|snapshot| {
+        self.modify(|board| {
             let artifact = key.to_string();
-            snapshot.processes.insert(
+            board.processes.insert(
                 key.clone(),
                 ProcessEntry {
                     descriptor: ProcessDescriptor {
@@ -154,9 +155,9 @@ impl SupervisorState {
         startup_requirement: StartupRequirement,
     ) {
         if self
-            .snapshot
+            .board
             .lock()
-            .expect("supervisor state mutex poisoned")
+            .expect("supervisor board mutex poisoned")
             .processes
             .contains_key(key)
         {
@@ -180,8 +181,8 @@ impl SupervisorState {
         let stderr_tail = (state == ProcessState::Failed)
             .then(|| self.stderr_tail(&key))
             .flatten();
-        self.modify(|snapshot| {
-            if let Some(entry) = snapshot.processes.get_mut(&key) {
+        self.modify(|board| {
+            if let Some(entry) = board.processes.get_mut(&key) {
                 entry.status.actual = state;
                 if matches!(
                     state,
@@ -214,8 +215,8 @@ impl SupervisorState {
         let key = key.into();
         let detail = detail.into();
         let stderr_tail = self.stderr_tail(&key);
-        self.modify(|snapshot| {
-            if let Some(entry) = snapshot.processes.get_mut(&key) {
+        self.modify(|board| {
+            if let Some(entry) = board.processes.get_mut(&key) {
                 entry.status.actual = ProcessState::Failed;
                 entry.status.last_failure = Some(ProcessFailure {
                     kind,
@@ -230,8 +231,8 @@ impl SupervisorState {
 
     pub fn set_restart_count(&self, key: impl Into<ProcessKey>, count: u32) {
         let key = key.into();
-        self.modify(|snapshot| {
-            if let Some(entry) = snapshot.processes.get_mut(&key) {
+        self.modify(|board| {
+            if let Some(entry) = board.processes.get_mut(&key) {
                 entry.status.restart_count_in_generation = count;
                 entry.status.restart_count_total =
                     entry.status.restart_count_total.saturating_add(1);
@@ -241,8 +242,8 @@ impl SupervisorState {
 
     pub fn set_pid(&self, key: impl Into<ProcessKey>, pid: Option<u32>) {
         let key = key.into();
-        self.modify(|snapshot| {
-            if let Some(entry) = snapshot.processes.get_mut(&key) {
+        self.modify(|board| {
+            if let Some(entry) = board.processes.get_mut(&key) {
                 entry.status.pid = pid;
             }
         });
@@ -251,12 +252,9 @@ impl SupervisorState {
     /// Retain bounded stderr solely as resident-owned failure evidence.
     pub(crate) fn record_captured_stderr(&self, key: &ProcessKey, line: &str) {
         const MAX_LINES: usize = 8;
-        let line = BoundedString::with_max_bytes(
-            line,
-            phoxal_cli_protocol::limits::MAX_PROCESS_STDERR_TAIL_BYTES,
-        )
-        .as_str()
-        .to_string();
+        let line = BoundedString::with_max_bytes(line, StderrTail::MAX_BYTES)
+            .as_str()
+            .to_string();
         let mut stderr = self
             .captured_stderr
             .lock()
@@ -276,8 +274,8 @@ impl SupervisorState {
     }
 
     pub fn set_producer(&self, key: &ProcessKey, producer: ProducerId) {
-        self.modify(|snapshot| {
-            if let Some(entry) = snapshot.processes.get_mut(key) {
+        self.modify(|board| {
+            if let Some(entry) = board.processes.get_mut(key) {
                 entry.status.producer = Some(producer);
             }
         });
@@ -287,15 +285,15 @@ impl SupervisorState {
     /// incarnation has not opened its session yet, so it has no producer to
     /// report - and a restart fenced on the previous one must not match.
     pub fn clear_producer(&self, key: &ProcessKey) {
-        self.modify(|snapshot| {
-            if let Some(entry) = snapshot.processes.get_mut(key) {
+        self.modify(|board| {
+            if let Some(entry) = board.processes.get_mut(key) {
                 entry.status.producer = None;
             }
         });
     }
 
     pub fn set_lifecycle(&self, lifecycle: ProjectLifecycle) {
-        self.modify(|snapshot| snapshot.lifecycle = lifecycle);
+        self.modify(|board| board.lifecycle = lifecycle);
     }
 
     /// Record the lifecycle as `Failed` together with the reason, in one
@@ -313,212 +311,47 @@ impl SupervisorState {
     /// unconditionally without racing a `lifecycle != Failed` guard against
     /// this method's own writes.
     pub fn fail(&self, reason: &str) {
-        let reason = BoundedString::with_max_bytes(
-            reason,
-            phoxal_cli_protocol::limits::MAX_SUPERVISOR_FAILURE_REASON_BYTES,
-        )
-        .as_str()
-        .to_string();
-        self.modify(|snapshot| {
-            snapshot.lifecycle = ProjectLifecycle::Failed;
-            if snapshot.failure.is_none() {
-                snapshot.failure = Some(reason);
+        let reason = BoundedString::with_max_bytes(reason, Detail::MAX_BYTES)
+            .as_str()
+            .to_string();
+        self.modify(|board| {
+            board.lifecycle = ProjectLifecycle::Failed;
+            if board.failure.is_none() {
+                board.failure = Some(reason);
             }
-        });
-    }
-
-    pub fn configure(
-        &self,
-        project: impl Into<String>,
-        framework_train: impl Into<String>,
-        execution_id: ExecutionId,
-        router_endpoint: impl Into<String>,
-    ) {
-        self.modify(|snapshot| {
-            snapshot.project = bounded_text(&project.into());
-            snapshot.entry = bounded_text(
-                &phoxal_cli_core::project::resolver::discover_robot_yaml(std::path::Path::new(
-                    &snapshot.project,
-                ))
-                .unwrap_or_else(|_| std::path::Path::new(&snapshot.project).join("robot.yaml"))
-                .display()
-                .to_string(),
-            );
-            snapshot.framework_train = bounded_text(&framework_train.into());
-            snapshot.execution_id = execution_id;
-            snapshot.router = bounded_text(&router_endpoint.into());
-        });
-    }
-
-    pub fn set_router_endpoint(&self, endpoint: impl Into<String>) {
-        self.modify(|snapshot| snapshot.router = bounded_text(&endpoint.into()));
-    }
-
-    /// Record whether this robot can be driven by manual input. The client
-    /// reads the pad locally but needs the robot's authored parameters to turn
-    /// a trigger into a speed (organization#978).
-    pub fn set_manual_input(&self, manual_input: phoxal_cli_protocol::ManualInput) {
-        self.modify(|snapshot| snapshot.manual_input = manual_input);
-    }
-
-    pub fn set_simulation_info(&self, profile: impl Into<String>, world: impl Into<String>) {
-        self.modify(|snapshot| {
-            snapshot.simulation = Some(phoxal_cli_core::runtime::SimulationSessionInfo {
-                profile: bounded_text(&profile.into()),
-                world: bounded_text(&world.into()),
-            });
-        });
-    }
-
-    pub fn plan_startup_steps(&self) {
-        let mut started = self
-            .startup_started
-            .lock()
-            .expect("startup timing mutex poisoned");
-        started.clear();
-        started.insert(StartupStepKind::Project, Instant::now());
-        drop(started);
-        self.modify(|snapshot| {
-            snapshot.startup = StartupStatus {
-                steps: [
-                    StartupStepKind::Project,
-                    StartupStepKind::PrepareRuntime,
-                    StartupStepKind::Infrastructure,
-                    StartupStepKind::Graph,
-                ]
-                .into_iter()
-                .map(|kind| StartupStep {
-                    kind,
-                    state: if kind == StartupStepKind::Project {
-                        StartupStepState::Active
-                    } else {
-                        StartupStepState::Pending
-                    },
-                    detail: None,
-                    elapsed_ms: None,
-                })
-                .collect(),
-            };
-        });
-    }
-
-    pub fn step_active(&self, kind: StartupStepKind) {
-        let mut started = self
-            .startup_started
-            .lock()
-            .expect("startup timing mutex poisoned");
-        self.modify(|snapshot| {
-            if let Some(step) = startup_step_mut(snapshot, kind) {
-                if step.state == StartupStepState::Active {
-                    return;
-                }
-                started.insert(kind, Instant::now());
-                step.state = StartupStepState::Active;
-                step.elapsed_ms = None;
-            }
-        });
-    }
-
-    pub fn step_detail(&self, kind: StartupStepKind, detail: impl AsRef<str>) {
-        let detail = bounded_step_detail(detail.as_ref());
-        self.modify(|snapshot| {
-            if let Some(step) = startup_step_mut(snapshot, kind) {
-                step.detail = Some(detail);
-            }
-        });
-    }
-
-    pub fn step_done(&self, kind: StartupStepKind) {
-        let mut started = self
-            .startup_started
-            .lock()
-            .expect("startup timing mutex poisoned");
-        self.modify(|snapshot| {
-            if let Some(step) = startup_step_mut(snapshot, kind) {
-                if step.state == StartupStepState::Done {
-                    return;
-                }
-                step.state = StartupStepState::Done;
-                step.elapsed_ms = started.remove(&kind).map(|started| {
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-                });
-            }
-        });
-    }
-
-    pub fn step_failed(&self, kind: StartupStepKind, error: impl AsRef<str>) {
-        let mut started = self
-            .startup_started
-            .lock()
-            .expect("startup timing mutex poisoned");
-        let detail = bounded_step_detail(error.as_ref());
-        self.modify(|snapshot| {
-            if let Some(step) = startup_step_mut(snapshot, kind) {
-                if step.state == StartupStepState::Failed {
-                    return;
-                }
-                step.state = StartupStepState::Failed;
-                step.detail = Some(detail);
-                step.elapsed_ms = started.remove(&kind).map(|started| {
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-                });
-            }
-        });
-    }
-
-    pub fn fail_active_step(&self, error: impl AsRef<str>) {
-        let mut started = self
-            .startup_started
-            .lock()
-            .expect("startup timing mutex poisoned");
-        let detail = bounded_step_detail(error.as_ref());
-        self.modify(|snapshot| {
-            let Some(step) = snapshot
-                .startup
-                .steps
-                .iter_mut()
-                .find(|step| step.state == StartupStepState::Active)
-            else {
-                return;
-            };
-            step.state = StartupStepState::Failed;
-            step.detail = Some(detail);
-            step.elapsed_ms = started
-                .remove(&step.kind)
-                .map(|started| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
         });
     }
 
     #[must_use]
     pub fn process_state(&self, key: &ProcessKey) -> Option<ProcessState> {
-        self.snapshot
+        self.board
             .lock()
-            .expect("supervisor state mutex poisoned")
+            .expect("supervisor board mutex poisoned")
             .processes
             .get(key)
             .map(|entry| entry.status.actual)
     }
 
     #[must_use]
-    pub fn supervisor_snapshot(&self) -> SupervisorSnapshotV0 {
-        self.snapshot
+    pub fn snapshot(&self) -> Board {
+        self.board
             .lock()
-            .expect("supervisor state mutex poisoned")
+            .expect("supervisor board mutex poisoned")
             .clone()
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<SupervisorSnapshotV0> {
+    pub fn subscribe(&self) -> watch::Receiver<Board> {
         self.publisher.subscribe()
     }
 
-    fn modify(&self, update: impl FnOnce(&mut SupervisorSnapshotV0)) {
-        let mut snapshot = self
-            .snapshot
+    fn modify(&self, update: impl FnOnce(&mut Board)) {
+        let mut board = self
+            .board
             .lock()
-            .expect("supervisor state mutex poisoned");
-        update(&mut snapshot);
-        snapshot.revision = snapshot.revision.saturating_add(1);
-        self.publisher.send_replace(snapshot.clone());
+            .expect("supervisor board mutex poisoned");
+        update(&mut board);
+        board.revision = board.revision.saturating_add(1);
+        self.publisher.send_replace(board.clone());
     }
 
     fn stderr_tail(&self, key: &ProcessKey) -> Option<BoundedString> {
@@ -529,41 +362,9 @@ impl SupervisorState {
             .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"))
             .filter(|tail| !tail.is_empty())
             .map(|tail| {
-                BoundedString::with_max_bytes(
-                    tail,
-                    phoxal_cli_protocol::limits::MAX_PROCESS_STDERR_TAIL_BYTES,
-                )
+                BoundedString::with_max_bytes(tail, StderrTail::MAX_BYTES)
             })
     }
-}
-
-fn startup_step_mut(
-    snapshot: &mut SupervisorSnapshotV0,
-    kind: StartupStepKind,
-) -> Option<&mut StartupStep> {
-    snapshot
-        .startup
-        .steps
-        .iter_mut()
-        .find(|step| step.kind == kind)
-}
-
-#[cfg(test)]
-fn startup_step(snapshot: &SupervisorSnapshotV0, kind: StartupStepKind) -> Option<&StartupStep> {
-    snapshot.startup.steps.iter().find(|step| step.kind == kind)
-}
-
-fn bounded_step_detail(value: &str) -> String {
-    let maximum = phoxal_cli_protocol::limits::MAX_STEP_DETAIL_BYTES;
-    if value.len() <= maximum {
-        return value.to_string();
-    }
-    let suffix = "…";
-    let mut end = maximum.saturating_sub(suffix.len());
-    while !value.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    format!("{}{}", &value[..end], suffix)
 }
 
 fn failure_kind(detail: Option<&str>) -> ProcessFailureKind {
@@ -608,7 +409,7 @@ mod tests {
         // A starting process has no producer at all: nothing mints one, so the
         // snapshot reports "no session yet" rather than an intention.
         assert_eq!(
-            state.supervisor_snapshot().processes[&key].status.producer,
+            state.snapshot().processes[&key].status.producer,
             None
         );
 
@@ -617,7 +418,7 @@ mod tests {
         state.record_instance_presence(instance.clone(), producer(22), true);
         assert_eq!(state.process_state(&key), Some(ProcessState::Ready));
         assert_eq!(
-            state.supervisor_snapshot().processes[&key].status.producer,
+            state.snapshot().processes[&key].status.producer,
             Some(producer(22))
         );
 
@@ -652,7 +453,7 @@ mod tests {
         consumer.changed().await.unwrap();
         assert_eq!(
             consumer.borrow_and_update().revision,
-            state.supervisor_snapshot().revision
+            state.snapshot().revision
         );
     }
 
@@ -669,7 +470,7 @@ mod tests {
         state.set_producer(&key, producer(91));
         state.record_captured_stderr(&key, &"x".repeat(10_000));
         state.record_failure(&key, ProcessFailureKind::Exit, None, "x".repeat(10_000));
-        let snapshot = state.supervisor_snapshot();
+        let snapshot = state.snapshot();
         let entry = &snapshot.processes[&key];
         let failure = entry.status.last_failure.clone().unwrap();
         assert!(failure.detail.as_str().len() <= BoundedString::FAILURE_MAX_BYTES);
@@ -682,79 +483,7 @@ mod tests {
         );
         assert!(
             failure.stderr_tail.unwrap().as_str().len()
-                <= phoxal_cli_protocol::limits::MAX_PROCESS_STDERR_TAIL_BYTES
-        );
-    }
-
-    #[test]
-    fn startup_steps_publish_typed_state_detail_and_elapsed_time() {
-        let state = SupervisorState::new();
-        state.plan_startup_steps();
-        let planned = state.supervisor_snapshot();
-        assert_eq!(planned.startup.steps.len(), 4);
-        assert_eq!(planned.startup.steps[0].kind, StartupStepKind::Project);
-        assert_eq!(planned.startup.steps[0].state, StartupStepState::Active);
-        assert!(
-            planned.startup.steps[1..]
-                .iter()
-                .all(|step| step.state == StartupStepState::Pending)
-        );
-
-        state.step_detail(StartupStepKind::Project, "robot.yaml · framework 0.45.1");
-        state.step_done(StartupStepKind::Project);
-        state.step_active(StartupStepKind::PrepareRuntime);
-        state.step_failed(
-            StartupStepKind::PrepareRuntime,
-            "x".repeat(phoxal_cli_protocol::limits::MAX_STEP_DETAIL_BYTES * 2),
-        );
-
-        let snapshot = state.supervisor_snapshot();
-        let project = startup_step(&snapshot, StartupStepKind::Project).unwrap();
-        assert_eq!(project.state, StartupStepState::Done);
-        assert!(project.elapsed_ms.is_some());
-        let prepare = startup_step(&snapshot, StartupStepKind::PrepareRuntime).unwrap();
-        assert_eq!(prepare.state, StartupStepState::Failed);
-        assert!(prepare.elapsed_ms.is_some());
-        assert!(
-            prepare.detail.as_ref().unwrap().len()
-                <= phoxal_cli_protocol::limits::MAX_STEP_DETAIL_BYTES
-        );
-    }
-
-    #[test]
-    fn completed_startup_step_accepts_late_detail_and_may_be_reactivated() {
-        let state = SupervisorState::new();
-        state.plan_startup_steps();
-        state.step_detail(StartupStepKind::Project, "initial");
-        state.step_done(StartupStepKind::Project);
-        state.step_detail(StartupStepKind::Project, "late");
-        let snapshot = state.supervisor_snapshot();
-        assert_eq!(
-            startup_step(&snapshot, StartupStepKind::Project)
-                .unwrap()
-                .detail
-                .as_deref(),
-            Some("late")
-        );
-
-        state.step_active(StartupStepKind::Project);
-        let snapshot = state.supervisor_snapshot();
-        let project = startup_step(&snapshot, StartupStepKind::Project).unwrap();
-        assert_eq!(project.state, StartupStepState::Active);
-        assert_eq!(project.elapsed_ms, None);
-
-        state.step_active(StartupStepKind::Project);
-        state.step_done(StartupStepKind::Project);
-        let first_elapsed = startup_step(&state.supervisor_snapshot(), StartupStepKind::Project)
-            .unwrap()
-            .elapsed_ms;
-        state.step_done(StartupStepKind::Project);
-        assert_eq!(
-            startup_step(&state.supervisor_snapshot(), StartupStepKind::Project)
-                .unwrap()
-                .elapsed_ms,
-            first_elapsed,
-            "repeated terminal updates must not erase the original timing"
+                <= StderrTail::MAX_BYTES
         );
     }
 
@@ -777,7 +506,7 @@ mod tests {
         let state = SupervisorState::new();
         state.fail("stage 'router' stalled: connection refused");
         state.fail("participant 'drive' exhausted its restart policy");
-        let snapshot = state.supervisor_snapshot();
+        let snapshot = state.snapshot();
         assert_eq!(snapshot.lifecycle, ProjectLifecycle::Failed);
         assert_eq!(
             snapshot.failure.as_deref(),
@@ -790,11 +519,11 @@ mod tests {
     fn fail_bounds_an_oversized_reason() {
         let state = SupervisorState::new();
         state.fail(&"x".repeat(1_000_000));
-        let snapshot = state.supervisor_snapshot();
+        let snapshot = state.snapshot();
         assert_eq!(snapshot.lifecycle, ProjectLifecycle::Failed);
         assert!(
             snapshot.failure.expect("reason recorded").len()
-                <= phoxal_cli_protocol::limits::MAX_SUPERVISOR_FAILURE_REASON_BYTES
+                <= Detail::MAX_BYTES
         );
     }
 
@@ -841,7 +570,7 @@ mod tests {
         }
         state.set_restart_count(&left, 1);
         state.set_restart_count(&right, 3);
-        let snapshot = state.supervisor_snapshot();
+        let snapshot = state.snapshot();
         assert_eq!(
             snapshot.processes[&left].status.restart_count_in_generation,
             1

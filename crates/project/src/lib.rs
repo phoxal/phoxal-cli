@@ -112,52 +112,6 @@ pub struct PreparedExecution {
     pub participants: Vec<PreparedParticipant>,
     pub router: PreparedRouter,
     pub simulation: Option<PreparedSimulation>,
-    /// Whether this robot can be driven by manual input, derived once from the
-    /// staged robot model. The client reads the operator's pad locally but
-    /// needs these authored parameters to turn a trigger into a physical speed
-    /// (organization#978), so the resident publishes it on the snapshot.
-    pub manual_input: phoxal_cli_protocol::ManualInput,
-}
-
-/// Derive the manual-input capability from a staged bundle's canonical
-/// `robot.json`.
-///
-/// A robot that cannot be driven manually is not an error: the reason is
-/// reported to the operator instead of an empty device list, and a model that
-/// cannot even be read is reported the same way rather than failing the run.
-#[must_use]
-pub fn manual_input_from_staged_root(
-    staged_root: &std::path::Path,
-) -> phoxal_cli_protocol::ManualInput {
-    use phoxal_cli_protocol::{ManualDrive, ManualInput};
-
-    let robot = match phoxal_manifest::bundle::FinalizedBundle::load(staged_root) {
-        Ok(bundle) => bundle.into_robot(),
-        Err(error) => {
-            return ManualInput::Unsupported(format!(
-                "failed to read the finalized bundle at {}: {error}",
-                staged_root.display()
-            ));
-        }
-    };
-    let limits = match robot.motion_limits().validate() {
-        Ok(limits) => limits,
-        Err(error) => return ManualInput::Unsupported(error.to_string()),
-    };
-    let phoxal_model::robot::KinematicConfig::Differential { wheel_base_m, .. } = robot.kinematic()
-    else {
-        return ManualInput::Unsupported(
-            "manual input requires differential robot kinematics".to_string(),
-        );
-    };
-    match ManualDrive::derive(
-        *wheel_base_m,
-        limits.max_linear_speed_mps,
-        limits.max_angular_speed_radps,
-    ) {
-        Ok(drive) => ManualInput::Supported(drive),
-        Err(reason) => ManualInput::Unsupported(reason),
-    }
 }
 
 pub struct ValidateRequest {

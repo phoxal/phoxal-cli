@@ -5,6 +5,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod advisory;
 pub mod check;
 pub mod identity;
 pub mod project;

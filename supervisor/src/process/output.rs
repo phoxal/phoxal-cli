@@ -7,27 +7,6 @@ use tokio::io::AsyncReadExt;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-pub(crate) fn requested_stop_exit_is_clean(
-    status: &std::process::ExitStatus,
-    terminate_sent: bool,
-) -> bool {
-    if !terminate_sent {
-        return false;
-    }
-    if status.success() {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        status.signal() == Some(libc::SIGTERM)
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
 pub(crate) fn spawn_output_reader<R>(
     board: SupervisorState,
     id: impl Into<ProcessKey>,

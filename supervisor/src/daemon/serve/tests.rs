@@ -37,7 +37,7 @@ struct Fixture {
     stop: CancellationToken,
     commands: mpsc::Receiver<crate::SupervisorAction>,
     _bundle: tempfile::TempDir,
-    _router: crate::EmbeddedRouter,
+    _router: crate::router::EmbeddedRouter,
     _socket: tempfile::TempDir,
     _served: tokio::task::JoinHandle<anyhow::Result<()>>,
     _bridge: tokio::task::JoinHandle<()>,

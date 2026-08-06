@@ -15,10 +15,66 @@
 //! supervisor API on the bus - `phoxal attach`, `phoxal status`, `phoxal stop`
 //! - not through a second invocation of this binary.
 
+#![allow(clippy::module_name_repetitions)]
+
+
+use std::time::{Duration, Instant};
+
+// Four bytes per character preserves the observation crate's 4,096-character
+// routed-log bound even for maximum-width UTF-8 input.
+const MAX_CAPTURED_LINE_BYTES: usize = 16 * 1024;
+
+/// A readiness/stage-wait budget for one supervised session.
+///
+/// This is explicit rather than a large duration sentinel: an interactive
+/// operator may wait indefinitely, while a headless invocation needs a
+/// deterministic deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitBudget {
+    /// No deadline is applied.
+    Unbounded,
+    /// Fail after the supplied duration.
+    Bounded(Duration),
+}
+
+impl Default for WaitBudget {
+    /// Default to an already-elapsed bounded wait so a derived default can
+    /// never silently turn a missing policy into an unbounded wait.
+    fn default() -> Self {
+        Self::Bounded(Duration::default())
+    }
+}
+
+impl WaitBudget {
+    /// Resolve this policy into the absolute deadline used by a wait loop.
+    #[must_use]
+    pub fn deadline_from(self, now: Instant) -> Option<Instant> {
+        match self {
+            Self::Unbounded => None,
+            Self::Bounded(duration) => Some(now + duration),
+        }
+    }
+}
+
+mod daemon;
+mod process;
+mod router;
+mod state;
+mod systemd;
+
+pub(crate) use phoxal_cli_core::runtime::format_duration;
+pub(crate) use phoxal_cli_core::runtime::{ParticipantSpec, ProcessState};
+
+pub(crate) use process::child::ManagedChild;
+pub(crate) use process::spec::{SupervisorAction, SupervisorActionReceiver, SupervisorOptions};
+pub(crate) use process::stages::{SupervisionStage, stages_for_run};
+pub(crate) use process::supervise::supervise_until_shutdown;
+pub(crate) use router::{RouterLost, start_embedded_router};
+pub(crate) use state::SupervisorState;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use phoxal_cli_supervisor::daemon;
 use tracing_subscriber::EnvFilter;
 
 /// Multi-thread: Zenoh refuses to run on Tokio's current-thread scheduler, and

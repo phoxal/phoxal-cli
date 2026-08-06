@@ -291,6 +291,19 @@ async fn execute(requested_root: &Path, state: &ExecutionState) -> Result<()> {
     // producer from the liveliness token that incarnation publishes.
     let liveliness = observe_participants(&bus, state.board(), &robot_key).await?;
 
+    // Under systemd this unit is `Type=notify`, and this daemon is what the
+    // unit starts (organization#978): readiness and the watchdog are the
+    // daemon's to signal, because it is the only process that knows when the
+    // graph became ready. A graph that never reaches readiness never signals,
+    // which is exactly what makes systemd time the start out and mark the unit
+    // failed.
+    let readiness_notify = crate::systemd::notify::SdNotify::from_env()
+        .unwrap_or_else(|error| {
+            tracing::warn!("ignoring an unusable systemd notify socket: {error:#}");
+            None
+        })
+        .map(|notify| tokio::spawn(notify_readiness(notify, state.clone())));
+
     // 12. Launch, then wait. The router is this process's own state, so there
     // is no router child to supervise and no recovery epoch to rebuild the
     // graph around.
@@ -303,6 +316,7 @@ async fn execute(requested_root: &Path, state: &ExecutionState) -> Result<()> {
     let outcome = crate::supervise_until_shutdown(
         stages_for_run(specs, WaitBudget::Bounded(READINESS_BUDGET)),
         state.board().clone(),
+        std::sync::Arc::new(ParticipantStageProgress(state.clone())),
         SupervisorOptions {
             action_rx: Some(crate::SupervisorActionReceiver::new(action_rx)),
             token: shutdown.clone(),
@@ -331,6 +345,9 @@ async fn execute(requested_root: &Path, state: &ExecutionState) -> Result<()> {
     }
 
     drop(liveliness);
+    if let Some(readiness_notify) = readiness_notify {
+        readiness_notify.abort();
+    }
     shutdown.cancel();
     watchdog.abort();
     if let Err(error) = bus.close().await {
@@ -526,5 +543,68 @@ mod tests {
             router_endpoint(Path::new("/work/rover/.phoxal/run/supervisor.sock")),
             "unixsock-stream//work/rover/.phoxal/run/supervisor.sock"
         );
+    }
+}
+
+/// The daemon's `Participants` startup step, advanced by the supervision loop.
+///
+/// The loop's stages are all inside that one step - it is the last step in the
+/// daemon's own sequence, and everything before it happened before any process
+/// was spawned. Detail names the stage that just completed, so an operator
+/// watching startup sees which barrier is holding.
+struct ParticipantStageProgress(ExecutionState);
+
+impl crate::process::stages::StageProgress for ParticipantStageProgress {
+    fn started(&self, label: &str) {
+        self.0.step_detail(StartupStepKind::Participants, label);
+    }
+
+    fn detail(&self, detail: String) {
+        self.0.step_detail(StartupStepKind::Participants, detail);
+    }
+
+    fn finished(&self) {
+        self.0.step_done(StartupStepKind::Participants);
+    }
+
+    fn failed(&self, reason: &str) {
+        self.0.step_failed(StartupStepKind::Participants, reason);
+    }
+}
+
+/// Signal `READY=1` once the execution is ready, then ping `WATCHDOG=1` at the
+/// notify socket's cadence until the task is aborted.
+///
+/// `Degraded` counts as ready: an optional participant that failed does not
+/// make the robot unavailable, and refusing to signal would have systemd
+/// restart a graph that is running.
+async fn notify_readiness(notify: crate::systemd::notify::SdNotify, state: ExecutionState) {
+    use phoxal_supervisor_api::Lifecycle;
+    let mut snapshots = state.subscribe();
+    loop {
+        match snapshots.borrow_and_update().lifecycle {
+            Lifecycle::Ready | Lifecycle::Degraded => break,
+            Lifecycle::Failed | Lifecycle::Stopping | Lifecycle::Stopped => return,
+            Lifecycle::Starting => {}
+        }
+        if snapshots.changed().await.is_err() {
+            return;
+        }
+    }
+    if let Err(error) = notify.notify_ready() {
+        tracing::warn!("failed to signal systemd readiness: {error:#}");
+        return;
+    }
+    let Some(interval) = notify.watchdog_interval() else {
+        return;
+    };
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        if let Err(error) = notify.notify_watchdog() {
+            tracing::warn!("failed to ping the systemd watchdog: {error:#}");
+            return;
+        }
     }
 }

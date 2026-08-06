@@ -24,7 +24,7 @@
 
 use phoxal_bus::{Bus, ServerQueryable};
 use phoxal_cli_core::runtime::{ProcessKey as CoreProcessKey, ProjectLifecycle};
-use phoxal_cli_protocol::SupervisorSnapshotV0;
+use crate::state::Board;
 use phoxal_supervisor_api::{Command, CommandOutcome, CommandRejection, supervisor};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -52,7 +52,7 @@ pub(crate) enum Decision {
 }
 
 /// Decide one command against the current state. Pure: it performs nothing.
-pub(crate) fn decide(command: &Command, roster: &Roster, board: &SupervisorSnapshotV0) -> Decision {
+pub(crate) fn decide(command: &Command, roster: &Roster, board: &Board) -> Decision {
     // An execution that is on its way out accepts nothing, including a second
     // stop: a client is told the run is already ending rather than being given
     // an acknowledgement that changes nothing.
@@ -99,7 +99,7 @@ pub(crate) async fn serve(
             let outcome = match decide(
                 &command,
                 &state.roster(),
-                &state.board().supervisor_snapshot(),
+                &state.board().snapshot(),
             ) {
                 Decision::Rejected(reason) => {
                     tracing::debug!(?reason, "rejected a supervisor command");
@@ -179,7 +179,7 @@ mod tests {
             decide(
                 &restart(WireProcessKey::Brain, 7),
                 &roster,
-                &board.supervisor_snapshot()
+                &board.snapshot()
             ),
             Decision::Restart(brain)
         );
@@ -195,7 +195,7 @@ mod tests {
             decide(
                 &restart(WireProcessKey::Brain, 7),
                 &roster,
-                &board.supervisor_snapshot()
+                &board.snapshot()
             ),
             Decision::Rejected(CommandRejection::ProducerFenced)
         );
@@ -211,7 +211,7 @@ mod tests {
             decide(
                 &restart(WireProcessKey::Brain, 7),
                 &roster,
-                &board.supervisor_snapshot()
+                &board.snapshot()
             ),
             Decision::Rejected(CommandRejection::ProducerFenced)
         );
@@ -228,7 +228,7 @@ mod tests {
                     7
                 ),
                 &roster(),
-                &board_with_selected_processes().supervisor_snapshot()
+                &board_with_selected_processes().snapshot()
             ),
             Decision::Rejected(CommandRejection::UnknownProcess)
         );
@@ -245,7 +245,7 @@ mod tests {
             .clone();
         board.set_producer(&brain, producer(7));
         assert_eq!(
-            decide(&Command::Stop, &roster, &board.supervisor_snapshot()),
+            decide(&Command::Stop, &roster, &board.snapshot()),
             Decision::Stop
         );
 
@@ -257,7 +257,7 @@ mod tests {
             let board = board_with_selected_processes();
             board.set_producer(&brain, producer(7));
             board.set_lifecycle(lifecycle);
-            let snapshot = board.supervisor_snapshot();
+            let snapshot = board.snapshot();
             assert_eq!(
                 decide(&Command::Stop, &roster, &snapshot),
                 Decision::Rejected(CommandRejection::NotRunning),

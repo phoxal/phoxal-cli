@@ -1,6 +1,6 @@
 //! Cross-platform advisory file locking.
 //!
-//! Used by [`crate::ProjectLock`] for the project-operation lock -
+//! Used by the client's project-operation lock for the project-operation lock -
 //! Phoxal-owned state (candidate publication, bundle/simulation root
 //! replacement, Webots staging) that
 //! Cargo's own build-directory locking does not cover.
@@ -8,7 +8,7 @@
 use std::fs;
 
 #[cfg(unix)]
-pub(crate) fn try_advisory_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
+pub fn try_advisory_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
     let operation = if exclusive {
@@ -24,7 +24,7 @@ pub(crate) fn try_advisory_lock(file: &fs::File, exclusive: bool) -> std::io::Re
 }
 
 #[cfg(unix)]
-pub(crate) fn unlock_advisory(file: &fs::File) -> std::io::Result<()> {
+pub fn unlock_advisory(file: &fs::File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } == 0 {
@@ -35,7 +35,7 @@ pub(crate) fn unlock_advisory(file: &fs::File) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-pub(crate) fn try_advisory_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
+pub fn try_advisory_lock(file: &fs::File, exclusive: bool) -> std::io::Result<()> {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
 
@@ -66,7 +66,7 @@ pub(crate) fn try_advisory_lock(file: &fs::File, exclusive: bool) -> std::io::Re
 }
 
 #[cfg(windows)]
-pub(crate) fn unlock_advisory(file: &fs::File) -> std::io::Result<()> {
+pub fn unlock_advisory(file: &fs::File) -> std::io::Result<()> {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
 

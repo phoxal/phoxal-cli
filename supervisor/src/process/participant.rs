@@ -2,21 +2,18 @@
 
 use super::{
     ParticipantSpec, ProcessState, RestartPolicy, SupervisorState, ensure_process_group_stopped,
-    join_reader, kill_child_process_group, requested_stop_exit_is_clean, send_process_group_signal,
+    join_reader, send_process_group_signal,
     send_process_signal, spawn_output_reader, stop_child,
 };
 use crate::ManagedChild;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
 use phoxal_cli_core::runtime::{ExitDescription, ProcessFailureKind, ReadinessPolicy};
 use std::collections::VecDeque;
 use std::process::Stdio;
-use std::time::Duration;
 use std::time::Instant;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 
 pub(crate) struct RunningParticipant {
     pub(crate) spec: ParticipantSpec,
@@ -184,85 +181,6 @@ impl RunningParticipant {
         let detail = format!("{operation} failed: {error:#}");
         tracing::warn!(process = %self.spec.key, %detail, "supervised process spawn failed");
         board.record_failure(&self.spec.key, ProcessFailureKind::Spawn, None, detail);
-    }
-
-    pub(crate) async fn wait_for_requested_stop(
-        &mut self,
-        board: &SupervisorState,
-        budget: Duration,
-        terminate_sent: bool,
-    ) -> Result<bool> {
-        let Some(child) = self.child.as_mut() else {
-            return Ok(false);
-        };
-        let pid = child.id();
-        let status = match timeout(budget, child.wait()).await {
-            Ok(status) => status.context("failed to wait for requested child stop")?,
-            Err(_) => return Ok(false),
-        };
-        // The leader has been reaped: clear its PID before any fallible
-        // descendant cleanup so forced-shutdown code can never signal a
-        // recycled process-group id.
-        self.child = None;
-        board.set_pid(&self.spec.key, None);
-        let group_stop = async {
-            if self.spec.process_group
-                && let Some(pid) = pid
-            {
-                ensure_process_group_stopped(pid).await?;
-            }
-            Ok::<(), anyhow::Error>(())
-        }
-        .await;
-        join_reader(self.stdout_task.take()).await;
-        join_reader(self.stderr_task.take()).await;
-        group_stop?;
-        self.failed = true;
-        if requested_stop_exit_is_clean(&status, terminate_sent) {
-            board.set_state(
-                &self.spec.key,
-                ProcessState::Stopped,
-                Some(format!("stopped after requested SIGTERM ({status})")),
-            );
-        } else {
-            board.set_state(
-                &self.spec.key,
-                ProcessState::Failed,
-                Some(format!(
-                    "exited independently during requested stop ({status})"
-                )),
-            );
-        }
-        Ok(true)
-    }
-
-    pub(crate) async fn kill_process_group_after_timeout(
-        &mut self,
-        board: &SupervisorState,
-    ) -> Result<()> {
-        if !self.spec.process_group {
-            bail!(
-                "requested-stop fallback requires an isolated process group for {}",
-                self.spec.id
-            );
-        }
-        let Some(mut child) = self.child.take() else {
-            return Ok(());
-        };
-        tracing::warn!(process = %self.spec.key, "SIGTERM grace expired; killing process group");
-        if let Err(error) = kill_child_process_group(&mut child).await {
-            self.child = Some(child);
-            return Err(error);
-        }
-        join_reader(self.stdout_task.take()).await;
-        join_reader(self.stderr_task.take()).await;
-        self.failed = true;
-        board.set_state(
-            &self.spec.key,
-            ProcessState::Failed,
-            Some("SIGTERM grace expired; SIGKILL fallback used".to_string()),
-        );
-        Ok(())
     }
 
     pub(crate) async fn poll(

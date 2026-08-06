@@ -1105,12 +1105,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
-
-[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3146,26 +3140,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-cli"
+name = "phoxal-cli-catalog"
+version = "0.35.0"
+
+[[package]]
+name = "phoxal-cli-client"
 version = "0.35.0"
 dependencies = [
  "anyhow",
  "clap",
  "console",
- "dotenvy",
  "flate2",
+ "gilrs",
  "hex",
  "libc",
+ "nalgebra",
+ "phoxal-api",
+ "phoxal-bus",
  "phoxal-cli-catalog",
- "phoxal-cli-client",
  "phoxal-cli-core",
  "phoxal-cli-observation",
  "phoxal-cli-project",
- "phoxal-cli-protocol",
- "phoxal-cli-supervisor",
  "phoxal-cli-ui",
  "phoxal-manifest",
  "phoxal-model",
+ "phoxal-runtime-contract",
+ "phoxal-supervisor-api",
+ "phoxal-supervisor-client",
  "reqwest",
  "self-replace",
  "semver",
@@ -3181,34 +3182,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-cli-catalog"
-version = "0.35.0"
-
-[[package]]
-name = "phoxal-cli-client"
-version = "0.35.0"
-dependencies = [
- "anyhow",
- "gilrs",
- "phoxal-api",
- "phoxal-bus",
- "phoxal-cli-catalog",
- "phoxal-cli-core",
- "phoxal-cli-observation",
- "phoxal-cli-protocol",
- "phoxal-runtime-contract",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "phoxal-cli-core"
 version = "0.35.0"
 dependencies = [
  "anyhow",
  "hex",
+ "libc",
  "object",
  "phoxal-api",
  "phoxal-bus",
@@ -3231,6 +3210,8 @@ version = "0.35.0"
 dependencies = [
  "phoxal-cli-catalog",
  "phoxal-cli-core",
+ "phoxal-runtime-contract",
+ "phoxal-supervisor-api",
 ]
 
 [[package]]
@@ -3251,7 +3232,6 @@ dependencies = [
  "phoxal-bus",
  "phoxal-cli-catalog",
  "phoxal-cli-core",
- "phoxal-cli-protocol",
  "phoxal-manifest",
  "phoxal-model",
  "phoxal-runtime-contract",
@@ -3269,17 +3249,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-cli-protocol"
-version = "0.35.0"
-dependencies = [
- "anyhow",
- "phoxal-cli-core",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "phoxal-cli-supervisor"
 version = "0.35.0"
 dependencies = [
@@ -3290,7 +3259,6 @@ dependencies = [
  "phoxal-bus",
  "phoxal-cli-catalog",
  "phoxal-cli-core",
- "phoxal-cli-protocol",
  "phoxal-manifest",
  "phoxal-model",
  "phoxal-runtime-contract",

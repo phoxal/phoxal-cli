@@ -114,10 +114,6 @@ impl ManagedChild {
         let inner = command.spawn().context("spawn managed child")?;
         Ok(Self { inner })
     }
-
-    pub(crate) async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.inner.wait().await
-    }
 }
 
 impl Deref for ManagedChild {

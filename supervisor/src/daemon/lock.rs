@@ -41,7 +41,7 @@ impl SupervisorLock {
             .write(true)
             .open(path)
             .with_context(|| format!("failed to open the supervisor lock {}", path.display()))?;
-        if crate::lock::advisory::try_advisory_lock(&file, true).is_err() {
+        if phoxal_cli_core::advisory::try_advisory_lock(&file, true).is_err() {
             bail!(
                 "another phoxald already owns this bundle's execution (the supervisor lock {} is \
                  held); attach to it or stop it rather than starting a second daemon",
