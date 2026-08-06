@@ -92,7 +92,7 @@ pub fn resolve_locked_project(project_root: &Path, offline: bool) -> Result<Lock
     let lock = project_root.join("Cargo.lock");
     ensure!(
         manifest.is_file(),
-        "robot project is missing root Cargo.toml train anchor; add a non-published root package depending on workspace phoxal and commit its Cargo.lock"
+        "robot project is missing its root Cargo.toml; add the non-published root brain package depending on workspace phoxal and commit its Cargo.lock"
     );
     ensure!(
         lock.is_file(),
@@ -111,21 +111,21 @@ pub fn resolve_locked_project(project_root: &Path, offline: bool) -> Result<Lock
                 .canonicalize()
                 .is_ok_and(|path| path == root_manifest)
         })
-        .context("root Cargo.toml must define the non-published train-anchor package")?;
+        .context("root Cargo.toml must define the non-published root brain package")?;
     ensure!(
         root_package.publish.as_ref().is_some_and(Vec::is_empty),
-        "root train-anchor package must set publish = false"
+        "root brain package must set publish = false"
     );
     ensure!(
         root_package
             .dependencies
             .iter()
             .any(|dependency| dependency.name == "phoxal"),
-        "root train-anchor package must depend on phoxal so Cargo.lock selects the train"
+        "root brain package must depend on phoxal so Cargo.lock selects the train"
     );
     ensure!(
         metadata.workspace_members.contains(&root_package.id),
-        "root train-anchor package must be a member of the robot Cargo workspace"
+        "root brain package must be a member of the robot Cargo workspace"
     );
     let brain = resolve_root_brain(&root_manifest, root_package)?;
     let packages = metadata
@@ -294,7 +294,7 @@ fn load_metadata(project_root: &Path, offline: bool) -> Result<Metadata> {
         .context("Cargo is required to resolve the locked framework train; install a compatible Rust toolchain")?;
     if !output.status.success() {
         bail!(
-            "Cargo.lock is stale or the root train anchor is invalid; project commands never update it automatically. Run `cargo check --locked` or deliberately bump with `cargo update -p phoxal`: {}",
+            "Cargo.lock is stale or the root brain package is invalid; project commands never update it automatically. Run `cargo check --locked` or deliberately bump with `cargo update -p phoxal`: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }

@@ -583,7 +583,7 @@ fn classify_run_root(root: &Path) -> Result<RunRootKind> {
         return Ok(RunRootKind::Source);
     }
     anyhow::bail!(
-        "{} is neither a buildable source project (no robot.yaml/Cargo train anchor) nor a \
+        "{} is neither a buildable source project (no robot.yaml/root Cargo package) nor a \
          staged runtime layout (no robot.json/assets next to bin/); run from a robot project or extract \
          a build.phoxal bundle first",
         root.display()
