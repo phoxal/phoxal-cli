@@ -11,6 +11,14 @@ use crate::cli::AppContext;
 pub struct Run {
     #[arg(value_name = "PROJECT")]
     target: Option<PathBuf>,
+    #[command(flatten)]
+    drivers: DriverSelection,
+}
+
+/// The driver-selection finalization inputs `run` and `start` share: they
+/// decide what the staged manifest contains, before any binary resolution.
+#[derive(Debug, Args)]
+pub(crate) struct DriverSelection {
     #[arg(
         long = "driver",
         value_name = "ID",
@@ -33,23 +41,25 @@ enum DriversMode {
     Off,
 }
 
-impl Run {
-    pub async fn run(&self, app: &AppContext) -> Result<()> {
+impl DriverSelection {
+    pub(crate) fn to_options(&self) -> Result<crate::application::lifecycle::RunOptions> {
         if self.drivers == DriversMode::Off && !self.drivers_subset.is_empty() {
             bail!("--driver cannot be combined with --drivers off");
         }
-        crate::application::lifecycle::run_command(
-            app,
-            self.target.as_deref(),
-            crate::application::lifecycle::RunOptions {
-                drivers: match self.drivers {
-                    DriversMode::On => crate::application::lifecycle::DriversMode::On,
-                    DriversMode::Off => crate::application::lifecycle::DriversMode::Off,
-                },
-                drivers_subset: self.drivers_subset.clone(),
+        Ok(crate::application::lifecycle::RunOptions {
+            drivers: match self.drivers {
+                DriversMode::On => crate::application::lifecycle::DriversMode::On,
+                DriversMode::Off => crate::application::lifecycle::DriversMode::Off,
             },
-        )
-        .await
+            drivers_subset: self.drivers_subset.clone(),
+        })
+    }
+}
+
+impl Run {
+    pub async fn run(&self, app: &AppContext) -> Result<()> {
+        let options = self.drivers.to_options()?;
+        crate::application::lifecycle::run_command(app, self.target.as_deref(), options).await
     }
 }
 

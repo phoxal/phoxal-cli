@@ -92,13 +92,13 @@ pub(crate) async fn run_command(
     report_outcome(&target, outcome)
 }
 
-pub(crate) async fn start_command(app: &AppContext, requested_target: Option<&Path>) -> Result<()> {
+pub(crate) async fn start_command(
+    app: &AppContext,
+    requested_target: Option<&Path>,
+    options: RunOptions,
+) -> Result<()> {
     crate::pair::require_exact()?;
     let target = Target::resolve(requested_target, app.project.root())?;
-    let options = RunOptions {
-        drivers: DriversMode::On,
-        drivers_subset: Vec::new(),
-    };
     let launched = build_publish_and_launch(app, &target, options).await?;
     let session = await_attachment(&target, launched, HANDSHAKE_BUDGET).await?;
     await_readiness(&session, READINESS_BUDGET).await?;
