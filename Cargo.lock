@@ -3282,6 +3282,8 @@ dependencies = [
  "phoxal-cli-catalog",
  "phoxal-cli-core",
  "phoxal-cli-observation",
+ "phoxal-runtime-contract",
+ "phoxal-supervisor-api",
  "tokio",
  "tracing",
  "tuirealm",

@@ -50,26 +50,25 @@ impl LogStore {
         }
     }
 
+    /// Install one reconciled page as the complete retained history.
+    ///
+    /// There is exactly one collector - the supervisor - and one execution, so
+    /// a page replaces the history rather than one robot's slice of it
+    /// (organization#978).
     pub fn install_snapshot(
         &mut self,
         epoch: AttachmentEpoch,
-        scope: &phoxal_cli_observation::LogScope,
         rows: impl IntoIterator<Item = LogRow>,
     ) -> Option<StoreRevision> {
         if epoch != self.epoch {
             return None;
         }
         let rows = rows.into_iter().collect::<Vec<_>>();
-        if self
-            .rows
-            .iter()
-            .filter(|row| row.scope.as_ref() == Some(scope))
-            .eq(rows.iter())
-        {
+        if self.rows.iter().eq(rows.iter()) {
             return None;
         }
         let was_pending = self.invalidation_pending;
-        self.rows.retain(|row| row.scope.as_ref() != Some(scope));
+        self.rows.clear();
         for row in rows {
             let _ = self.record(epoch, row);
         }
@@ -99,12 +98,6 @@ impl LogStore {
                         .filters
                         .minimum_severity
                         .is_none_or(|severity| row.severity >= severity)
-                    && query
-                        .body
-                        .filters
-                        .scope
-                        .as_ref()
-                        .is_none_or(|scope| row.scope.as_ref() == Some(scope))
                     && match query.body.anchor {
                         LogAnchor::Before(at) => row.event_time < at,
                         LogAnchor::After(at) => row.event_time > at,
@@ -136,12 +129,8 @@ mod tests {
 
     use super::*;
 
-    fn epoch(graph_generation: u64) -> AttachmentEpoch {
-        AttachmentEpoch {
-            supervisor_generation: 1,
-            execution_id: ExecutionId::mint(),
-            graph_generation,
-        }
+    fn epoch() -> AttachmentEpoch {
+        AttachmentEpoch::new(ExecutionId::mint())
     }
 
     fn row(index: usize) -> LogRow {
@@ -151,13 +140,12 @@ mod tests {
             severity: LogSeverity::Info,
             text: index.to_string(),
             event_time: std::time::UNIX_EPOCH + std::time::Duration::from_nanos(index as u64),
-            scope: None,
         }
     }
 
     #[test]
     fn high_rate_history_is_bounded_and_windowed_without_a_second_ring() {
-        let epoch = epoch(0);
+        let epoch = epoch();
         let mut store = LogStore::new(epoch);
         for index in 0..(LOG_CAPACITY * 3) {
             store.record(epoch, row(index));
@@ -178,13 +166,12 @@ mod tests {
         assert_eq!(window.rows[0].text, (LOG_CAPACITY * 3 - 1).to_string());
     }
 
+    /// A new execution is a new attachment, so a row stamped with the previous
+    /// one belongs to a run that has ended (organization#978).
     #[test]
-    fn stale_epoch_update_is_rejected() {
-        let old = epoch(0);
-        let new = AttachmentEpoch {
-            graph_generation: 1,
-            ..old
-        };
+    fn a_row_from_a_previous_execution_is_rejected() {
+        let old = epoch();
+        let new = epoch();
         let mut store = LogStore::new(old);
         store.replace_epoch(new);
         assert_eq!(store.record(old, row(1)), None);
@@ -193,7 +180,7 @@ mod tests {
 
     #[test]
     fn content_identical_reconciled_records_are_preserved() {
-        let epoch = epoch(0);
+        let epoch = epoch();
         let mut store = LogStore::new(epoch);
         let repeated = row(1);
         assert!(store.record(epoch, repeated.clone()).is_some());
@@ -225,7 +212,7 @@ mod tests {
 
     #[test]
     fn participant_filter_is_case_insensitive_and_incremental() {
-        let epoch = epoch(0);
+        let epoch = epoch();
         let mut store = LogStore::new(epoch);
         store.record(epoch, row(1));
         let window = store.read(ObservationQuery {

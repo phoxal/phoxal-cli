@@ -42,6 +42,10 @@ use super::update::update;
 pub struct UiOptions {
     pub title: String,
     pub theme: Theme,
+    /// Whether `q` may leave the execution running. A simulation session is
+    /// not detachable: the client owns Webots, so leaving would strand a
+    /// simulator with no operator (organization#978).
+    pub detachable: bool,
 }
 
 struct InputComponent;
@@ -137,7 +141,10 @@ fn run_blocking(
     force_full_repaint(&mut terminal)?;
     TerminalGuard::set_title(&title)?;
 
-    let model = Rc::new(RefCell::new(AppModel::default()));
+    let model = Rc::new(RefCell::new(AppModel {
+        detachable: options.detachable,
+        ..AppModel::default()
+    }));
     apply_initial_inputs(&model, &effects, initial_inputs)?;
     let pending = Arc::new(PendingInputs::default());
     let listener = EventListenerCfg::default()

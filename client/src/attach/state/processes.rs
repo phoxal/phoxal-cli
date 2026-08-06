@@ -1,6 +1,7 @@
-use phoxal_cli_core::runtime::{ParticipantState, ProcessScope, ProcessState, RobotKey};
+//! The supervised process table, with this client's own local timings.
+
 use phoxal_cli_observation::{ProcessObservation, ProcessTable};
-use phoxal_cli_protocol::SupervisorSnapshotV0;
+use phoxal_supervisor_api::{ProcessState, Snapshot};
 
 #[derive(Default)]
 pub(crate) struct ProcessStore {
@@ -8,20 +9,24 @@ pub(crate) struct ProcessStore {
 }
 
 impl ProcessStore {
-    pub fn replace(&mut self, snapshot: &SupervisorSnapshotV0) -> ProcessTable {
+    /// Replace the table from one authoritative snapshot, carrying forward the
+    /// local timings a row has earned.
+    ///
+    /// A restart is detected from the daemon's own restart counter, so a
+    /// respawned process starts its clock again rather than appearing to have
+    /// been up since the execution began.
+    pub fn replace(&mut self, snapshot: &Snapshot) -> ProcessTable {
         let previous = std::mem::take(&mut self.table);
         let now = std::time::Instant::now();
         self.table = snapshot
             .processes
             .iter()
-            .map(|(key, entry)| {
-                let old = previous.get(key);
-                let state = participant_state(entry.status.actual);
+            .map(|row| {
+                let old = previous.get(&row.key);
                 let restarted = old.is_some_and(|old| {
-                    entry.status.restart_count_in_generation
-                        > old.entry.status.restart_count_in_generation
-                        || (state == ParticipantState::Restarting
-                            && old.state != ParticipantState::Restarting)
+                    row.restarts > old.row.restarts
+                        || (row.state == ProcessState::Restarting
+                            && old.state != ProcessState::Restarting)
                 });
                 let started_at = if restarted {
                     now
@@ -33,29 +38,21 @@ impl ProcessStore {
                 } else {
                     old.and_then(|old| old.first_ready_at)
                 }
-                .or((state == ParticipantState::Ready).then_some(now));
-                let ended_at =
-                    if matches!(state, ParticipantState::Failed | ParticipantState::Stopped) {
-                        old.and_then(|old| old.ended_at).or(Some(now))
-                    } else {
-                        None
-                    };
+                .or((row.state == ProcessState::Ready).then_some(now));
+                let ended_at = if matches!(row.state, ProcessState::Failed | ProcessState::Stopped) {
+                    old.and_then(|old| old.ended_at).or(Some(now))
+                } else {
+                    None
+                };
                 (
-                    key.clone(),
+                    row.key.clone(),
                     ProcessObservation {
-                        key: key.clone(),
-                        entry: entry.clone(),
-                        kind: entry.descriptor.kind,
-                        state,
-                        present: old.and_then(|old| old.present),
-                        robot: match &key.scope {
-                            ProcessScope::Robot(robot) => Some(robot.clone()),
-                            ProcessScope::Project => None,
-                        },
+                        key: row.key.clone(),
+                        row: row.clone(),
+                        state: row.state,
                         started_at,
                         ended_at,
                         first_ready_at,
-                        user_service: entry.descriptor.owner == "project",
                     },
                 )
             })
@@ -63,74 +60,59 @@ impl ProcessStore {
         self.table.clone()
     }
 
-    pub fn clear_graph(&mut self) {
+    pub fn clear(&mut self) {
         self.table.clear();
-    }
-
-    pub fn record_presence(
-        &mut self,
-        robot: &RobotKey,
-        participant: &str,
-        present: bool,
-    ) -> Option<ProcessTable> {
-        let process = self.table.values_mut().find(|process| {
-            process.robot.as_ref() == Some(robot) && process.key.id == participant
-        })?;
-        if process.present == Some(present) {
-            return None;
-        }
-        process.present = Some(present);
-        Some(self.table.clone())
-    }
-}
-
-fn participant_state(state: ProcessState) -> ParticipantState {
-    match state {
-        ProcessState::Starting => ParticipantState::Starting,
-        ProcessState::Ready => ParticipantState::Ready,
-        ProcessState::Degraded => ParticipantState::Degraded,
-        ProcessState::Restarting => ParticipantState::Restarting,
-        ProcessState::Failed => ParticipantState::Failed,
-        ProcessState::Stopped => ParticipantState::Stopped,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use phoxal_cli_core::runtime::{
-        ParticipantKind, ProcessDescriptor, ProcessEntry, ProcessKey, ProcessStatus,
+    use phoxal_runtime_contract::ProducerId;
+    use phoxal_supervisor_api::{
+        DesiredState, ExecutionMode, Lifecycle, Name, Process, ProcessKey, RobotIdentity,
         StartupRequirement,
     };
 
     use super::*;
 
-    #[test]
-    fn supervisor_refresh_preserves_independent_liveliness_presence() {
-        let robot = RobotKey::new("lab", "rover");
-        let key = ProcessKey::robot(robot.clone(), "drive");
-        let mut snapshot = SupervisorSnapshotV0::default();
-        snapshot.processes.insert(
-            key.clone(),
-            ProcessEntry {
-                descriptor: ProcessDescriptor {
-                    key: key.clone(),
-                    kind: ParticipantKind::Service,
-                    artifact: "drive".to_string(),
-                    owner: "project".to_string(),
-                    startup_requirement: StartupRequirement::Required,
-                },
-                status: ProcessStatus {
-                    actual: ProcessState::Ready,
-                    ..ProcessStatus::default()
-                },
+    fn snapshot(revision: u64, state: ProcessState, restarts: u64) -> Snapshot {
+        Snapshot {
+            revision,
+            robot: RobotIdentity {
+                id: Name::new("rover"),
+                namespace: Name::new("lab"),
             },
-        );
+            mode: ExecutionMode::Real,
+            lifecycle: Lifecycle::Ready,
+            startup: Vec::new(),
+            processes: vec![Process {
+                key: ProcessKey::Brain,
+                component: None,
+                startup: StartupRequirement::Required,
+                desired: DesiredState::Running,
+                state,
+                pid: Some(42),
+                producer: Some(ProducerId::try_from(0x2b).unwrap()),
+                restarts,
+                failure: None,
+            }],
+            failure: None,
+        }
+    }
 
+    #[test]
+    fn a_restart_resets_the_local_timings_a_steady_row_keeps() {
         let mut store = ProcessStore::default();
-        store.replace(&snapshot);
-        assert!(store.record_presence(&robot, "drive", true).is_some());
-        snapshot.revision += 1;
-        let refreshed = store.replace(&snapshot);
-        assert_eq!(refreshed[&key].present, Some(true));
+        let table = store.replace(&snapshot(1, ProcessState::Ready, 0));
+        let first_ready = table[&ProcessKey::Brain].first_ready_at;
+        assert!(first_ready.is_some());
+        assert!(table[&ProcessKey::Brain].present());
+
+        let steady = store.replace(&snapshot(2, ProcessState::Ready, 0));
+        assert_eq!(steady[&ProcessKey::Brain].first_ready_at, first_ready);
+
+        let restarted = store.replace(&snapshot(3, ProcessState::Starting, 1));
+        assert_eq!(restarted[&ProcessKey::Brain].first_ready_at, None);
+        assert!(restarted[&ProcessKey::Brain].started_at > table[&ProcessKey::Brain].started_at);
     }
 }

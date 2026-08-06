@@ -25,6 +25,9 @@ pub enum SessionInput {
     Logs(LogWindow),
     Runtimes(RuntimeWindow),
     Diagnostic(String),
+    /// The operator pressed Ctrl+C. The UI decides what it means; the host
+    /// only reports that it happened (organization#978).
+    Interrupt,
     Terminate,
 }
 
@@ -36,6 +39,7 @@ pub enum Msg {
     Logs(LogsMsg),
     Diagnostic(String),
     Wake,
+    Interrupt,
     Terminate,
 }
 
@@ -46,6 +50,7 @@ impl From<SessionInput> for Msg {
             SessionInput::Logs(window) => Self::Logs(LogsMsg::Window(window)),
             SessionInput::Runtimes(window) => Self::Runtimes(RuntimesMsg::Window(window)),
             SessionInput::Diagnostic(message) => Self::Diagnostic(message),
+            SessionInput::Interrupt => Self::Interrupt,
             SessionInput::Terminate => Self::Terminate,
         }
     }

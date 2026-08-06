@@ -1,3 +1,6 @@
+//! The retained client-side stores one attachment reads through.
+
+pub(crate) mod health;
 pub(crate) mod input;
 pub(crate) mod logs;
 pub(crate) mod motion;
@@ -26,6 +29,7 @@ pub(crate) struct Stores {
     pub processes: Arc<RwLock<processes::ProcessStore>>,
     pub input: Arc<RwLock<input::InputStore>>,
     pub motion: Arc<RwLock<motion::MotionStore>>,
+    pub health: Arc<RwLock<health::HealthStore>>,
 }
 
 impl Stores {
@@ -36,14 +40,7 @@ impl Stores {
             processes: Arc::new(RwLock::new(processes::ProcessStore::default())),
             input: Arc::new(RwLock::new(input::InputStore::default())),
             motion: Arc::new(RwLock::new(motion::MotionStore::default())),
+            health: Arc::new(RwLock::new(health::HealthStore::default())),
         }
-    }
-
-    pub async fn replace_epoch(&self, epoch: phoxal_cli_observation::AttachmentEpoch) {
-        self.logs.write().await.replace_epoch(epoch);
-        self.runtimes.write().await.replace_epoch(epoch);
-        self.processes.write().await.clear_graph();
-        self.input.write().await.clear();
-        self.motion.write().await.clear();
     }
 }

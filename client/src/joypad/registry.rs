@@ -9,7 +9,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use phoxal_cli_observation::{JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample};
+use phoxal_cli_observation::{
+    JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, ManualDriveUnsupported,
+};
 
 /// Cap on remembered pads. Disconnected entries are kept so a pad that
 /// reconnects keeps its id, which is what makes the cap necessary.
@@ -57,7 +59,9 @@ pub(super) struct Registry {
     pub selected: Option<String>,
     pub enabled: bool,
     pub last_error: Option<String>,
-    pub unavailable_reason: Option<String>,
+    /// Why this robot cannot be driven manually at all, as a closed reason the
+    /// renderer matches on (organization#978).
+    pub unsupported: Option<ManualDriveUnsupported>,
 }
 
 impl Registry {
@@ -87,7 +91,7 @@ impl Registry {
             available: Arc::new(available),
             selected: self.selected.clone(),
             enabled: self.enabled,
-            unavailable_reason: self.unavailable_reason.clone(),
+            unsupported: self.unsupported,
             last_error: self.last_error.clone(),
         }
     }
@@ -242,10 +246,10 @@ impl Registry {
             self.last_error = None;
             return was_enabled;
         }
-        if let Some(reason) = self.unavailable_reason.as_ref() {
+        if let Some(unsupported) = self.unsupported {
             self.enabled = false;
             self.last_error = None;
-            tracing::warn!(reason, "manual input enable rejected");
+            tracing::warn!(reason = %unsupported, "manual input enable rejected");
             return false;
         }
         let Some(selected) = self.selected.as_ref() else {

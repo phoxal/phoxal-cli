@@ -5,39 +5,50 @@
 //! produced here and only the resulting command goes out (organization#978,
 //! and [`crate::joypad`] for why the old robot-side tool went away).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use phoxal_api::v0_1 as api;
-use phoxal_bus::{Bus, CommandPublisher, ContractBody, Publish, Topic};
-use phoxal_cli_protocol::ManualInput;
+use phoxal_bus::{CommandPublisher, ContractBody, Publish, Topic};
+use phoxal_cli_observation::{AttachmentEvent, ManualDriveUnsupported, SourceStatus};
 use tokio::sync::mpsc;
 
-use super::TelemetryBackend;
+use super::FeedContext;
+use crate::attach::ports::input::InputCommand;
+use crate::joypad::manual::ManualDrive;
 use crate::joypad::{Joypad, STOP_REPEAT_COUNT};
-use crate::ports::input::InputCommand;
+
+const SOURCE: &str = "input";
 
 /// How often the selected pad is read and a command published.
 const POLL_HZ: f64 = 50.0;
 
 /// Read the local gamepad until the command port closes.
 pub(crate) async fn run(
-    bus: Bus,
-    manual_input: ManualInput,
-    telemetry: TelemetryBackend,
+    context: FeedContext,
+    mut commands: mpsc::Receiver<InputCommand>,
+    drive: Result<ManualDrive, ManualDriveUnsupported>,
+) {
+    let commands = &mut commands;
+    super::until_cancelled(&context, SOURCE, feed(&context, commands, drive)).await;
+}
+
+async fn feed(
+    context: &FeedContext,
     commands: &mut mpsc::Receiver<InputCommand>,
+    drive: Result<ManualDrive, ManualDriveUnsupported>,
 ) -> Result<()> {
     let topic = Topic::<Publish<api::motion::ManualCommand>>::new_static(
         <api::motion::ManualCommand as ContractBody>::TOPIC,
     );
-    let publisher = CommandPublisher::<api::motion::ManualCommand>::new(bus, &topic)
-        .context("failed to attach the manual command publisher")?;
+    let publisher =
+        CommandPublisher::<api::motion::ManualCommand>::new(context.attachment.bus().clone(), &topic)
+            .context("failed to attach the manual command publisher")?;
 
-    let mut joypad = Joypad::open(
-        manual_input.drive(),
-        manual_input.unsupported_reason().map(str::to_string),
-    );
-    telemetry.record_joypad(joypad.sample());
+    let mut joypad = Joypad::open(drive.ok(), drive.err());
+    publish_joypad(context, &joypad).await?;
+    context.health(SOURCE, SourceStatus::Live).await;
 
     let mut ticker = tokio::time::interval(Duration::from_secs_f64(1.0 / POLL_HZ));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -59,7 +70,7 @@ pub(crate) async fn run(
                     publish_stop(&publisher, &mut pending_stops, &mut dropped_commands);
                 }
                 if polled.changed || derived.changed {
-                    telemetry.record_joypad(joypad.sample());
+                    publish_joypad(context, &joypad).await?;
                 }
                 if let Some(command) = command
                     && publisher.send(command).is_err()
@@ -86,10 +97,29 @@ pub(crate) async fn run(
                 }
                 // Re-observing IS the acknowledgement, including for a request
                 // the registry rejected.
-                telemetry.record_joypad(joypad.sample());
+                publish_joypad(context, &joypad).await?;
             }
         }
     }
+}
+
+/// Publish the current device inventory as one input observation.
+async fn publish_joypad(context: &FeedContext, joypad: &Joypad) -> Result<()> {
+    let motion = context.stores.motion.read().await.current();
+    let observation = context
+        .stores
+        .input
+        .write()
+        .await
+        .record_joypads(joypad.sample(), motion);
+    context
+        .events
+        .send(AttachmentEvent::InputChanged {
+            epoch: context.epoch,
+            values: Arc::new(observation),
+        })
+        .await?;
+    Ok(())
 }
 
 fn queue_stop(pending_stops: &mut usize) {

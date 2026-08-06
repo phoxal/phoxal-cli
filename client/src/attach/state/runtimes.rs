@@ -11,7 +11,7 @@ pub(crate) struct RuntimeStore {
     epoch: AttachmentEpoch,
     revision: StoreRevision,
     invalidation_pending: bool,
-    capacity_evictions: std::collections::BTreeMap<phoxal_cli_observation::RobotScope, u64>,
+    capacity_evictions: u64,
     rows: VecDeque<RuntimeRow>,
 }
 
@@ -21,7 +21,7 @@ impl RuntimeStore {
             epoch,
             revision: StoreRevision(0),
             invalidation_pending: false,
-            capacity_evictions: std::collections::BTreeMap::new(),
+            capacity_evictions: 0,
             rows: VecDeque::new(),
         }
     }
@@ -30,25 +30,26 @@ impl RuntimeStore {
         self.epoch = epoch;
         self.revision = StoreRevision(self.revision.0.wrapping_add(1));
         self.invalidation_pending = false;
-        self.capacity_evictions.clear();
+        self.capacity_evictions = 0;
         self.rows.clear();
     }
 
-    pub fn install(
+    /// Install one reconciled page as the complete retained history.
+    pub fn install_snapshot(
         &mut self,
         epoch: AttachmentEpoch,
-        scope: &phoxal_cli_observation::RobotScope,
-        rows: impl IntoIterator<Item = RuntimeRow>,
+        samples: impl IntoIterator<Item = phoxal_cli_observation::RuntimePerformanceSample>,
+        status: phoxal_cli_observation::RuntimeFeedStatus,
     ) -> Option<StoreRevision> {
         if epoch != self.epoch {
             return None;
         }
-        self.rows.retain(|row| &row.scope != scope);
-        let rows = rows.into_iter().collect::<Vec<_>>();
-        if let Some(evictions) = rows.iter().map(|row| row.capacity_evictions).max() {
-            self.capacity_evictions.insert(scope.clone(), evictions);
-        }
-        self.rows.extend(rows);
+        self.rows.clear();
+        self.capacity_evictions = status.capacity_evictions;
+        self.rows.extend(samples.into_iter().map(|sample| RuntimeRow {
+            sample,
+            capacity_evictions: self.capacity_evictions,
+        }));
         while self.rows.len() > CAPACITY {
             self.rows.pop_front();
         }
@@ -61,16 +62,20 @@ impl RuntimeStore {
         }
     }
 
-    pub fn record(&mut self, epoch: AttachmentEpoch, mut row: RuntimeRow) -> Option<StoreRevision> {
+    pub fn record(
+        &mut self,
+        epoch: AttachmentEpoch,
+        sample: phoxal_cli_observation::RuntimePerformanceSample,
+        status: phoxal_cli_observation::RuntimeFeedStatus,
+    ) -> Option<StoreRevision> {
         if epoch != self.epoch {
             return None;
         }
-        row.capacity_evictions = self
-            .capacity_evictions
-            .get(&row.scope)
-            .copied()
-            .unwrap_or(row.capacity_evictions);
-        self.rows.push_back(row);
+        self.capacity_evictions = self.capacity_evictions.max(status.capacity_evictions);
+        self.rows.push_back(RuntimeRow {
+            sample,
+            capacity_evictions: self.capacity_evictions,
+        });
         while self.rows.len() > CAPACITY {
             self.rows.pop_front();
         }
@@ -115,54 +120,27 @@ impl RuntimeStore {
 #[cfg(test)]
 mod tests {
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_cli_observation::{ObservationQuery, QueryToken, RuntimeQuery, StoreRevision};
-    use phoxal_cli_observation::{RobotScope, RuntimePerformanceSample};
+    use phoxal_cli_observation::{
+        ObservationQuery, QueryToken, RuntimeFeedStatus, RuntimePerformanceSample, RuntimeQuery,
+        StoreRevision,
+    };
 
     use super::*;
 
-    fn sample(scope: &RobotScope, id: &str, sequence: u64) -> RuntimeRow {
-        RuntimeRow {
-            scope: scope.clone(),
-            sample: RuntimePerformanceSample {
-                sequence,
-                participant_id: id.to_string(),
-                truncated: 0,
-                window_ns: 1,
-                step: None,
-                topics: std::sync::Arc::new(Vec::new()),
-                overflow: None,
-            },
-            capacity_evictions: sequence,
+    fn sample(id: &str, sequence: u64) -> RuntimePerformanceSample {
+        RuntimePerformanceSample {
+            sequence,
+            participant_id: id.to_string(),
+            truncated: 0,
+            window_ns: 1,
+            step: None,
+            topics: std::sync::Arc::new(Vec::new()),
+            overflow: None,
         }
     }
 
-    #[test]
-    fn installing_one_robot_snapshot_preserves_other_robot_history() {
-        let epoch = AttachmentEpoch {
-            supervisor_generation: 1,
-            execution_id: ExecutionId::mint(),
-            graph_generation: 1,
-        };
-        let left = RobotScope {
-            namespace: "lab".to_string(),
-            robot_id: "left".to_string(),
-        };
-        let right = RobotScope {
-            namespace: "lab".to_string(),
-            robot_id: "right".to_string(),
-        };
-        let mut store = RuntimeStore::new(epoch);
-        assert!(
-            store
-                .install(epoch, &left, [sample(&left, "drive", 1)])
-                .is_some()
-        );
-        assert!(
-            store
-                .install(epoch, &right, [sample(&right, "drive", 2)])
-                .is_none()
-        );
-        let window = store.read(ObservationQuery {
+    fn read(store: &mut RuntimeStore, epoch: AttachmentEpoch) -> RuntimeWindow {
+        store.read(ObservationQuery {
             epoch,
             observed_revision: StoreRevision(0),
             token: QueryToken(1),
@@ -171,9 +149,53 @@ mod tests {
                 direction: WindowDirection::Backward,
                 limit: usize::MAX,
             },
-        });
+        })
+    }
+
+    /// One execution has one collector, so a reconciled page IS the retained
+    /// history rather than one robot's slice of it (organization#978).
+    #[test]
+    fn a_reconciled_page_replaces_the_history_and_follows_extend_it() {
+        let epoch = AttachmentEpoch::new(ExecutionId::mint());
+        let status = RuntimeFeedStatus {
+            capacity_evictions: 3,
+        };
+        let mut store = RuntimeStore::new(epoch);
+        assert!(
+            store
+                .install_snapshot(epoch, [sample("drive", 1)], status)
+                .is_some()
+        );
+        store.record(epoch, sample("brain", 2), status);
+        let window = read(&mut store, epoch);
         assert_eq!(window.rows.len(), 2);
-        assert!(window.rows.iter().any(|row| row.scope == left));
-        assert!(window.rows.iter().any(|row| row.scope == right));
+        assert!(
+            window
+                .rows
+                .iter()
+                .all(|row| row.capacity_evictions == 3),
+            "every retained row reports the collector's eviction count"
+        );
+
+        assert!(
+            store
+                .install_snapshot(epoch, [sample("drive", 4)], status)
+                .is_none(),
+            "a page installed while a read is still pending does not re-announce"
+        );
+        assert_eq!(read(&mut store, epoch).rows.len(), 1);
+    }
+
+    /// A new execution is a new attachment: nothing from the previous one may
+    /// be spliced onto it.
+    #[test]
+    fn a_sample_from_a_previous_execution_is_rejected() {
+        let old = AttachmentEpoch::new(ExecutionId::mint());
+        let new = AttachmentEpoch::new(ExecutionId::mint());
+        let status = RuntimeFeedStatus::default();
+        let mut store = RuntimeStore::new(old);
+        store.replace_epoch(new);
+        assert_eq!(store.record(old, sample("drive", 1), status), None);
+        assert!(store.record(new, sample("drive", 2), status).is_some());
     }
 }

@@ -13,14 +13,16 @@
 //! hardware-free and holds every rule worth testing.
 
 mod drive;
+pub(crate) mod manual;
 mod registry;
 
 use std::collections::HashSet;
 
 use gilrs::{Button, EventType, Gamepad, Gilrs};
 use phoxal_api::v0_1 as api;
-use phoxal_cli_observation::JoypadDevicesSample;
-use phoxal_cli_protocol::ManualDrive;
+use phoxal_cli_observation::{JoypadDevicesSample, ManualDriveUnsupported};
+
+use manual::ManualDrive;
 
 pub(crate) use registry::RegistryChange;
 use registry::{PadHandle, Registry};
@@ -42,10 +44,10 @@ pub(crate) struct Joypad {
 impl Joypad {
     /// Open the local gamepad backend and take an initial inventory.
     ///
-    /// `drive` is absent when the robot's model cannot support manual input
-    /// (non-differential kinematics, unusable motion limits); the pads are
-    /// still enumerated and shown, but no command is ever derived.
-    pub fn open(drive: Option<ManualDrive>, robot_unavailable: Option<String>) -> Self {
+    /// `drive` is absent when the robot's model cannot support manual input;
+    /// `unsupported` then carries the typed reason. The pads are still
+    /// enumerated and shown, but no command is ever derived.
+    pub fn open(drive: Option<ManualDrive>, unsupported: Option<ManualDriveUnsupported>) -> Self {
         let (backend, backend_unavailable) = match Gilrs::new() {
             Ok(backend) => (Some(backend), None),
             Err(error) => {
@@ -56,7 +58,8 @@ impl Joypad {
         let mut joypad = Self {
             backend,
             registry: Registry {
-                unavailable_reason: combine_unavailable(robot_unavailable, backend_unavailable),
+                unsupported,
+                last_error: backend_unavailable,
                 ..Registry::default()
             },
             drive,
@@ -119,7 +122,7 @@ impl Joypad {
                 device_id = id,
                 reason = self
                     .registry
-                    .unavailable_reason
+                    .last_error
                     .as_deref()
                     .unwrap_or("controller backend unavailable"),
                 "controller selection ignored"
@@ -201,56 +204,27 @@ fn button_value(gamepad: &Gamepad<'_>, button: Button) -> f32 {
         .unwrap_or(0.0)
 }
 
-fn combine_unavailable(robot: Option<String>, backend: Option<String>) -> Option<String> {
-    match (robot, backend) {
-        (Some(robot), Some(backend)) => Some(format!("{robot}; {backend}")),
-        (Some(reason), _) | (_, Some(reason)) => Some(reason),
-        (None, None) => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A user whose robot cannot be driven manually still needs to see whether
+    /// their pad is even detected, and to be told why in a reason the renderer
+    /// matched on rather than a sentence composed elsewhere (organization#978).
     #[test]
-    fn both_unavailability_reasons_are_reported_together() {
-        assert_eq!(
-            combine_unavailable(Some("robot".into()), Some("backend".into())).as_deref(),
-            Some("robot; backend"),
-            "a user with two problems must not have to fix one to learn about the other"
-        );
-        assert_eq!(
-            combine_unavailable(Some("robot".into()), None).as_deref(),
-            Some("robot")
-        );
-        assert_eq!(
-            combine_unavailable(None, Some("backend".into())).as_deref(),
-            Some("backend")
-        );
-        assert_eq!(combine_unavailable(None, None), None);
-    }
-
-    #[test]
-    fn a_robot_without_manual_drive_still_enumerates_pads() {
-        // Opening must never depend on the robot model: a user whose robot
-        // cannot be driven manually still needs to see whether their pad is
-        // even detected.
-        let joypad = Joypad::open(None, Some("no differential kinematics".to_string()));
+    fn a_robot_without_manual_drive_still_enumerates_pads_and_names_the_reason() {
+        let joypad = Joypad::open(None, Some(ManualDriveUnsupported::NoDifferentialBase));
         let sample = joypad.sample();
         assert_eq!(
-            sample
-                .unavailable_reason
-                .as_deref()
-                .map(|reason| reason.contains("no differential kinematics")),
-            Some(true)
+            sample.unsupported,
+            Some(ManualDriveUnsupported::NoDifferentialBase)
         );
         assert!(!sample.enabled);
     }
 
     #[test]
     fn manual_authority_cannot_be_enabled_without_a_usable_robot() {
-        let mut joypad = Joypad::open(None, Some("no differential kinematics".to_string()));
+        let mut joypad = Joypad::open(None, Some(ManualDriveUnsupported::NoDifferentialBase));
         assert!(!joypad.set_enabled(true));
         assert!(!joypad.sample().enabled);
     }

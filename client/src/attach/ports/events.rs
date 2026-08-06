@@ -2,11 +2,15 @@ use phoxal_cli_observation::AttachmentEvent;
 use tokio::sync::mpsc;
 
 /// The single asynchronous stream of immutable attachment observations.
-pub struct AttachmentEvents {
-    pub(crate) receiver: mpsc::Receiver<AttachmentEvent>,
+pub(crate) struct AttachmentEvents {
+    receiver: mpsc::Receiver<AttachmentEvent>,
 }
 
 impl AttachmentEvents {
+    pub(crate) const fn new(receiver: mpsc::Receiver<AttachmentEvent>) -> Self {
+        Self { receiver }
+    }
+
     pub async fn recv(&mut self) -> Option<AttachmentEvent> {
         self.receiver.recv().await
     }
@@ -32,7 +36,7 @@ mod tests {
                 phoxal_cli_observation::ConnectionObservation::Connected,
             ))
             .unwrap();
-        let mut events = AttachmentEvents { receiver };
+        let mut events = AttachmentEvents::new(receiver);
         assert!(matches!(
             events.try_recv(),
             Ok(AttachmentEvent::ConnectionChanged(

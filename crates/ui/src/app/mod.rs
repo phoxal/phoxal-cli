@@ -13,5 +13,4 @@ pub use message::{LogsMsg, Msg, NavigationMsg, RuntimesMsg, SessionInput};
 pub use model::AppModel;
 pub use route::FocusRoute;
 pub use session::{UiOptions, run};
-pub(crate) use update::process_is_runtime;
 pub use update::update;

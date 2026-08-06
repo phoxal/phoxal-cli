@@ -12,6 +12,8 @@ console = { workspace = true }
 phoxal-cli-catalog = { workspace = true }
 phoxal-cli-core = { workspace = true }
 phoxal-cli-observation = { workspace = true }
+phoxal-runtime-contract = { workspace = true }
+phoxal-supervisor-api = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 tracing = { workspace = true }
 tuirealm = { workspace = true }

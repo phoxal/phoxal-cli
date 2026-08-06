@@ -9,11 +9,15 @@ pub(crate) enum InputCommand {
 }
 
 #[derive(Clone)]
-pub struct InputCommands {
-    pub(crate) sender: mpsc::Sender<InputCommand>,
+pub(crate) struct InputCommands {
+    sender: mpsc::Sender<InputCommand>,
 }
 
 impl InputCommands {
+    pub(crate) const fn new(sender: mpsc::Sender<InputCommand>) -> Self {
+        Self { sender }
+    }
+
     pub async fn select(&self, id: impl Into<String>) -> Result<()> {
         self.send(InputCommand::Select(id.into())).await
     }
