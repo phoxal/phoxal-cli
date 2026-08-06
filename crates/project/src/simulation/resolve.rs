@@ -323,6 +323,44 @@ mod tests {
         crate_dir
     }
 
+    /// A real, dependency-free root-brain fixture crate: a `cargo build`-able
+    /// binary whose linker section declares exactly the record
+    /// `#[phoxal::brain]` embeds. Its Cargo package and bin target are
+    /// deliberately NOT named `brain`, so the canonical identity can never be
+    /// inferred from either (organization#973).
+    fn write_brain_fixture(dir: &Path) -> (PathBuf, String) {
+        let crate_dir = dir.join("robot-root");
+        let bin_target = "testbot-robot".to_string();
+        std::fs::create_dir_all(crate_dir.join("src")).expect("create brain fixture dirs");
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"testbot-robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[[bin]]\nname = \"{bin_target}\"\npath = \"src/main.rs\"\n"
+            ),
+        )
+        .expect("write brain fixture Cargo.toml");
+        std::fs::write(
+            crate_dir.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"testbot-robot\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write brain fixture Cargo.lock");
+        let json = r#"{"schema":"phoxal/participant-metadata/v0","id":"brain","kind":"brain","config_schema":{"type":"null"}}"#;
+        let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
+        let len = json.len();
+        std::fs::write(
+            crate_dir.join("src/main.rs"),
+            format!(
+                "#[used]\n\
+                 #[cfg_attr(target_os = \"macos\", unsafe(link_section = \"__DATA,__phoxal_meta\"))]\n\
+                 #[cfg_attr(not(target_os = \"macos\"), unsafe(link_section = \".phoxal_meta\"))]\n\
+                 static PHOXAL_META: [u8; {len}] = *b\"{escaped}\";\n\n\
+                 fn main() {{}}\n"
+            ),
+        )
+        .expect("write brain fixture main.rs");
+        (crate_dir, bin_target)
+    }
+
     /// A minimal single-service robot. Cross-references between `kinematic`
     /// and `components` are never validated by `Robot::parse_from_string`
     /// itself (that happens inside `resolve()`, which this test bypasses by
@@ -402,6 +440,7 @@ services:
     fn bundle_plan_with_invalid_service_config(
         crate_dir: PathBuf,
         simulator_dir: PathBuf,
+        brain: (PathBuf, String),
     ) -> Result<BundlePlan> {
         let mut robot = phoxal_cli_core::project::resolver::parse_robot_from_string(FIXTURE_ROBOT)?;
         robot
@@ -417,6 +456,11 @@ services:
             compiled,
             train: "0.42.0".to_string(),
             target: target.clone(),
+            brain: phoxal_cli_core::project::resolver::ResolvedBrain {
+                crate_dir: brain.0,
+                package: "testbot-robot".to_string(),
+                bin_target: brain.1,
+            },
             platform_runtimes: Vec::new(),
             simulators: vec![ResolvedPlatformRuntime {
                 name: SIMULATOR_CONTROLLER_ARTIFACT_NAME.to_string(),
@@ -460,7 +504,8 @@ services:
         std::fs::write(temp.path().join("structure.urdf"), "<robot/>")?;
         let crate_dir = write_invalid_config_service_fixture(temp.path());
         let simulator_dir = write_simulator_fixture(temp.path());
-        let resolved = bundle_plan_with_invalid_service_config(crate_dir, simulator_dir)?;
+        let brain = write_brain_fixture(temp.path());
+        let resolved = bundle_plan_with_invalid_service_config(crate_dir, simulator_dir, brain)?;
         let source_participants =
             super::super::participants::sim_source_participants(temp.path(), &resolved)?;
         let source_artifacts = crate::build::cargo::build_selected_source_artifacts(

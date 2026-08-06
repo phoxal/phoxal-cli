@@ -274,6 +274,11 @@ mod tests {
                 version: "0.42.0".to_string(),
                 source: TrainSource::Registry,
             },
+            brain: phoxal_cli_core::project::train::RootBrainPackage {
+                package: "testbot-robot".to_string(),
+                crate_dir: PathBuf::from("/fake/project"),
+                bin_target: "testbot-robot".to_string(),
+            },
             runtimes,
             local_components: Vec::new(),
         }

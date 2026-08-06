@@ -131,6 +131,7 @@ services:
 
     fn required_kind(kind: RequiredRuntimeKind) -> &'static str {
         match kind {
+            RequiredRuntimeKind::Brain => "brain",
             RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => "service",
             RequiredRuntimeKind::ComponentDriver => "driver",
         }

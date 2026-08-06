@@ -69,7 +69,8 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
         temp.path().join("Cargo.toml"),
         "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\nmembers = [\".\", \"services/mission\", \"components/ddsm115\"]\nresolver = \"2\"\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
     )?;
-    std::fs::write(temp.path().join("src/lib.rs"), "")?;
+    // The root package IS the mandatory brain (organization#973).
+    std::fs::write(temp.path().join("src/main.rs"), "fn main() {}")?;
     std::fs::write(
         temp.path().join("train/phoxal/Cargo.toml"),
         "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -105,6 +106,10 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
     // no network, unlike a registry-resolved component.
     let resolved = resolve(&robot, temp.path(), ResolveOptions::default())?;
     let source_participants = vec![
+        SourceParticipant::brain(
+            resolved.brain.crate_dir.clone(),
+            resolved.brain.bin_target.clone(),
+        ),
         SourceParticipant::user_service("mission", temp.path().join("services/mission")),
         SourceParticipant::component_driver_with_artifact_id(
             "left_drive",
@@ -135,6 +140,9 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
             ))
         },
         |source| match source.kind {
+            SourceParticipantKind::Brain => {
+                Ok(launch_plan_raw_participant_report("brain", &source.name))
+            }
             SourceParticipantKind::UserService => {
                 Ok(launch_plan_raw_participant_report("service", &source.name))
             }
@@ -184,6 +192,17 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
     }
     assert!(participant_ids.contains(&"left_drive"));
     assert!(participant_ids.contains(&"right_drive"));
+    // The mandatory root brain is planned exactly once, under its canonical
+    // identity, never under the root Cargo package name (organization#973).
+    assert_eq!(
+        participant_ids.iter().filter(|id| **id == "brain").count(),
+        1,
+        "the root brain must be planned exactly once: {participant_ids:?}"
+    );
+    assert!(
+        !participant_ids.contains(&"robot"),
+        "the root Cargo package name must never become a participant id"
+    );
     // No `tool-*` participant survives: the supervisor absorbed the resident
     // tools and the joypad became a local CLI concern (organization#978).
     assert!(
@@ -741,11 +760,14 @@ fn components_without_drivers_are_not_built() -> Result<()> {
 
     assert_eq!(
         source_participants,
-        vec![SourceParticipant::component_driver_with_artifact_id(
-            "left_drive".to_string(),
-            "ddsm115".to_string(),
-            PathBuf::from("components/ddsm115")
-        )]
+        vec![
+            fixture_brain_source(),
+            SourceParticipant::component_driver_with_artifact_id(
+                "left_drive".to_string(),
+                "ddsm115".to_string(),
+                PathBuf::from("components/ddsm115")
+            )
+        ]
     );
 
     let mut built = Vec::new();
@@ -757,19 +779,34 @@ fn components_without_drivers_are_not_built() -> Result<()> {
         |participant| {
             let dir = participant.crate_dir.as_path();
             built.push(dir.to_path_buf());
-            Ok(raw_kind("driver", "ddsm115"))
+            match participant.kind {
+                SourceParticipantKind::Brain => Ok(raw_kind("brain", "brain")),
+                _ => Ok(raw_kind("driver", "ddsm115")),
+            }
         },
     )?;
 
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
-    assert_eq!(built, vec![PathBuf::from("components/ddsm115")]);
+    assert_eq!(
+        built,
+        vec![
+            PathBuf::from("/tmp/robot"),
+            PathBuf::from("components/ddsm115")
+        ]
+    );
 
     // Simulation uses the same resolved plan but deliberately substitutes
     // physical components. The selector must not merely filter an already
     // built list.
+    // The mandatory brain still runs in simulation; only the physical
+    // component drivers are substituted out.
     let simulation_sources =
         source_participants_from_resolved_with_drivers(temp.path(), &resolved, false)?;
-    assert!(simulation_sources.is_empty(), "{simulation_sources:?}");
+    assert_eq!(
+        simulation_sources,
+        vec![fixture_brain_source()],
+        "{simulation_sources:?}"
+    );
     Ok(())
 }
 
@@ -790,8 +827,9 @@ fn registry_component_driver_becomes_a_platform_ref_not_a_source_participant() -
     }])?;
 
     let source_participants = source_participants_from_resolved(temp.path(), &resolved)?;
-    assert!(
-        source_participants.is_empty(),
+    assert_eq!(
+        source_participants,
+        vec![fixture_brain_source()],
         "registry driver must not become a source participant: {source_participants:?}"
     );
 
@@ -869,8 +907,10 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
         .expect("the selected registry driver remains checkable");
     assert_eq!(selected.instances, ["left_drive"]);
 
+    // Only the mandatory brain, exactly once: the registry driver stays a
+    // platform ref.
     let source_participants = source_participants_from_resolved(temp.path(), &resolved)?;
-    assert!(source_participants.is_empty());
+    assert_eq!(source_participants, vec![fixture_brain_source()]);
 
     let mut fetch_calls = 0;
     let outcome = run_check_with_context(
@@ -882,7 +922,10 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
             assert_eq!(artifact_ref, "phoxal-component-ddsm115");
             Ok(raw_kind("driver", "ddsm115"))
         },
-        |_| bail!("no source participants should be built"),
+        |participant| {
+            assert_eq!(participant.kind, SourceParticipantKind::Brain);
+            Ok(raw_kind("brain", "brain"))
+        },
     )?;
 
     assert_eq!(
@@ -898,10 +941,18 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
     participant_ids.sort();
     assert_eq!(
         participant_ids,
-        vec!["left_drive".to_string(), "right_drive".to_string()],
+        vec![
+            "brain".to_string(),
+            "left_drive".to_string(),
+            "right_drive".to_string()
+        ],
         "each instance must be a distinct graph node keyed by its own instance id"
     );
-    for participant in &outcome.checked_participants {
+    for participant in outcome
+        .checked_participants
+        .iter()
+        .filter(|participant| participant.participant_id != "brain")
+    {
         assert_eq!(participant.artifact_id, "ddsm115");
         assert!(matches!(
             &participant.scope,
@@ -927,7 +978,7 @@ fn driverless_registry_component_stages_assets_only_and_is_not_a_check_participa
     }])?;
 
     let source_participants = source_participants_from_resolved(temp.path(), &resolved)?;
-    assert!(source_participants.is_empty());
+    assert_eq!(source_participants, vec![fixture_brain_source()]);
     assert!(component_driver_platform_refs_from_resolved(&resolved).is_empty());
 
     Ok(())
@@ -952,20 +1003,24 @@ fn path_overridden_service_enters_check_through_source_participant_report() -> R
     let source_participants = source_participants_from_resolved(temp.path(), &resolved)?;
     assert_eq!(
         source_participants,
-        vec![SourceParticipant::official_service(
-            "drive",
-            "drive",
-            temp.path().join("framework/service/drive"),
-        )]
+        vec![
+            fixture_brain_source(),
+            SourceParticipant::official_service(
+                "drive",
+                "drive",
+                temp.path().join("framework/service/drive"),
+            )
+        ]
     );
     let outcome = run_check_with_context(
         &platform_refs,
         &source_participants,
         CheckGraphContext { robot: None },
         |_| bail!("path-overridden service should not read registry metadata"),
-        |participant| {
-            assert_eq!(participant.kind, SourceParticipantKind::OfficialService);
-            Ok(raw_kind("service", "drive"))
+        |participant| match participant.kind {
+            SourceParticipantKind::Brain => Ok(raw_kind("brain", "brain")),
+            SourceParticipantKind::OfficialService => Ok(raw_kind("service", "drive")),
+            other => bail!("unexpected source participant kind {other:?}"),
         },
     )?;
     assert!(outcome.is_ok(), "unexpected outcome: {outcome:?}");
@@ -1204,6 +1259,12 @@ fn raw(id: &str) -> RawParticipantReport {
     raw_kind("service", id)
 }
 
+/// The mandatory root brain source record `resolved_with_components`'
+/// fixture root package produces (organization#973).
+fn fixture_brain_source() -> SourceParticipant {
+    SourceParticipant::brain(std::path::PathBuf::from("/tmp/robot"), "testbot-robot")
+}
+
 fn raw_kind(kind: &str, id: &str) -> RawParticipantReport {
     RawParticipantReport {
         artifact: RawArtifact {
@@ -1222,6 +1283,11 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Bundle
         compiled: Default::default(),
         train: "0.36.0".to_string(),
         target: crate::resolve::project::host_target_triple(),
+        brain: phoxal_cli_core::project::resolver::ResolvedBrain {
+            crate_dir: std::path::PathBuf::from("/tmp/robot"),
+            package: "testbot-robot".to_string(),
+            bin_target: "testbot-robot".to_string(),
+        },
         platform_runtimes: Vec::new(),
         simulators: Vec::new(),
         user_runtimes: Vec::new(),

@@ -14,7 +14,9 @@ fn locked_project_root() -> anyhow::Result<tempfile::TempDir> {
         root.path().join("Cargo.toml"),
         "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\nmembers = [\".\", \"components/fixture\"]\nresolver = \"2\"\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
     )?;
-    std::fs::write(root.path().join("src/lib.rs"), "")?;
+    // The root package IS the mandatory brain: one auto-discovered bin target
+    // and no library (organization#973).
+    std::fs::write(root.path().join("src/main.rs"), "fn main() {}")?;
     std::fs::write(
         root.path().join("train/phoxal/Cargo.toml"),
         "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",

@@ -1142,6 +1142,11 @@ robot:
             compiled: Default::default(),
             train: "0.36.0".to_string(),
             target: "aarch64-unknown-linux-gnu".to_string(),
+            brain: phoxal_cli_core::project::resolver::ResolvedBrain {
+                crate_dir: std::path::PathBuf::from("/tmp/robot"),
+                package: "testbot-robot".to_string(),
+                bin_target: "testbot-robot".to_string(),
+            },
             platform_runtimes: Vec::new(),
             simulators: Vec::new(),
             user_runtimes: Vec::new(),

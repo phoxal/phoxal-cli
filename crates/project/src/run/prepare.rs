@@ -867,6 +867,7 @@ robot:
                 synthesize_binary_with_id(
                     &required.identity,
                     match required.kind {
+                        RequiredRuntimeKind::Brain => "brain",
                         RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => {
                             "service"
                         }

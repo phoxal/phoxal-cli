@@ -30,8 +30,8 @@ use crate::project::train::{LockedTrain, TrainSource};
 ///
 /// The floor is definitionally the framework train this phoxal-cli release is
 /// built against. `crates/core/build.rs` reads every split `phoxal-*` library
-/// pin from the workspace manifest, requires exact identical versions, and
-/// emits `PHOXAL_FRAMEWORK_TRAIN`. The whole framework shares one workspace
+/// pin from the workspace manifest, requires identical caret (`X.Y.Z`)
+/// versions, and emits `PHOXAL_FRAMEWORK_TRAIN`. The whole framework shares one workspace
 /// SemVer, so those pins name the same train as the `phoxal` facade a robot
 /// project locks while keeping that authoring facade out of the CLI dependency
 /// graph. Drift is therefore impossible rather than policed by a second literal.
@@ -240,7 +240,7 @@ mod tests {
             !framework_libraries.is_empty(),
             "workspace manifest pins at least one split framework library"
         );
-        let expected = format!("={CATALOG_FLOOR_TRAIN}");
+        let expected = CATALOG_FLOOR_TRAIN.to_string();
         for (package, dependency) in framework_libraries {
             let requirement = dependency.as_str().or_else(|| {
                 dependency

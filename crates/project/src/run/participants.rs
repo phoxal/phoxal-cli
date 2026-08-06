@@ -709,6 +709,7 @@ services:
                     host_architecture(),
                     &required.identity,
                     match required.kind {
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::Brain => "brain",
                         phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialService
                         | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserService => {
                             "service"
@@ -778,6 +779,7 @@ services:
                     host_architecture(),
                     &required.identity,
                     match required.kind {
+                        phoxal_cli_core::project::layout::RequiredRuntimeKind::Brain => "brain",
                         phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialService
                         | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserService => {
                             "service"
