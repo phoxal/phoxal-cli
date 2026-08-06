@@ -26,7 +26,7 @@
 //!
 //! ```text
 //! supervisor/connect            query   connect::Request  => connect::Reply
-//! supervisor/identity           liveliness token (see `identity_key`)
+//! supervisor/identity           liveliness token (see `IDENTITY_KEY`)
 //! supervisor/snapshot           diagnostic snapshot::Update
 //! supervisor/snapshot/current   query   snapshot::CurrentRequest => snapshot::Current
 //! supervisor/command            query   command::Request  => command::Reply
@@ -103,34 +103,16 @@ pub use schemas::{
 };
 pub use text::{Bounded, BundlePath, Detail, LogText, Name, StderrTail, TextTooLong};
 
-use phoxal_runtime_contract::ExecutionId;
-
-/// The first chunk of every Phoxal bus key.
-///
-/// `phoxal-bus` composes the same prefix privately; this crate needs it to
-/// state the liveliness token as an exact string. The
-/// `identity_key_composes_under_a_live_bus_root` test pins the two together.
-const BUS_KEY_PREFIX: &str = "phoxal";
-
 /// The protocol-relative liveliness key the supervisor declares its token on.
 ///
 /// A liveliness token is not a topic, so it is not a leaf in the tree: nothing
 /// is ever published or queried here. Its loss is the disconnection signal.
+///
+/// Relative, like every key in this tree: both the daemon that declares the
+/// token and the client that observes it hold an execution-scoped session, and
+/// composing it under that session's root is `phoxal-bus`'s job, not this
+/// crate's. `relative_keys_compose_under_the_execution_root` pins the result.
 pub const IDENTITY_KEY: &str = "supervisor/identity";
-
-/// The exact liveliness token for one execution:
-/// `phoxal/{execution_id}/supervisor/identity`.
-#[must_use]
-pub fn identity_key(execution: ExecutionId) -> String {
-    format!("{BUS_KEY_PREFIX}/{execution}/{IDENTITY_KEY}")
-}
-
-/// The same token below an already-composed bus root
-/// ([`phoxal_bus::Bus::root`]), for a caller that holds a session.
-#[must_use]
-pub fn identity_key_under(root: &str) -> String {
-    format!("{root}/{IDENTITY_KEY}")
-}
 
 phoxal_macros::phoxal_api_tree! {
     protocol supervisor {

@@ -12,8 +12,8 @@
 //!            └──────┬───────┘
 //!                   │ open(endpoint)
 //!                   ▼
-//!   1. probe the endpoint for directly connected routers   ── zero or many ──┐
-//!   2. exactly one router, converted to its ExecutionId    ── not an id  ────┤
+//!   1. probe the endpoint for the executions behind it     ── not an id  ────┐
+//!   2. exactly one of them                                 ── zero or many ──┤
 //!   3. open a bus session rooted at phoxal/{execution}                       │
 //!   4. query supervisor/connect                            ── no responder ──┤
 //!   5. the reply DECODES (typed versions) or it does not  ── incompatible ───┤
@@ -50,26 +50,23 @@
 pub mod bundle;
 pub mod compat;
 pub mod error;
-pub mod fabric;
 pub mod router;
 pub mod snapshot;
 
 pub use bundle::check_path;
 pub use compat::classify_connect_failure;
 pub use error::AttachError;
-pub use fabric::{IdentityWatch, SupervisorFabric};
-pub use router::{RouterId, exactly_one_execution};
+pub use router::exactly_one_execution;
 pub use snapshot::{SnapshotFeed, SnapshotTracker};
 
-use std::sync::Arc;
-
 use phoxal_bus::{
-    AskQuery, Bus, BusConfig, DEFAULT_QUERY_TIMEOUT, Querier, Subscribe, Subscriber, Topic,
+    AskQuery, Bus, BusConfig, DEFAULT_QUERY_TIMEOUT, KeyLivelinessObserver, LivelinessStatus,
+    Querier, Subscribe, Subscriber, Topic,
 };
 use phoxal_runtime_contract::{ExecutionId, ProducerId};
 use phoxal_supervisor_api::{
-    BundleGetOutcome, Command, CommandOutcome, ExecutionMode, Name, ProcessKey, RobotIdentity,
-    Snapshot, identity_key, supervisor,
+    BundleGetOutcome, Command, CommandOutcome, ExecutionMode, IDENTITY_KEY, Name, ProcessKey,
+    RobotIdentity, Snapshot, supervisor,
 };
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -173,6 +170,9 @@ pub struct Attachment {
     bundle: Querier<supervisor::bundle::GetRequest, supervisor::bundle::GetReply>,
     logs: Querier<supervisor::logs::SnapshotRequest, supervisor::logs::Snapshot>,
     telemetry: Querier<supervisor::telemetry::SnapshotRequest, supervisor::telemetry::Snapshot>,
+    /// Keeps the supervisor's identity observation declared. Dropping it stops
+    /// watching, which is why it is owned here and not by a task.
+    _identity: KeyLivelinessObserver,
     /// Aborted on drop, which is what makes detaching a drop.
     _tasks: JoinSet<()>,
 }
@@ -195,16 +195,16 @@ impl Attachment {
     /// Any step of the state machine in this crate's docs: no or several
     /// routers, a router that is not an execution, an unreachable or
     /// incompatible supervisor, or a transport failure.
-    pub async fn open(
-        config: &AttachmentConfig,
-        fabric: Arc<dyn SupervisorFabric>,
-    ) -> Result<Self, AttachError> {
+    pub async fn open(config: &AttachmentConfig) -> Result<Self, AttachError> {
         let endpoint = config.endpoint.as_str();
 
         // 1-2. The endpoint names exactly one execution, and the execution is
         // the router: nothing is looked up, the identity is read off the link.
-        let routers = fabric.directly_connected_routers(endpoint).await?;
-        let execution = exactly_one_execution(endpoint, &routers)?;
+        // `probe_routers` opens and closes its own short-lived session, which
+        // it must - a `Bus` is execution-scoped, and the execution is what this
+        // step is establishing.
+        let executions = Bus::probe_routers(endpoint).await?;
+        let execution = exactly_one_execution(endpoint, &executions)?;
 
         // 3. Only now can a session be opened: the key root IS the execution.
         let bus = Bus::open(BusConfig {
@@ -254,12 +254,28 @@ impl Attachment {
         let mut tasks = JoinSet::new();
         tasks.spawn(pump_snapshots(stream, feed));
 
-        // 8. Token loss is the disconnection signal.
-        let watch_handle = fabric
-            .watch_identity(&bus, &identity_key(execution))
-            .await?;
+        // 8. Token loss is the disconnection signal. The key is relative: the
+        // session root is this execution's, so the observation cannot stray
+        // onto another run's token.
+        //
+        // Statuses are levels, not edges. That matters in both directions: a
+        // token that appears during the declare/read window is reported twice
+        // and must be harmless, and a token already gone when the observation
+        // was established has no edge left to deliver - so the initial state is
+        // applied explicitly rather than waited for. Loss latches: a
+        // reconnection is a fresh `open`, never a state this value returns to.
         let (disconnected_tx, disconnected) = watch::channel(false);
-        tasks.spawn(watch_identity(watch_handle, disconnected_tx));
+        let on_change = disconnected_tx.clone();
+        let identity = bus
+            .observe_liveliness_key(IDENTITY_KEY, move |status| {
+                if status == LivelinessStatus::Lost {
+                    let _ = on_change.send(true);
+                }
+            })
+            .await?;
+        if identity.initial() == LivelinessStatus::Lost {
+            let _ = disconnected_tx.send(true);
+        }
 
         Ok(Self {
             endpoint: endpoint.to_string(),
@@ -291,6 +307,7 @@ impl Attachment {
             bus,
             snapshots,
             disconnected,
+            _identity: identity,
             _tasks: tasks,
         })
     }
@@ -307,10 +324,9 @@ impl Attachment {
     /// As [`Attachment::open`].
     pub async fn reattach(
         config: &AttachmentConfig,
-        fabric: Arc<dyn SupervisorFabric>,
         previous: ExecutionId,
     ) -> Result<Reattachment, AttachError> {
-        let attachment = Self::open(config, fabric).await?;
+        let attachment = Self::open(config).await?;
         if attachment.execution() == previous {
             Ok(Reattachment::Resumed(attachment))
         } else {
@@ -542,11 +558,6 @@ async fn pump_snapshots(stream: Subscriber<supervisor::snapshot::Update>, mut fe
             }
         }
     }
-}
-
-async fn watch_identity(mut watch: IdentityWatch, disconnected: watch::Sender<bool>) {
-    watch.lost().await;
-    let _ = disconnected.send(true);
 }
 
 /// The typed topics this client opens, exposed so a caller can assert the

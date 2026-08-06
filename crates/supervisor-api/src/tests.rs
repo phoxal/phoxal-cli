@@ -10,7 +10,7 @@ use phoxal_runtime_contract::ExecutionId;
 use crate::model::{ExecutionMode, RobotIdentity};
 use crate::schemas::{RobotApi, SupervisorSchemas};
 use crate::text::Name;
-use crate::{IDENTITY_KEY, identity_key, identity_key_under, supervisor};
+use crate::{IDENTITY_KEY, supervisor};
 
 fn assert_publish<B: ContractBody>(_topic: Topic<Publish<B>>) {}
 fn assert_subscribe<B: ContractBody>(_topic: Topic<Subscribe<B>>) {}
@@ -101,10 +101,8 @@ async fn relative_keys_compose_under_the_execution_root() {
 
     // The liveliness token is not a topic, so it is stated rather than
     // derived - this is where that statement is pinned to the live root.
-    assert_eq!(identity_key(execution), bus.full_key(IDENTITY_KEY));
-    assert_eq!(identity_key_under(bus.root()), identity_key(execution));
     assert_eq!(
-        identity_key(execution),
+        bus.full_key(IDENTITY_KEY),
         format!("phoxal/{execution}/supervisor/identity")
     );
 

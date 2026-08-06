@@ -3390,7 +3390,6 @@ dependencies = [
 name = "phoxal-supervisor-client"
 version = "0.35.0"
 dependencies = [
- "async-trait",
  "phoxal-bus",
  "phoxal-runtime-contract",
  "phoxal-supervisor-api",

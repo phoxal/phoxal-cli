@@ -4,10 +4,7 @@
 //! one of these should never have to compare two version strings by hand.
 
 use phoxal_bus::{BusError, QueryError};
-use phoxal_runtime_contract::InvalidIdentity;
 use phoxal_supervisor_api::BundlePathRejection;
-
-use crate::router::RouterId;
 
 /// A failure while establishing or running an attachment.
 #[derive(Debug, thiserror::Error)]
@@ -31,14 +28,6 @@ pub enum AttachError {
         endpoint: String,
         count: usize,
         routers: String,
-    },
-
-    /// A router announced an identity that is not a Phoxal execution id.
-    #[error("router '{router}' is not a phoxal execution: {source}")]
-    RouterIdentity {
-        router: RouterId,
-        #[source]
-        source: InvalidIdentity,
     },
 
     /// The supervisor's connect reply names a version this client does not
@@ -78,13 +67,6 @@ pub enum AttachError {
     /// A query failed, timed out, or found no responder.
     #[error(transparent)]
     Query(#[from] QueryError),
-
-    /// The fabric abstraction could not answer.
-    #[error("the transport could not report {operation}: {detail}")]
-    Fabric {
-        operation: &'static str,
-        detail: String,
-    },
 }
 
 impl AttachError {

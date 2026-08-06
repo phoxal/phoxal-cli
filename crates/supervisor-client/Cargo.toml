@@ -14,7 +14,6 @@ name = "phoxal_supervisor_client"
 path = "src/lib.rs"
 
 [dependencies]
-async-trait = { workspace = true }
 phoxal-bus = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
 phoxal-supervisor-api = { workspace = true }
