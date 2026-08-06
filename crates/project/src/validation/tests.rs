@@ -140,9 +140,7 @@ fn launch_plan_covers_services_services_and_component_instances() -> Result<()> 
             ))
         },
         |source| match source.kind {
-            SourceParticipantKind::Brain => {
-                Ok(launch_plan_raw_participant_report("brain", &source.name))
-            }
+            SourceParticipantKind::Brain => Ok(raw_brain_unit()),
             SourceParticipantKind::UserService => {
                 Ok(launch_plan_raw_participant_report("service", &source.name))
             }
@@ -780,7 +778,7 @@ fn components_without_drivers_are_not_built() -> Result<()> {
             let dir = participant.crate_dir.as_path();
             built.push(dir.to_path_buf());
             match participant.kind {
-                SourceParticipantKind::Brain => Ok(raw_kind("brain", "brain")),
+                SourceParticipantKind::Brain => Ok(raw_brain_unit()),
                 _ => Ok(raw_kind("driver", "ddsm115")),
             }
         },
@@ -924,7 +922,7 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
         },
         |participant| {
             assert_eq!(participant.kind, SourceParticipantKind::Brain);
-            Ok(raw_kind("brain", "brain"))
+            Ok(raw_brain_unit())
         },
     )?;
 
@@ -1018,7 +1016,7 @@ fn path_overridden_service_enters_check_through_source_participant_report() -> R
         CheckGraphContext { robot: None },
         |_| bail!("path-overridden service should not read registry metadata"),
         |participant| match participant.kind {
-            SourceParticipantKind::Brain => Ok(raw_kind("brain", "brain")),
+            SourceParticipantKind::Brain => Ok(raw_brain_unit()),
             SourceParticipantKind::OfficialService => Ok(raw_kind("service", "drive")),
             other => bail!("unexpected source participant kind {other:?}"),
         },
@@ -1257,6 +1255,73 @@ fn user_service_config_uses_full_json_schema_keywords() -> Result<()> {
 
 fn raw(id: &str) -> RawParticipantReport {
     raw_kind("service", id)
+}
+
+/// The report a real `#[phoxal::brain]` binary emits: fixed identity, brain
+/// kind, and the unit config schema its `Config = ()` produces.
+fn raw_brain_unit() -> RawParticipantReport {
+    raw_brain(Some(serde_json::json!({"type": "null"})))
+}
+
+/// A brain report carrying `schema` as its embedded config schema, so the
+/// check engine can be driven against a root binary that is not a valid brain.
+fn raw_brain(schema: Option<serde_json::Value>) -> RawParticipantReport {
+    RawParticipantReport {
+        artifact: RawArtifact {
+            kind: "brain".to_string(),
+            id: "brain".to_string(),
+        },
+        config_schema: schema,
+    }
+}
+
+/// The check-engine half of the unit-config gate (organization#973).
+///
+/// `phoxal validate` and the Webots simulation path never open a staged
+/// layout, so `RuntimeLayout::inspect_for`'s identical rule cannot protect
+/// them. A root binary whose id and kind are a perfectly good `brain` but
+/// which embeds a real config surface must still fail here, before any
+/// resident startup - and the ordinary unit schema must still pass.
+#[test]
+fn a_brain_declaring_a_config_surface_fails_the_check_engine() -> Result<()> {
+    let sources = vec![fixture_brain_source()];
+    let check = |schema: Option<serde_json::Value>| {
+        run_check_with_context(
+            &[],
+            &sources,
+            CheckGraphContext { robot: None },
+            |_| bail!("no platform artifact reports are fetched here"),
+            |_| Ok(raw_brain(schema.clone())),
+        )
+    };
+
+    let error = check(Some(serde_json::json!({
+        "type": "object",
+        "properties": {"speed": {"type": "integer"}},
+    })))
+    .expect_err("a brain embedding a real config surface must be rejected")
+    .to_string();
+    assert!(error.contains("brain"), "{error}");
+    assert!(error.contains("takes no config at all"), "{error}");
+
+    // A missing schema is equally not the unit schema.
+    let error = check(None)
+        .expect_err("a brain with no embedded config schema must be rejected")
+        .to_string();
+    assert!(error.contains("takes no config at all"), "{error}");
+
+    // The real `#[phoxal::brain]` record passes and enters the graph.
+    let outcome = check(Some(serde_json::json!({"type": "null"})))?;
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(
+        outcome
+            .checked_participants
+            .iter()
+            .map(|participant| participant.participant_id.as_str())
+            .collect::<Vec<_>>(),
+        ["brain"]
+    );
+    Ok(())
 }
 
 /// The mandatory root brain source record `resolved_with_components`'
