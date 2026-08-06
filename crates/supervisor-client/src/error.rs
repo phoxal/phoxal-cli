@@ -4,8 +4,8 @@
 //! one of these should never have to compare two version strings by hand.
 
 use phoxal_bus::{BusError, QueryError};
-use phoxal_runtime_contract::{ApiId, InvalidIdentity, SchemaId};
-use phoxal_supervisor_api::{BundlePathRejection, SchemaSurface};
+use phoxal_runtime_contract::InvalidIdentity;
+use phoxal_supervisor_api::BundlePathRejection;
 
 use crate::router::RouterId;
 
@@ -41,31 +41,19 @@ pub enum AttachError {
         source: InvalidIdentity,
     },
 
-    /// The daemon speaks a different robot API revision.
+    /// The supervisor's connect reply names a version this client does not
+    /// know, so the reply did not decode.
+    ///
+    /// `detail` is serde's own message, which already names the version it
+    /// found and the set it expected. It is carried verbatim rather than
+    /// restated: restating it would put the canonical strings in a second
+    /// place, which is exactly what typed versions removed.
     #[error(
-        "the supervisor at {endpoint} runs robot API {daemon}, but this client speaks {client}; \
+        "the supervisor at {endpoint} speaks a version this client does not know ({detail}); \
          the client and the daemon must be built from the same train - update the phoxal CLI \
          pair, or restart the daemon on the matching build"
     )]
-    ApiMismatch {
-        endpoint: String,
-        client: ApiId,
-        daemon: ApiId,
-    },
-
-    /// The daemon advertises a different schema for a surface this client
-    /// intends to consume.
-    #[error(
-        "the supervisor at {endpoint} speaks {surface} schema '{daemon}', but this client \
-         requires '{client}'; the client and the daemon must be built from the same train - \
-         update the phoxal CLI pair, or restart the daemon on the matching build"
-    )]
-    SchemaMismatch {
-        endpoint: String,
-        surface: SchemaSurface,
-        client: SchemaId,
-        daemon: SchemaId,
-    },
+    Incompatible { endpoint: String, detail: String },
 
     /// The connected execution is not the one this attachment was established
     /// against: the daemon restarted, which is a new attachment rather than a

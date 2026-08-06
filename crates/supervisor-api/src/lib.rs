@@ -45,15 +45,26 @@
 //! `phoxald` is not a clocked graph participant, so it has no step token to
 //! stamp state with, and none of these documents expresses robot time.
 //!
+//! # Version identity is a type, not a string
+//!
+//! Every version this contract names - each document's schema, the bus ABI, the
+//! robot API revision - is a serde enum whose variant rename is the canonical
+//! text, and that text exists exactly once in this crate. Nothing here holds a
+//! `SchemaId`/`ApiId` string newtype, and nothing compares two strings to
+//! decide compatibility: a foreign version fails to *deserialize*, and serde's
+//! error already names the tag it found and the set it expected. See
+//! [`schemas`].
+//!
 //! # NEEDED-FROM-FRAMEWORK
 //!
-//! - [`phoxal_runtime_contract::ApiId`] and [`phoxal_runtime_contract::SchemaId`]
-//!   are `Deserialize`-only. They were introduced for the embedded participant
-//!   metadata record, which has exactly one writer, but this contract puts both
-//!   on the connect reply - which the daemon must serialize. Until they gain
-//!   `Serialize`, [`schemas`] writes them through their rendered form, which is
-//!   the same string the framework would emit. Adding `Serialize` to the two
-//!   opaque identifier types deletes that shim.
+//! - **The framework's own version identities should be enums too.**
+//!   `phoxal-bus` publishes the bus ABI as `BUS_ABI: &str` and `phoxal-api`
+//!   publishes the revision as `ApiVersion::ID: &str`, so [`schemas::BusAbi`]
+//!   and [`schemas::RobotApi`] are declared here and pinned to those constants
+//!   by test. The framework-owned enums replace them on the next train.
+//!   `phoxal_runtime_contract::{ApiId, SchemaId}` are then unnecessary on this
+//!   contract - which is just as well, since they are `Deserialize`-only and a
+//!   connect reply must be serialized.
 //! - `phoxal-api` imports `phoxal_api_tree!` privately (`use
 //!   phoxal_macros::phoxal_api_tree;`), so a downstream protocol tree cannot
 //!   reach it through the crate that documents it and must depend on
@@ -75,8 +86,8 @@ pub use model::{
     StartupStepKind, StartupStepState, TelemetryRecord, WallTime,
 };
 pub use schemas::{
-    BUNDLE_GET_SCHEMA, COMMAND_SCHEMA, CONNECT_SCHEMA, LOGS_SCHEMA, SNAPSHOT_SCHEMA, SchemaSurface,
-    SupervisorSchemas, TELEMETRY_SCHEMA, current_api,
+    BundleGetSchema, BusAbi, CommandSchema, ConnectSchema, LogsSchema, RobotApi, SnapshotSchema,
+    SupervisorSchemas, TelemetrySchema,
 };
 pub use text::{Bounded, BundlePath, Detail, LogText, Name, StderrTail, TextTooLong};
 
@@ -136,8 +147,7 @@ phoxal_macros::phoxal_api_tree! {
                 #[serde(rename = "phoxal/supervisor-connect/v0")]
                 V0 {
                     robot: crate::model::RobotIdentity,
-                    #[serde(with = "crate::schemas::api_id")]
-                    api: ::phoxal_runtime_contract::ApiId,
+                    api: crate::schemas::RobotApi,
                     schemas: crate::schemas::SupervisorSchemas,
                     mode: crate::model::ExecutionMode,
                 },

@@ -16,7 +16,7 @@
 //!   2. exactly one router, converted to its ExecutionId    ── not an id  ────┤
 //!   3. open a bus session rooted at phoxal/{execution}                       │
 //!   4. query supervisor/connect                            ── no responder ──┤
-//!   5. validate api + every consumed client-visible schema ── mismatch ──────┤
+//!   5. the reply DECODES (typed versions) or it does not  ── incompatible ───┤
 //!   6. subscribe supervisor/snapshot                                         │
 //!   7. query supervisor/snapshot/current, keep the highest revision          │
 //!   8. watch the supervisor/identity liveliness token                        │
@@ -35,6 +35,10 @@
 //! endpoint means one robot-owned router. Selecting among several behind a
 //! shared fabric is organization#989.
 //!
+//! Step 5 is not a check this client performs - it is one it *cannot skip*.
+//! Every version on the connect reply is a serde enum, so a supervisor on a
+//! different train produces a reply that does not deserialize. See [`compat`].
+//!
 //! Reconnection is not a resumption. There is no session id, no resume cursor,
 //! and no partial re-handshake: [`Attachment::open`] runs the same eight steps
 //! from the top. If the execution that answers is a different one, the caller
@@ -51,7 +55,7 @@ pub mod router;
 pub mod snapshot;
 
 pub use bundle::check_path;
-pub use compat::Expectations;
+pub use compat::classify_connect_failure;
 pub use error::AttachError;
 pub use fabric::{IdentityWatch, SupervisorFabric};
 pub use router::{RouterId, exactly_one_execution};
@@ -86,26 +90,16 @@ pub struct AttachmentConfig {
     pub endpoint: String,
     /// This client's diagnostic label in bus metadata. Never identity.
     pub participant: String,
-    /// The surfaces this client will open, and therefore validate.
-    pub expectations: Expectations,
 }
 
 impl AttachmentConfig {
-    /// A full session (every surface) at `endpoint`.
+    /// Attach at `endpoint`, labelling this session `participant`.
     #[must_use]
     pub fn new(endpoint: impl Into<String>, participant: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
             participant: participant.into(),
-            expectations: Expectations::full(),
         }
-    }
-
-    /// Validate only the named surfaces.
-    #[must_use]
-    pub fn expecting(mut self, expectations: Expectations) -> Self {
-        self.expectations = expectations;
-        self
     }
 }
 
@@ -220,19 +214,19 @@ impl Attachment {
         })
         .await?;
 
-        // 4-5. Compatibility is settled here and nowhere else.
+        // 4-5. Compatibility is settled here and nowhere else - and it is
+        // settled by the decoder. Every version on the reply is a serde enum,
+        // so a supervisor on another train produces a reply that does not
+        // deserialize; there is no string to compare and no check to forget.
         let connect = Querier::new(
             bus.clone(),
             &supervisor::topic::client().connect().topic(),
             DEFAULT_QUERY_TIMEOUT,
         )?;
-        let supervisor::connect::Reply::V0 {
-            robot,
-            api,
-            schemas,
-            mode,
-        } = connect.query(supervisor::connect::Request::V0 {}).await?;
-        config.expectations.validate(endpoint, &api, &schemas)?;
+        let supervisor::connect::Reply::V0 { robot, mode, .. } = connect
+            .query(supervisor::connect::Request::V0 {})
+            .await
+            .map_err(|error| compat::classify_connect_failure(endpoint, error))?;
 
         // 6. Subscribe BEFORE querying, so no revision can be published into
         // the gap between the two.

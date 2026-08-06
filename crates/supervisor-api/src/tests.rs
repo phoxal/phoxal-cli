@@ -8,7 +8,10 @@ use phoxal_bus::{AskQuery, BusConfig, ContractBody, Publish, ServeQuery, Subscri
 use phoxal_runtime_contract::ExecutionId;
 
 use crate::model::{ExecutionMode, RobotIdentity};
-use crate::schemas::{SupervisorSchemas, current_api};
+use crate::schemas::{
+    BundleGetSchema, CommandSchema, ConnectSchema, LogsSchema, RobotApi, SnapshotSchema,
+    SupervisorSchemas, TelemetrySchema,
+};
 use crate::text::Name;
 use crate::{IDENTITY_KEY, identity_key, identity_key_under, supervisor};
 
@@ -138,13 +141,28 @@ fn both_side_brandings_are_generated() {
     assert_publish(supervisor::topic::owner().telemetry().follow());
 }
 
+fn snapshot(revision: u64) -> crate::model::Snapshot {
+    crate::model::Snapshot {
+        revision,
+        robot: RobotIdentity {
+            id: Name::new("rover"),
+            namespace: Name::new("demo"),
+        },
+        mode: ExecutionMode::Simulated,
+        lifecycle: crate::model::Lifecycle::Ready,
+        startup: Vec::new(),
+        processes: Vec::new(),
+        failure: None,
+    }
+}
+
 fn connect_reply() -> supervisor::connect::Reply {
     supervisor::connect::Reply::V0 {
         robot: RobotIdentity {
             id: Name::new("rover"),
             namespace: Name::new("demo"),
         },
-        api: current_api(),
+        api: RobotApi::CURRENT,
         schemas: SupervisorSchemas::current(),
         mode: ExecutionMode::Real,
     }
@@ -170,9 +188,12 @@ fn the_current_connect_round_trips_and_an_unknown_schema_is_rejected() {
     );
 
     let json = serde_json::to_value(&reply).unwrap();
-    assert_eq!(json["schema"], crate::CONNECT_SCHEMA);
-    assert_eq!(json["api"], "v0.1");
-    assert_eq!(json["schemas"]["snapshot"], crate::SNAPSHOT_SCHEMA);
+    assert_eq!(json["schema"], ConnectSchema::CURRENT.as_str());
+    assert_eq!(json["api"], RobotApi::CURRENT.as_str());
+    assert_eq!(
+        json["schemas"]["snapshot"],
+        SnapshotSchema::CURRENT.as_str()
+    );
     assert_eq!(json["mode"], "real");
     // Nothing the issue removed leaks back in through a stray field.
     for absent in [
@@ -200,24 +221,12 @@ fn the_current_connect_round_trips_and_an_unknown_schema_is_rejected() {
 /// client that validated `schemas.snapshot` has validated both.
 #[test]
 fn the_stream_and_the_current_query_carry_one_snapshot_schema() {
-    let snapshot = crate::model::Snapshot {
-        revision: 7,
-        robot: RobotIdentity {
-            id: Name::new("rover"),
-            namespace: Name::new("demo"),
-        },
-        mode: ExecutionMode::Simulated,
-        lifecycle: crate::model::Lifecycle::Ready,
-        startup: Vec::new(),
-        processes: Vec::new(),
-        failure: None,
-    };
-    let update = supervisor::snapshot::Update::V0(snapshot.clone());
-    let current = supervisor::snapshot::Current::V0(snapshot);
+    let update = supervisor::snapshot::Update::V0(snapshot(7));
+    let current = supervisor::snapshot::Current::V0(snapshot(7));
 
     let update_json = serde_json::to_value(&update).unwrap();
     let current_json = serde_json::to_value(&current).unwrap();
-    assert_eq!(update_json["schema"], crate::SNAPSHOT_SCHEMA);
+    assert_eq!(update_json["schema"], SnapshotSchema::CURRENT.as_str());
     assert_eq!(update_json, current_json);
 
     let bytes = rmp_serde::to_vec_named(&update).unwrap();
@@ -225,4 +234,106 @@ fn the_stream_and_the_current_query_carry_one_snapshot_schema() {
         rmp_serde::from_slice::<supervisor::snapshot::Update>(&bytes).unwrap(),
         update
     );
+}
+
+/// The one place a document's schema tag and its version enum could drift is
+/// that they are separate literals - the tag lives in the `phoxal_api_tree!`
+/// invocation, the enum in `schemas`. Serialize both and compare, per document,
+/// so a rename on either side fails here rather than at an attachment.
+#[test]
+fn every_documents_tag_matches_its_version_enum() {
+    fn tag(document: &impl serde::Serialize) -> String {
+        serde_json::to_value(document).unwrap()["schema"]
+            .as_str()
+            .expect("every supervisor document is schema-tagged")
+            .to_string()
+    }
+
+    assert_eq!(
+        tag(&supervisor::connect::Request::V0 {}),
+        ConnectSchema::CURRENT.as_str()
+    );
+    assert_eq!(tag(&connect_reply()), ConnectSchema::CURRENT.as_str());
+
+    assert_eq!(
+        tag(&supervisor::snapshot::Update::V0(snapshot(1))),
+        SnapshotSchema::CURRENT.as_str()
+    );
+    assert_eq!(
+        tag(&supervisor::snapshot::Current::V0(snapshot(1))),
+        SnapshotSchema::CURRENT.as_str()
+    );
+    assert_eq!(
+        tag(&supervisor::snapshot::CurrentRequest::V0 {}),
+        SnapshotSchema::CURRENT.as_str()
+    );
+
+    assert_eq!(
+        tag(&supervisor::command::Request::V0 {
+            command: crate::model::Command::Stop,
+        }),
+        CommandSchema::CURRENT.as_str()
+    );
+    assert_eq!(
+        tag(&supervisor::command::Reply::V0 {
+            outcome: crate::model::CommandOutcome::Accepted,
+        }),
+        CommandSchema::CURRENT.as_str()
+    );
+
+    assert_eq!(
+        tag(&supervisor::bundle::GetRequest::V0 {
+            path: crate::text::BundlePath::new("robot.yaml"),
+        }),
+        BundleGetSchema::CURRENT.as_str()
+    );
+    assert_eq!(
+        tag(&supervisor::bundle::GetReply::V0 {
+            outcome: crate::model::BundleGetOutcome::Missing,
+        }),
+        BundleGetSchema::CURRENT.as_str()
+    );
+
+    assert_eq!(
+        tag(&supervisor::logs::SnapshotRequest::V0 {
+            participant: None,
+            limit: 0,
+            before_sequence: None,
+        }),
+        LogsSchema::CURRENT.as_str()
+    );
+    assert_eq!(
+        tag(&supervisor::logs::Snapshot::V0 {
+            cursor: cursor(),
+            ingest_dropped: 0,
+            records: Vec::new(),
+            next_before_sequence: None,
+        }),
+        LogsSchema::CURRENT.as_str()
+    );
+
+    assert_eq!(
+        tag(&supervisor::telemetry::SnapshotRequest::V0 {
+            participant: None,
+            limit: 0,
+            before_sequence: None,
+        }),
+        TelemetrySchema::CURRENT.as_str()
+    );
+    assert_eq!(
+        tag(&supervisor::telemetry::Snapshot::V0 {
+            cursor: cursor(),
+            records: Vec::new(),
+            capacity_evictions: 0,
+            next_before_sequence: None,
+        }),
+        TelemetrySchema::CURRENT.as_str()
+    );
+}
+
+fn cursor() -> crate::model::Cursor {
+    crate::model::Cursor {
+        generation: Name::new("g1"),
+        sequence: 0,
+    }
 }

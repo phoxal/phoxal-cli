@@ -3436,6 +3436,7 @@ dependencies = [
  "phoxal-bus 0.54.0",
  "phoxal-runtime-contract 0.54.0",
  "phoxal-supervisor-api",
+ "serde_json",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
