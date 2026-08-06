@@ -366,7 +366,7 @@ impl Worker {
         .context("failed to resolve and compile the frozen project snapshot")?;
 
         // The deterministic, robot-independent official set - every catalog
-        // service, tool, and the router ("every official always runs" per
+        // service ("every official always runs" per
         // #945) - is known from the catalog alone. Its train comes from the
         // same frozen resolution as robot-specific drivers, so a live-tree edit
         // cannot split one container install batch across two trains.

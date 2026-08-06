@@ -4,7 +4,7 @@
 //! reads `robot.yaml`, resolves the graph against the CLI-internal official
 //! catalog ([`phoxal_cli_core::project::catalog`]) and the project's exact
 //! locked framework train, and drives the local develop/simulate loop.
-//! Official services, drivers, tools, and simulators materialize via `cargo
+//! Official services, drivers, and simulators materialize via `cargo
 //! install <package>@<train> --registry phoxal --locked` straight into the
 //! staged runtime layout's flat `bin/` store (organization#951 WS4) - there
 //! is no separate download/vendoring step and no project-local artifact

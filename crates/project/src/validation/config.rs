@@ -19,9 +19,8 @@ pub(crate) fn validate_user_service_config(
 }
 
 /// Validate one declared user runtime's authored config against its embedded
-/// schema, with the declaring map (`services`/`tools`) in the diagnostic path.
-/// The config VALUE is passed in, never re-looked-up, so tool declarations
-/// validate their real `tools.<id>.config` (#950).
+/// schema, with the declaring map (`services`) in the diagnostic path.
+/// The config VALUE is passed in, never re-looked-up (#950).
 pub(crate) fn validate_user_runtime_config(
     runtime_id: &str,
     schema: Option<&Value>,

@@ -161,7 +161,7 @@ struct WorkspaceRuntimeReport {
     successes: Vec<String>,
 }
 
-/// Compare the declared `services:`/`tools:` maps in robot.yaml against the
+/// Compare the declared `services:` map in robot.yaml against the
 /// Cargo workspace's own discovered runtime crates - pure string comparison,
 /// no compilation. `project` is the same locked resolution the public
 /// [`crate::validate`] use case already computed; declaration invariants and the resolution are the

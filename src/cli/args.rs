@@ -18,8 +18,13 @@ use super::commands::{
                   phoxal reads robot.yaml and materializes official services and component drivers with `cargo install` against the phoxal registry, pinned exactly to the Cargo.lock-selected framework train, then drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes.\n\n\
                   Every robot project's ROOT Cargo package is its one mandatory brain: a non-published workspace member depending on `phoxal`, with exactly one binary target and no library. The minimal root source is:\n\n\
                   \x20 // src/main.rs\n\
+                  \x20 use phoxal::prelude::*;\n\
                   \x20 #[phoxal::brain]\n\
                   \x20 struct Brain;\n\
+                  \x20 impl Participant for Brain {\n\
+                  \x20     async fn setup(&self, _ctx: &mut SetupContext<Self>, _config: Self::Config)\n\
+                  \x20         -> Result<(Self::State, Self::Api)> { Ok(((), ())) }\n\
+                  \x20 }\n\
                   \x20 fn main() -> phoxal::Result<()> { phoxal::run::<Brain>() }\n\n\
                   The CLI discovers it from Cargo metadata, always builds it, stages it as `bin/brain`, and launches it in every native and Webots graph. It is never declared under robot.yaml `services:` - `brain` is a reserved identity there. A project whose root is still a code-less `src/lib.rs` anchor is rejected with the exact migration instruction."
 )]
