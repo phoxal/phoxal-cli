@@ -1,5 +1,4 @@
 use super::*;
-use crate::paths::host::test_support::ScratchPhoxalHome;
 
 /// A minimal robot workspace whose locked train resolves to `0.1.0` via a
 /// local path dependency on a stub `phoxal` crate - no registry, no network.
@@ -163,7 +162,6 @@ impl crate::Reporter for RecordingReporter {
 
 #[test]
 fn container_resolution_compiles_once_and_rejects_profile_drift() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
     write_compiler_sources(project.path(), &robot)?;
@@ -232,7 +230,6 @@ fn container_snapshot_uses_the_live_registry_cache_for_components_and_metadata()
         }
     }
 
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot_with_components(
         r#"
     left_drive:
@@ -329,7 +326,6 @@ fn an_invalid_declaration_fails_before_locked_project_resolution() -> anyhow::Re
     // when there is no Cargo project at all (which would otherwise be the
     // first failure) - proving the ordering, not just the presence, of the
     // check.
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("services:\n  drive: {}\n")?;
     let error = resolve(&robot, Path::new("/nonexistent"), ResolveOptions::default())
         .expect_err("an official identity in services: must fail resolution");
@@ -343,7 +339,6 @@ fn an_invalid_declaration_fails_before_locked_project_resolution() -> anyhow::Re
 
 #[test]
 fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
 
@@ -398,7 +393,6 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
 
 #[test]
 fn include_simulators_toggles_the_webots_controller_only() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
 
@@ -428,7 +422,6 @@ fn include_simulators_toggles_the_webots_controller_only() -> anyhow::Result<()>
 #[test]
 fn a_matching_workspace_service_crate_overrides_the_official_binary_without_declaration()
 -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
     let crate_dir = project.path().join("services/drive");
@@ -457,7 +450,6 @@ fn a_matching_workspace_service_crate_overrides_the_official_binary_without_decl
 
 #[test]
 fn a_declared_user_service_with_no_workspace_crate_fails_resolution() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("services:\n  mission: {}\n")?;
     let project = locked_project_root()?;
 
@@ -473,7 +465,6 @@ fn a_declared_user_service_with_no_workspace_crate_fails_resolution() -> anyhow:
 
 #[test]
 fn an_undiscovered_workspace_service_is_a_drift_diagnostic_not_an_error() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
     let crate_dir = project.path().join("services/mission");
@@ -499,7 +490,6 @@ fn an_undiscovered_workspace_service_is_a_drift_diagnostic_not_an_error() -> any
 #[test]
 fn a_workspace_component_resolves_its_assets_and_driver_without_the_registry() -> anyhow::Result<()>
 {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot_with_components(
         r#"
     left_drive:
@@ -540,7 +530,6 @@ fn a_workspace_component_resolves_its_assets_and_driver_without_the_registry() -
 
 #[test]
 fn local_component_roots_are_independent_of_driver_intent() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let driverless_robot = minimal_robot_with_components(
         r#"
     left_drive:
@@ -893,7 +882,6 @@ fn components_root_symlink_is_rejected() -> anyhow::Result<()> {
 /// `source_manifest` for reporting.
 #[test]
 fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot_with_components(
         r#"
     left_drive:

@@ -8,13 +8,15 @@ use super::args::{Cli, RootCommand};
 use super::{AppContext, Ui};
 
 impl RootCommand {
-    /// Whether this invocation is a pure attachment client with no headless
-    /// fallback. `run` and foreground `simulation webots run` degrade to an
-    /// in-process headless resident when stderr is not a terminal (see
-    /// `application::run::should_run_resident_in_process`); `attach` has
-    /// nothing to drive but the TUI, so it alone requires a TTY.
+    /// Whether this invocation mounts the terminal application.
+    ///
+    /// There is no headless fallback any more: a command that attaches has
+    /// nothing to drive but the TUI, because the supervision loop it used to
+    /// fall back to now lives in a separate executable (organization#978).
+    /// `start` is the headless verb - it launches, waits for readiness, and
+    /// returns without ever attaching.
     fn requires_terminal(&self) -> bool {
-        matches!(self, Self::Attach(_))
+        matches!(self, Self::Attach(_) | Self::Run(_) | Self::Simulation(_))
     }
 
     async fn run(&self, app: &AppContext) -> Result<()> {
@@ -43,7 +45,11 @@ impl RootCommand {
 pub async fn dispatch(cli: Cli, app: &AppContext) -> Result<()> {
     let terminal = std::io::stderr().is_terminal();
     if cli.command.requires_terminal() && !terminal {
-        bail!("interactive `attach` sessions require a terminal; run this command in a TTY");
+        bail!(
+            "this command attaches a terminal session and needs a TTY. For a headless \
+             launch use `phoxal start`, and to inspect an execution use `phoxal status` or \
+             `phoxal logs`"
+        );
     }
     let output = crate::cli::output::OutputContext::compute(terminal);
     let app = &AppContext {
@@ -59,22 +65,33 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    /// Every attaching command needs a TTY; `start` and the project commands
+    /// do not, because they never mount the terminal application.
     #[test]
-    fn only_attach_requires_a_terminal() {
-        let attach = Cli::try_parse_from(["phoxal", "attach"]).unwrap();
-        assert!(attach.command.requires_terminal());
-
-        // `run` and foreground `simulation webots run` fall back to a headless
-        // in-process resident without a TTY - the resident child re-executes
-        // them with stderr bound to the supervisor log.
-        let run = Cli::try_parse_from(["phoxal", "run"]).unwrap();
-        assert!(!run.command.requires_terminal());
-
-        let live =
-            Cli::try_parse_from(["phoxal", "simulation", "webots", "run", "default"]).unwrap();
-        assert!(!live.command.requires_terminal());
-
-        let start = Cli::try_parse_from(["phoxal", "start"]).unwrap();
-        assert!(!start.command.requires_terminal());
+    fn every_attaching_command_requires_a_terminal_and_start_does_not() {
+        for attaching in [
+            vec!["phoxal", "attach"],
+            vec!["phoxal", "run"],
+            vec!["phoxal", "simulation", "webots", "run", "default"],
+        ] {
+            let cli = Cli::try_parse_from(attaching.clone()).unwrap();
+            assert!(
+                cli.command.requires_terminal(),
+                "{attaching:?} mounts the TUI and must require a terminal"
+            );
+        }
+        for headless in [
+            vec!["phoxal", "start"],
+            vec!["phoxal", "status"],
+            vec!["phoxal", "stop"],
+            vec!["phoxal", "logs"],
+            vec!["phoxal", "build"],
+        ] {
+            let cli = Cli::try_parse_from(headless.clone()).unwrap();
+            assert!(
+                !cli.command.requires_terminal(),
+                "{headless:?} never mounts the TUI"
+            );
+        }
     }
 }

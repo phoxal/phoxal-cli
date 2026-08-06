@@ -109,8 +109,9 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
     crate::run::prepare::apply_session_connect(&mut plan, &mut participants, &router.endpoint);
 
     crate::progress::ensure_active(request.reporter.as_ref())?;
-    super::webots::root::wipe_and_recreate()?;
+    super::webots::root::wipe_and_recreate(&resolved.project_root)?;
     let staged_world = super::webots::staging::stage_simulation_for_robot(
+        &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
         &plan,
@@ -154,7 +155,7 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
         note: None,
         launch: Some(webots_spec),
     });
-    let webots_stage_root = super::webots::root::root()?;
+    let webots_stage_root = super::webots::root::root(&resolved.project_root);
     Ok(PreparedExecution {
         target: request.target,
         project_root: resolved.project_root,

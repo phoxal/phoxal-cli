@@ -26,6 +26,7 @@ mod application;
 mod attach;
 mod bootstrap;
 mod cli;
+mod cutover;
 mod joypad;
 mod lock;
 mod reconcile;

@@ -163,8 +163,17 @@ async fn refuse_if_live(target: &Target) -> Result<()> {
     if probe(&target.endpoint).await.is_none() {
         return Ok(());
     }
+    bail!(already_live_message(target))
+}
+
+/// The refusal `run` earns when an execution already answers.
+///
+/// It names both commands that actually apply. Silently attaching would be the
+/// one behavior `run` must never have: the operator asked for a fresh
+/// execution of the code they just changed (organization#978).
+fn already_live_message(target: &Target) -> String {
     let display = target.project.display();
-    bail!(
+    format!(
         "an execution is already live at {} - `run` always creates a fresh one and never attaches \
          to an existing execution. Attach to it with `phoxal attach {display}`, or end it with \
          `phoxal stop {display}` and run again",
@@ -541,6 +550,55 @@ mod tests {
         assert!(rendered.contains("driver:base"), "{rendered}");
         assert!(rendered.contains("pid=4242"), "{rendered}");
         assert!(rendered.contains("restarts=2"), "{rendered}");
+    }
+
+    /// `run` never silently attaches: the refusal names attach and stop, which
+    /// are the two things the operator can actually do (organization#978).
+    #[test]
+    fn a_live_execution_makes_run_fail_with_the_commands_that_apply() {
+        let target = Target::at_endpoint(
+            "unixsock-stream//tmp/rover/.phoxal/run/zenoh.sock".to_string(),
+            PathBuf::from("/tmp/rover"),
+        );
+        let message = already_live_message(&target);
+        assert!(message.contains("already live"), "{message}");
+        assert!(message.contains("never attaches"), "{message}");
+        assert!(message.contains("phoxal attach /tmp/rover"), "{message}");
+        assert!(message.contains("phoxal stop /tmp/rover"), "{message}");
+        assert!(message.contains(&target.endpoint), "{message}");
+    }
+
+    /// `attach`, `stop`, `status`, and `logs` are existing-execution only.
+    /// None of them may reach the build path, and the compiler is what proves
+    /// it: the only function that builds takes the lock and calls
+    /// `prepare_run`, and it is reachable from `run` and `start` alone.
+    #[test]
+    fn only_run_and_start_reach_the_build_path() {
+        let building = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/application/lifecycle.rs"),
+        )
+        .expect("this module is readable");
+        let (_, after) = building
+            .split_once("async fn open_existing(")
+            .expect("the existing-execution resolver exists");
+        let existing_half = after
+            .split_once("// shared outcome reporting")
+            .map_or(after, |(before, _)| before);
+        for forbidden in [
+            "build_publish_and_launch",
+            "prepare_run",
+            "daemon::spawn",
+            "ProjectLock::acquire",
+        ] {
+            assert!(
+                !existing_half.contains(forbidden),
+                "the existing-execution commands must not reach `{forbidden}`"
+            );
+        }
+        assert!(
+            existing_half.contains("Session::open"),
+            "the existing-execution commands attach and nothing else"
+        );
     }
 
     #[test]

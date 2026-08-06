@@ -79,7 +79,7 @@ fn stage_controller_runtime_with_home(
         );
         prepared
     };
-    let staged_dir = root::controller_dir(controller_name)?;
+    let staged_dir = root::controller_dir(project_root, controller_name);
     std::fs::create_dir_all(&staged_dir).with_context(|| {
         format!(
             "failed to create staged controller directory {}",
@@ -194,7 +194,6 @@ impl Drop for WebotsHomeEnvGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::host::test_support::ScratchPhoxalHome;
     use phoxal_cli_catalog::ArtifactKind;
     use std::sync::Mutex;
 
@@ -257,7 +256,6 @@ mod tests {
 
     #[test]
     fn path_overridden_controller_is_built_and_symlinked_into_the_webots_layout() -> Result<()> {
-        let _home = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         let source = project.path().join("simulator-webots-controller");
         std::fs::create_dir_all(source.join("src"))?;
@@ -290,7 +288,7 @@ version = "0.1.0"
         std::fs::write(&prepared, b"fixture")?;
         let artifacts =
             crate::build::cargo::SourceArtifacts::for_test(runtime.name.clone(), prepared);
-        root::wipe_and_recreate()?;
+        root::wipe_and_recreate(project.path())?;
         stage_controller_runtime_with_home(
             project.path(),
             &runtime,
@@ -298,8 +296,11 @@ version = "0.1.0"
             &artifacts,
             project.path(),
         )?;
-        let staged = root::controller_dir(crate::simulation::prepare::WEBOTS_CONTROLLER_NAME)?
-            .join(crate::simulation::prepare::WEBOTS_CONTROLLER_NAME);
+        let staged = root::controller_dir(
+            project.path(),
+            crate::simulation::prepare::WEBOTS_CONTROLLER_NAME,
+        )
+        .join(crate::simulation::prepare::WEBOTS_CONTROLLER_NAME);
         assert!(
             staged
                 .symlink_metadata()

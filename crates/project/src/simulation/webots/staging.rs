@@ -14,6 +14,7 @@ use std::path::Path;
 
 /// Stage a resolved robot and authored world into the Webots filesystem view.
 pub(crate) fn stage_simulation_for_robot(
+    project_root: &Path,
     world_source_path: &Path,
     resolved: &BundlePlan,
     launch_plan: &LaunchPlan,
@@ -59,13 +60,13 @@ pub(crate) fn stage_simulation_for_robot(
         .map(|component_type| ComponentTypeToStage { component_type })
         .collect::<Vec<_>>();
 
-    let mesh_root = root::meshes_dir()?;
+    let mesh_root = root::meshes_dir(project_root);
     stage_compiled_geometry_assets(bundle, &resolved.compiled.assets, &mesh_root)?;
     stage_simulation_world(
         &base_world_text,
-        &root::protos_dir()?,
+        &root::protos_dir(project_root),
         &mesh_root,
-        &root::world_path(world_name)?,
+        &root::world_path(project_root, world_name),
         &[RobotToStage {
             robot_id: robot_id.to_string(),
             bundle,
@@ -170,14 +171,13 @@ fn validate_unique_geometry_destinations<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::host::test_support::ScratchPhoxalHome;
     use phoxal_cli_core::project::resolver::CompiledBundle;
 
     #[test]
     fn creates_empty_mesh_root_after_webots_tree_recreation() -> Result<()> {
-        let _home = ScratchPhoxalHome::new()?;
-        root::wipe_and_recreate()?;
-        let mesh_root = root::meshes_dir()?;
+        let webots_project = tempfile::tempdir()?;
+        root::wipe_and_recreate(webots_project.path())?;
+        let mesh_root = root::meshes_dir(webots_project.path());
         assert!(!mesh_root.exists());
 
         let source = tempfile::tempdir()?;

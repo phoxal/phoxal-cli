@@ -22,7 +22,6 @@ mod target;
 mod validation;
 
 pub use build::container::ContainerEngine;
-pub use paths::host::PROJECT_ROOT_ENV;
 pub use paths::runtime::{
     ACTIVE_RUNTIME_ROOT, INSTALL_ROOT, INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT,
     RELEASES_ROOT, RuntimePaths, SYSTEMD_ACTIVE_ROOT, SYSTEMD_UNIT, SYSTEMD_UNIT_PATH,
