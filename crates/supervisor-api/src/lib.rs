@@ -37,7 +37,19 @@
 //! supervisor/telemetry/follow   diagnostic telemetry::Follow
 //! ```
 //!
-//! Every document is a serde-tagged enum whose variant *is* its schema version.
+//! Every document is a serde-tagged enum whose variant *is* its schema version,
+//! and every tag **mirrors the routing above**:
+//! `phoxal/<relative-topic-path>[/<role>]/v0`. A tag read out of a capture
+//! therefore names the exact endpoint that produced it.
+//!
+//! Tags are unique **per structure**, not per topic: a request and its reply
+//! are different documents and never share a tag, which is what makes a tag
+//! identifying rather than merely descriptive. The role suffix disambiguates
+//! the structures sharing one topic, and the topic's primary document - the
+//! stream, or the reply for a query-only topic - carries no suffix. This is
+//! also why the snapshot stream and the `current` query, which carry the same
+//! [`model::Snapshot`] payload, are two distinct tags.
+//!
 //! Pre-v1 the current `V0` is edited in place and every binary is rebuilt; the
 //! macro neither infers a breaking change nor mints a version.
 //!
@@ -48,12 +60,16 @@
 //! # Version identity is a type, not a string
 //!
 //! Every version this contract names - each document's schema, the bus ABI, the
-//! robot API revision - is a serde enum whose variant rename is the canonical
-//! text, and that text exists exactly once in this crate. Nothing here holds a
-//! `SchemaId`/`ApiId` string newtype, and nothing compares two strings to
-//! decide compatibility: a foreign version fails to *deserialize*, and serde's
-//! error already names the tag it found and the set it expected. See
-//! [`schemas`].
+//! authored robot grammar, the robot API revision - is a serde enum whose
+//! variant rename is the canonical text, and that text exists exactly once in
+//! this crate. Nothing here holds a `SchemaId`/`ApiId` string newtype, and
+//! nothing compares two strings to decide compatibility: a foreign version
+//! fails to *deserialize*, and serde's error already names the tag it found and
+//! the set it expected. See [`schemas`].
+//!
+//! Document **tags** are not bus **keys**. Key building is untouched by any of
+//! this: robot-domain topics still route on the bare revision (`v0.1/...`) and
+//! this protocol on `supervisor/...`.
 //!
 //! # NEEDED-FROM-FRAMEWORK
 //!
@@ -86,8 +102,8 @@ pub use model::{
     StartupStepKind, StartupStepState, TelemetryRecord, WallTime,
 };
 pub use schemas::{
-    BundleGetSchema, BusAbi, CommandSchema, ConnectSchema, LogsSchema, RobotApi, SnapshotSchema,
-    SupervisorSchemas, TelemetrySchema,
+    BundleGetSchema, BusAbi, CommandSchema, LogsSchema, RobotApi, RobotDocumentSchema,
+    SnapshotSchema, SupervisorSchemas, TelemetrySchema,
 };
 pub use text::{Bounded, BundlePath, Detail, LogText, Name, StderrTail, TextTooLong};
 
@@ -129,7 +145,7 @@ phoxal_macros::phoxal_api_tree! {
             /// to trust.
             #[serde(tag = "schema")]
             enum Request {
-                #[serde(rename = "phoxal/supervisor-connect/v0")]
+                #[serde(rename = "phoxal/supervisor/connect/request/v0")]
                 V0 {},
             }
 
@@ -144,7 +160,7 @@ phoxal_macros::phoxal_api_tree! {
             /// checks that never reach an attachment.
             #[serde(tag = "schema")]
             enum Reply {
-                #[serde(rename = "phoxal/supervisor-connect/v0")]
+                #[serde(rename = "phoxal/supervisor/connect/reply/v0")]
                 V0 {
                     robot: crate::model::RobotIdentity,
                     api: crate::schemas::RobotApi,
@@ -163,7 +179,7 @@ phoxal_macros::phoxal_api_tree! {
             /// installed.
             #[serde(tag = "schema")]
             enum Update {
-                #[serde(rename = "phoxal/supervisor-snapshot/v0")]
+                #[serde(rename = "phoxal/supervisor/snapshot/v0")]
                 V0(crate::model::Snapshot),
             }
 
@@ -173,7 +189,7 @@ phoxal_macros::phoxal_api_tree! {
             /// filter: the whole execution state is one bounded document.
             #[serde(tag = "schema")]
             enum CurrentRequest {
-                #[serde(rename = "phoxal/supervisor-snapshot/v0")]
+                #[serde(rename = "phoxal/supervisor/snapshot/current/request/v0")]
                 V0 {},
             }
 
@@ -181,7 +197,7 @@ phoxal_macros::phoxal_api_tree! {
             /// client can ask for it instead of waiting for the next push.
             #[serde(tag = "schema")]
             enum Current {
-                #[serde(rename = "phoxal/supervisor-snapshot/v0")]
+                #[serde(rename = "phoxal/supervisor/snapshot/current/v0")]
                 V0(crate::model::Snapshot),
             }
 
@@ -191,7 +207,7 @@ phoxal_macros::phoxal_api_tree! {
         command {
             #[serde(tag = "schema")]
             enum Request {
-                #[serde(rename = "phoxal/supervisor-command/v0")]
+                #[serde(rename = "phoxal/supervisor/command/request/v0")]
                 V0 { command: crate::model::Command },
             }
 
@@ -200,7 +216,7 @@ phoxal_macros::phoxal_api_tree! {
             /// already one request with one answer.
             #[serde(tag = "schema")]
             enum Reply {
-                #[serde(rename = "phoxal/supervisor-command/v0")]
+                #[serde(rename = "phoxal/supervisor/command/reply/v0")]
                 V0 {
                     outcome: crate::model::CommandOutcome,
                 },
@@ -214,13 +230,13 @@ phoxal_macros::phoxal_api_tree! {
             /// bundle-relative path.
             #[serde(tag = "schema")]
             enum GetRequest {
-                #[serde(rename = "phoxal/supervisor-bundle-get/v0")]
+                #[serde(rename = "phoxal/supervisor/bundle/get/request/v0")]
                 V0 { path: crate::text::BundlePath },
             }
 
             #[serde(tag = "schema")]
             enum GetReply {
-                #[serde(rename = "phoxal/supervisor-bundle-get/v0")]
+                #[serde(rename = "phoxal/supervisor/bundle/get/reply/v0")]
                 V0 {
                     outcome: crate::model::BundleGetOutcome,
                 },
@@ -233,7 +249,7 @@ phoxal_macros::phoxal_api_tree! {
             /// One backward page of the supervisor's bounded log history.
             #[serde(tag = "schema")]
             enum SnapshotRequest {
-                #[serde(rename = "phoxal/supervisor-logs/v0")]
+                #[serde(rename = "phoxal/supervisor/logs/snapshot/request/v0")]
                 V0 {
                     /// Exact participant filter. `None` selects every
                     /// participant.
@@ -249,7 +265,7 @@ phoxal_macros::phoxal_api_tree! {
 
             #[serde(tag = "schema")]
             enum Snapshot {
-                #[serde(rename = "phoxal/supervisor-logs/v0")]
+                #[serde(rename = "phoxal/supervisor/logs/snapshot/v0")]
                 V0 {
                     cursor: crate::model::Cursor,
                     /// Cumulative samples the supervisor's own bounded ingest
@@ -268,7 +284,7 @@ phoxal_macros::phoxal_api_tree! {
             /// exactly one past its installed cursor.
             #[serde(tag = "schema")]
             enum Follow {
-                #[serde(rename = "phoxal/supervisor-logs/v0")]
+                #[serde(rename = "phoxal/supervisor/logs/follow/v0")]
                 V0 {
                     cursor: crate::model::Cursor,
                     ingest_dropped: u64,
@@ -283,7 +299,7 @@ phoxal_macros::phoxal_api_tree! {
         telemetry {
             #[serde(tag = "schema")]
             enum SnapshotRequest {
-                #[serde(rename = "phoxal/supervisor-telemetry/v0")]
+                #[serde(rename = "phoxal/supervisor/telemetry/snapshot/request/v0")]
                 V0 {
                     participant: Option<crate::text::Name>,
                     limit: u32,
@@ -293,7 +309,7 @@ phoxal_macros::phoxal_api_tree! {
 
             #[serde(tag = "schema")]
             enum Snapshot {
-                #[serde(rename = "phoxal/supervisor-telemetry/v0")]
+                #[serde(rename = "phoxal/supervisor/telemetry/snapshot/v0")]
                 V0 {
                     cursor: crate::model::Cursor,
                     records: Vec<crate::model::TelemetryRecord>,
@@ -306,7 +322,7 @@ phoxal_macros::phoxal_api_tree! {
 
             #[serde(tag = "schema")]
             enum Follow {
-                #[serde(rename = "phoxal/supervisor-telemetry/v0")]
+                #[serde(rename = "phoxal/supervisor/telemetry/follow/v0")]
                 V0 {
                     cursor: crate::model::Cursor,
                     record: crate::model::TelemetryRecord,

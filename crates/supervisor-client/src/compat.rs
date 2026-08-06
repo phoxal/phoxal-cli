@@ -57,7 +57,7 @@ mod tests {
             mode: phoxal_supervisor_api::ExecutionMode::Real,
         })
         .unwrap();
-        reply["schemas"]["snapshot"] = serde_json::json!("phoxal/supervisor-snapshot/v1");
+        reply["schemas"]["snapshot"] = serde_json::json!("phoxal/supervisor/snapshot/v1");
 
         let decode_error = serde_json::from_value::<supervisor::connect::Reply>(reply)
             .expect_err("a foreign snapshot version must not decode");
@@ -73,7 +73,7 @@ mod tests {
         // Serde named the foreign version and the expected one; the diagnostic
         // keeps that naming rather than restating it.
         assert!(
-            rendered.contains("phoxal/supervisor-snapshot/v1"),
+            rendered.contains("phoxal/supervisor/snapshot/v1"),
             "{rendered}"
         );
         assert!(
