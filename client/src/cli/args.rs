@@ -78,21 +78,31 @@ pub enum RootCommand {
     Schema(schema::Schema),
     #[command(about = "Simulate a robot with `simulation webots run`.")]
     Simulation(simulation::Simulation),
-    #[command(about = "Run the resolved robot graph with the host-native supervisor.")]
+    #[command(
+        about = "Build a fresh bundle, launch the supervisor on it, and attach.",
+        long_about = "Create a fresh execution and attach a terminal session to it.\n\n\
+                      `run` builds and publishes a fresh bundle, launches `phoxald` on it, and attaches over the supervisor API. It never attaches to an execution that is already live: if one answers, it says so and names `attach` and `stop` instead - you asked for a fresh execution of the code you just changed.\n\n\
+                      In the session, `q` detaches and leaves the robot running; Ctrl+C opens a stop confirmation, and a second Ctrl+C confirms it."
+    )]
     Run(run::Run),
     #[command(
-        about = "Run a robot instance headless (no TUI); the systemd-facing verb.",
-        long_about = "Run a robot instance headless, with no terminal UI - the verb `phoxal.service` invokes.\n\n\
-                      Uses the same universal pipeline as `run`: it classifies the root, refreshes staging when it is a buildable source project, and supervises the staged runtime layout. Invoked interactively it behaves like `run -d` - it detaches the resident supervisor, returns once required participants are ready, and prints how to attach or stop. Invoked under systemd (`Type=notify`) it stays the in-process foreground resident, signalling `READY=1` after readiness and pinging the watchdog while it runs."
+        about = "Build a fresh bundle, launch the supervisor, wait for readiness, and exit.",
+        long_about = "Create a fresh execution headlessly and return once it is ready.\n\n\
+                      `start` runs the same build/publish/launch path as `run` and differs only in what it does once the daemon answers: it waits for the graph to reach readiness, prints how to attach or stop, and exits. It never mounts the terminal UI.\n\n\
+                      It is not the systemd verb. The unit starts `phoxald <BUNDLE_ROOT>` directly, and the daemon owns `READY=1` and the watchdog - it is the only process that knows when the graph became ready."
     )]
     Start(start::Start),
-    #[command(about = "Attach a thin terminal client to a running project supervisor.")]
+    #[command(
+        about = "Attach a terminal session to an execution that is already running.",
+        long_about = "Attach to an existing execution. This command never builds and never mutates the project: it resolves the endpoint from the local manifest (or takes one explicitly with --endpoint), completes the supervisor handshake, and verifies that the running bundle is the robot it claims to be.\n\n\
+                      `q` detaches and leaves the robot running. Ctrl+C opens a stop confirmation; a second Ctrl+C confirms it."
+    )]
     Attach(attach::Attach),
-    #[command(about = "Orderly stop a running project supervisor.")]
+    #[command(about = "End a running execution and wait for it to stop.")]
     Stop(stop::Stop),
-    #[command(about = "Stream participant bus logs from a reachable robot.")]
+    #[command(about = "Read the supervisor's retained participant logs.")]
     Logs(logs::Logs),
-    #[command(about = "Inspect live robot state through typed bus contracts.")]
+    #[command(about = "Report a running execution's authoritative snapshot.")]
     Status(status::Status),
     #[command(about = "Check host prerequisites without modifying the host or project.")]
     Doctor(doctor::Doctor),

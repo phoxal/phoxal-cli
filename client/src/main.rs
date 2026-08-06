@@ -57,7 +57,12 @@ async fn main() -> ExitCode {
 }
 
 fn init_tracing() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    // Zenoh warns loudly and repeatedly when an endpoint is simply not there,
+    // which is the ordinary "nothing is running" case for `attach`, `stop`,
+    // `status`, and `logs` - and the command already says so precisely. Its
+    // own errors still surface; `RUST_LOG` overrides all of this.
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,zenoh=error,zenoh_link_unixsock_stream=error"));
     // `SessionAwareWriter` routes every line through whichever `run`/
     // `simulation webots run` session (if any) has called `cli::output::diagnostics::install`
     // at the moment of the write, falling back to the normal stderr write
