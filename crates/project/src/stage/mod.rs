@@ -44,4 +44,31 @@ pub(crate) use participants::{
 pub(crate) use publish::publish_runtime_layout;
 
 #[cfg(test)]
-pub(crate) use participants::{canonical_binary_name, copy_binary};
+#[cfg(test)]
+pub(crate) use candidate::{compile_test_bundle, write_test_bundle};
+
+/// The exact embedded-metadata document a role macro writes, for tests that
+/// synthesize a participant binary.
+#[cfg(test)]
+pub(crate) fn test_metadata_payload(
+    id: &str,
+    kind: &str,
+    config_schema: serde_json::Value,
+) -> Vec<u8> {
+    let current = phoxal_cli_core::check::participant_metadata::CompatibilitySet::current();
+    serde_json::to_vec(&serde_json::json!({
+        "schema": phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA,
+        "api": current.api.as_str(),
+        "schemas": {
+            "bus": current.schemas.bus.as_str(),
+            "launch": current.schemas.launch.as_str(),
+            "robot": current.schemas.robot.as_str(),
+            "component": current.schemas.component.as_str(),
+            "simulation": current.schemas.simulation.as_str(),
+        },
+        "id": id,
+        "kind": kind,
+        "config_schema": config_schema,
+    }))
+    .expect("metadata serializes")
+}

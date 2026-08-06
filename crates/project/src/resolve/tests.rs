@@ -364,8 +364,8 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
     // subject to any per-robot pruning.
     assert_eq!(
         resolved.platform_runtimes.len(),
-        catalog::NATIVE
-            .iter()
+        phoxal_cli_catalog::Catalog::official()
+            .native()
             .filter(|official| official.kind == ArtifactKind::Service)
             .count()
     );

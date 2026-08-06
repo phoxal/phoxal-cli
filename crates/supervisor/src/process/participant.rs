@@ -9,7 +9,6 @@ use crate::ManagedChild;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::identity::ProducerId;
 use phoxal_cli_core::runtime::{ExitDescription, ProcessFailureKind, ReadinessPolicy};
 use std::collections::VecDeque;
 use std::process::Stdio;

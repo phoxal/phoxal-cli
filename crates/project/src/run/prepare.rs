@@ -645,9 +645,13 @@ robot:
     max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
-    actuators: []
+    actuators:
+      - wheel.motor
     encoders: []
-  components: {}
+  components:
+    wheel:
+      component: wheel
+      mount_link: base
 "#;
 
     #[test]
@@ -657,7 +661,12 @@ robot:
         assert_eq!(classify_run_root(source.path())?, RunRootKind::Source);
 
         let layout = tempfile::tempdir()?;
-        crate::stage::write_test_layout(layout.path(), LAYOUT_YAML)?;
+        crate::stage::write_test_bundle(
+            layout.path(),
+            LAYOUT_YAML,
+            &phoxal_cli_core::project::intent::RunIntent::default(),
+            &[],
+        )?;
         assert_eq!(classify_run_root(layout.path())?, RunRootKind::Layout);
 
         let source_with_bin = tempfile::tempdir()?;
@@ -757,7 +766,8 @@ fn selected_native_source_participants(
 mod tests {
     use super::*;
     use phoxal_cli_core::check::participant_metadata::{host_architecture, host_binary_format};
-    use phoxal_cli_core::project::layout::{DriverSelection, RequiredRuntimeKind};
+    use phoxal_cli_core::project::intent::{DriverSelection, RunIntent};
+    use phoxal_cli_core::project::requirements::RequiredParticipantKind;
 
     const ROBOT_YAML: &str = r#"schema: robot/v0
 robot:
@@ -768,9 +778,13 @@ robot:
     max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
-    actuators: []
+    actuators:
+      - wheel.motor
     encoders: []
-  components: {}
+  components:
+    wheel:
+      component: wheel
+      mount_link: base
 "#;
 
     /// Synthesize a host-format object carrying the phoxal metadata section a
@@ -790,10 +804,9 @@ robot:
             name.to_vec(),
             object::SectionKind::ReadOnlyData,
         );
-        let payload = format!(
-            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{id}","kind":"{kind}","config_schema":{{"type":"null"}}}}"#
-        );
-        obj.append_section_data(section, payload.as_bytes(), 1);
+        let payload =
+            crate::stage::test_metadata_payload(id, kind, serde_json::json!({"type": "null"}));
+        obj.append_section_data(section, &payload, 1);
         obj.write().expect("synthesize object file")
     }
 
@@ -841,20 +854,20 @@ robot:
     /// `stage_complete_bin_store` leave behind in a real candidate directory,
     /// with no Cargo or network involved.
     fn stage_layout(root: &Path) -> Result<()> {
-        crate::stage::write_test_layout(root, ROBOT_YAML)?;
+        crate::stage::write_test_bundle(root, ROBOT_YAML, &RunIntent::default(), &[])?;
         let bin = root.join("bin");
         let layout = RuntimeLayout::open(root)?;
-        for required in layout.required_runtimes(&DriverSelection::All) {
+        for (binary_name, required) in layout.requirements().selected_binaries() {
             std::fs::write(
-                bin.join(&required.binary_name),
+                bin.join(binary_name),
                 synthesize_binary_with_id(
-                    &required.identity,
+                    &required.artifact_id,
                     match required.kind {
-                        RequiredRuntimeKind::Brain => "brain",
-                        RequiredRuntimeKind::OfficialService | RequiredRuntimeKind::UserService => {
-                            "service"
-                        }
-                        RequiredRuntimeKind::ComponentDriver => "driver",
+                        RequiredParticipantKind::Brain => "brain",
+                        RequiredParticipantKind::OfficialService
+                        | RequiredParticipantKind::UserService => "service",
+                        RequiredParticipantKind::ComponentDriver => "driver",
+                        RequiredParticipantKind::WorldClock => "simulator",
                     },
                 ),
             )?;
@@ -882,12 +895,7 @@ robot:
         let candidate = project.path().join(".phoxal/.bundle-candidate-test0000");
         stage_layout(&candidate)?;
 
-        let mut plan = RuntimeLayout::construct_plan(
-            &candidate,
-            &PlanOptions::default(),
-            RunIdentity::default(),
-        )?
-        .plan;
+        let mut plan = RuntimeLayout::construct_plan(&candidate, RunIdentity::default())?.plan;
         assert!(
             !plan.robots.is_empty()
                 && plan

@@ -136,6 +136,7 @@ mod tests {
         // A fragment can set `exit_on_failure=false`, which would send binding
         // to a background retry task and make a successful open mean nothing.
         let error = start_embedded_router(
+            phoxal_cli_core::identity::ExecutionId::mint(),
             "tcp/127.0.0.1:7447#exit_on_failure=false".into(),
             None,
             SupervisorState::new(),
@@ -158,9 +159,14 @@ mod tests {
         let socket = dir.path().join("run").join("router.sock");
         let endpoint = format!("unixsock-stream/{}", socket.display());
 
-        let router = start_embedded_router(endpoint.clone(), None, SupervisorState::new())
-            .await
-            .expect("the router creates its socket directory and binds");
+        let router = start_embedded_router(
+            phoxal_cli_core::identity::ExecutionId::mint(),
+            endpoint.clone(),
+            None,
+            SupervisorState::new(),
+        )
+        .await
+        .expect("the router creates its socket directory and binds");
         assert_eq!(router.endpoint(), endpoint);
         assert!(
             socket.exists(),
@@ -181,9 +187,14 @@ mod tests {
         let endpoint = format!("unixsock-stream/{}", dir.path().join("r.sock").display());
         let board = SupervisorState::new();
 
-        let router = start_embedded_router(endpoint, None, board.clone())
-            .await
-            .expect("router opens");
+        let router = start_embedded_router(
+            phoxal_cli_core::identity::ExecutionId::mint(),
+            endpoint,
+            None,
+            board.clone(),
+        )
+        .await
+        .expect("router opens");
         assert!(
             board.supervisor_snapshot().failure.is_none(),
             "a healthy router must not fail the session"

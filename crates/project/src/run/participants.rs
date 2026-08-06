@@ -20,8 +20,6 @@ use phoxal_cli_catalog::ArtifactKind;
 use phoxal_cli_core::check::participant_metadata::inspect_selected_binary;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
-#[cfg(test)]
-use phoxal_cli_core::project::intent::DriverSelection;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
@@ -523,7 +521,7 @@ fn participant_spec(
 mod tests {
     use super::*;
     use phoxal_cli_core::check::participant_metadata::host_architecture;
-    use phoxal_cli_core::identity::{ExecutionId, ProducerId};
+    use phoxal_cli_core::identity::ExecutionId;
     use phoxal_cli_core::project::launch_plan::RunIdentity;
     use phoxal_cli_core::runtime::RuntimeFailurePolicy;
     use phoxal_cli_core::runtime::StartupRequirement;
@@ -551,10 +549,9 @@ mod tests {
             name.to_vec(),
             object::SectionKind::ReadOnlyData,
         );
-        let payload = format!(
-            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{id}","kind":"{kind}","config_schema":{{"type":"null"}}}}"#
-        );
-        obj.append_section_data(section, payload.as_bytes(), 1);
+        let payload =
+            crate::stage::test_metadata_payload(id, kind, serde_json::json!({"type": "null"}));
+        obj.append_section_data(section, &payload, 1);
         obj.write().expect("synthesize object file")
     }
 
@@ -573,9 +570,7 @@ mod tests {
             launch: ParticipantLaunch {
                 participant_id: id.to_string(),
                 execution: ExecutionId::mint(),
-                producer: ProducerId::mint(),
                 execution_origin: None,
-                namespace: "dev".to_string(),
                 robot_id: "testbot".to_string(),
                 bus: BusProfile {
                     connect_endpoints: Vec::new(),
@@ -676,33 +671,24 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn malformed_compiled_driver_config_fails_instead_of_hiding_device_state() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        crate::stage::write_test_layout(dir.path(), LAYOUT_ROBOT_YAML)?;
-        let participants_path = dir
-            .path()
-            .join(phoxal_cli_core::project::layout::ASSETS_DIR)
-            .join(phoxal_cli_core::project::layout::PARTICIPANTS_ASSET);
-        let mut participants =
-            phoxal_cli_core::project::layout::decode_participants(&participants_path)?;
-        participants.push(phoxal_manifest::Participant {
-            id: "wheel".to_string(),
-            kind: phoxal_manifest::ParticipantKind::Driver,
-            component_instance: Some("wheel".to_string()),
-            config: Some(serde_json::json!({"connection": {"type": "serial"}})),
-        });
-        std::fs::write(
-            &participants_path,
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "schema": "phoxal/participants/v0",
-                "participants": participants,
-            }))?,
-        )?;
-        let error = RuntimeLayout::open(dir.path())
-            .expect_err("invalid typed driver config must fail while opening the layout")
-            .to_string();
-        assert!(error.contains("invalid typed config"), "{error}");
+    /// Synthesize one host-architecture binary per required participant, each
+    /// declaring the identity and kind its canonical `bin/` path demands.
+    fn write_required_binaries(layout: &RuntimeLayout, bin: &std::path::Path) -> Result<()> {
+        use phoxal_cli_core::project::requirements::RequiredParticipantKind;
+        for (binary_name, required) in layout.requirements().selected_binaries() {
+            let kind = match required.kind {
+                RequiredParticipantKind::Brain => "brain",
+                RequiredParticipantKind::OfficialService | RequiredParticipantKind::UserService => {
+                    "service"
+                }
+                RequiredParticipantKind::ComponentDriver => "driver",
+                RequiredParticipantKind::WorldClock => "simulator",
+            };
+            std::fs::write(
+                bin.join(binary_name),
+                synthesize_binary_with_id(host_architecture(), &required.artifact_id, kind),
+            )?;
+        }
         Ok(())
     }
 
@@ -715,9 +701,13 @@ robot:
     max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
-    actuators: []
+    actuators:
+      - wheel.motor
     encoders: []
-  components: {}
+  components:
+    wheel:
+      component: wheel
+      mount_link: base
 services:
   mission:
     config:
@@ -733,39 +723,21 @@ services:
     fn layout_specs_resolve_every_executable_from_bin_with_no_other_state() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path();
-        crate::stage::write_test_layout(root, LAYOUT_ROBOT_YAML)?;
+        crate::stage::write_test_bundle(
+            root,
+            LAYOUT_ROBOT_YAML,
+            &phoxal_cli_core::project::intent::RunIntent::default(),
+            &[],
+        )?;
         let bin = root.join("bin");
         // Stray `.phoxal/` state the layout path must never touch: if it were
         // consulted the run would depend on it, defeating the bundle guarantee.
         std::fs::create_dir_all(root.join(".phoxal/stray"))?;
 
         let layout = RuntimeLayout::open(root)?;
-        for required in layout.required_runtimes(&DriverSelection::All) {
-            std::fs::write(
-                bin.join(&required.binary_name),
-                synthesize_binary_with_id(
-                    host_architecture(),
-                    &required.identity,
-                    match required.kind {
-                        phoxal_cli_core::project::layout::RequiredRuntimeKind::Brain => "brain",
-                        phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialService
-                        | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserService => {
-                            "service"
-                        }
-                        phoxal_cli_core::project::layout::RequiredRuntimeKind::ComponentDriver => {
-                            "driver"
-                        }
-                    },
-                ),
-            )?;
-        }
+        write_required_binaries(&layout, &bin)?;
 
-        let plan = RuntimeLayout::construct_plan(
-            root,
-            &phoxal_cli_core::project::layout::PlanOptions::default(),
-            RunIdentity::default(),
-        )?
-        .plan;
+        let plan = RuntimeLayout::construct_plan(root, RunIdentity::default())?.plan;
         let prepared = build_layout_specs(&plan, &layout, &|_| None)?;
         let specs = prepared
             .iter()
@@ -806,36 +778,18 @@ services:
     fn source_overridden_officials_are_marked_local_on_the_board() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = dir.path();
-        crate::stage::write_test_layout(root, LAYOUT_ROBOT_YAML)?;
+        crate::stage::write_test_bundle(
+            root,
+            LAYOUT_ROBOT_YAML,
+            &phoxal_cli_core::project::intent::RunIntent::default(),
+            &[],
+        )?;
         let bin = root.join("bin");
 
         let layout = RuntimeLayout::open(root)?;
-        for required in layout.required_runtimes(&DriverSelection::All) {
-            std::fs::write(
-                bin.join(&required.binary_name),
-                synthesize_binary_with_id(
-                    host_architecture(),
-                    &required.identity,
-                    match required.kind {
-                        phoxal_cli_core::project::layout::RequiredRuntimeKind::Brain => "brain",
-                        phoxal_cli_core::project::layout::RequiredRuntimeKind::OfficialService
-                        | phoxal_cli_core::project::layout::RequiredRuntimeKind::UserService => {
-                            "service"
-                        }
-                        phoxal_cli_core::project::layout::RequiredRuntimeKind::ComponentDriver => {
-                            "driver"
-                        }
-                    },
-                ),
-            )?;
-        }
+        write_required_binaries(&layout, &bin)?;
 
-        let plan = RuntimeLayout::construct_plan(
-            root,
-            &phoxal_cli_core::project::layout::PlanOptions::default(),
-            RunIdentity::default(),
-        )?
-        .plan;
+        let plan = RuntimeLayout::construct_plan(root, RunIdentity::default())?.plan;
         // Pick one official artifact from the plan and pretend the project
         // overrides it in its workspace (a source cwd).
         let overridden = plan

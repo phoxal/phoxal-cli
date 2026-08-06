@@ -585,8 +585,9 @@ mod tests {
     use super::*;
 
     fn producer(seed: u8) -> ProducerId {
-        ProducerId::parse(&format!("{:032x}", u128::from(seed)))
-            .expect("test producer id must parse")
+        // A producer id is the publisher's session ZID: 1 to 32 lowercase hex
+        // characters with no leading zero, so a seed renders bare.
+        ProducerId::parse(&format!("{seed:x}")).expect("test producer id must parse")
     }
 
     #[test]
@@ -600,17 +601,28 @@ mod tests {
             ProcessState::Starting,
             StartupRequirement::Required,
         );
-        state.set_producer(&key, producer(22));
-        let instance = |id| ParticipantInstanceKey {
+        let instance = ParticipantInstanceKey {
             robot: robot.clone(),
             participant: "mission".to_string(),
-            producer: producer(id),
         };
-        state.record_instance_presence(instance(11), true);
-        assert_eq!(state.process_state(&key), Some(ProcessState::Starting));
-        state.record_instance_presence(instance(22), true);
+        // A starting process has no producer at all: nothing mints one, so the
+        // snapshot reports "no session yet" rather than an intention.
+        assert_eq!(
+            state.supervisor_snapshot().processes[&key].status.producer,
+            None
+        );
+
+        // The liveliness token is where the producer is learned, and it makes
+        // the process ready in the same update.
+        state.record_instance_presence(instance.clone(), producer(22), true);
         assert_eq!(state.process_state(&key), Some(ProcessState::Ready));
-        state.record_instance_presence(instance(22), false);
+        assert_eq!(
+            state.supervisor_snapshot().processes[&key].status.producer,
+            Some(producer(22))
+        );
+
+        // Losing the token does not un-ready a running process.
+        state.record_instance_presence(instance, producer(22), false);
         assert_eq!(state.process_state(&key), Some(ProcessState::Ready));
     }
 

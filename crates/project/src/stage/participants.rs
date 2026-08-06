@@ -60,7 +60,7 @@ impl MaterializeSettings {
 /// `bin/`. The source-free plan (#936) names each participant's `bin/` binary
 /// on its `execution` directly - the loader resolves the identical name from
 /// the compiler-owned participant declarations - so this is just that name.
-pub(super) fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> String {
+pub(crate) fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> String {
     participant.execution.binary_name().to_string()
 }
 
@@ -315,7 +315,7 @@ pub(super) fn link_or_copy(source: &Path, dest: &Path) -> Result<()> {
 
 /// Cross-filesystem fallback for [`link_or_copy`]: a byte copy that reproduces
 /// the source's executable bits so the staged entry is runnable.
-pub(super) fn copy_binary(source: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn copy_binary(source: &Path, dest: &Path) -> Result<()> {
     fs::copy(source, dest).with_context(|| {
         format!(
             "failed to stage binary {} into {}",

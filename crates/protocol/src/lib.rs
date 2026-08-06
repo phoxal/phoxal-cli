@@ -25,7 +25,7 @@ mod tests {
     use std::io::Cursor;
     use std::time::Duration;
 
-    use phoxal_cli_core::identity::{ExecutionId, ProducerId};
+    use phoxal_cli_core::identity::ExecutionId;
     use phoxal_cli_core::runtime::{
         BoundedString, DesiredProcessState, ParticipantKind, ProcessDescriptor, ProcessEntry,
         ProcessFailure, ProcessFailureKind, ProcessKey, ProcessState, ProcessStatus,
@@ -201,7 +201,7 @@ mod tests {
                         desired: DesiredProcessState::Running,
                         actual: ProcessState::Failed,
                         pid: Some(u32::MAX),
-                        producer: Some(ProducerId::mint()),
+                        producer: None,
                         restart_count_in_generation: u32::MAX,
                         restart_count_total: u64::MAX,
                         last_failure: Some(ProcessFailure {

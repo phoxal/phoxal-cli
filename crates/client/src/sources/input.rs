@@ -140,10 +140,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_queued_stop_reaches_the_manual_contract() {
-        let bus = Bus::open(BusConfig::in_process(
-            format!("test/manual-stop/{}", std::process::id()),
-            "robot",
-        ))
+        let bus = Bus::open(BusConfig::in_process(format!(
+            "test/manual-stop/{}",
+            std::process::id()
+        )))
         .await
         .expect("bus should open");
         let publisher = CommandPublisher::new(
@@ -183,10 +183,10 @@ mod tests {
     async fn a_failed_stop_keeps_its_place_in_the_budget() {
         // A stop lost to a closed bus must not be counted as delivered, or a
         // single transport hiccup would leave the robot moving.
-        let bus = Bus::open(BusConfig::in_process(
-            format!("test/manual-stop-retry/{}", std::process::id()),
-            "robot",
-        ))
+        let bus = Bus::open(BusConfig::in_process(format!(
+            "test/manual-stop-retry/{}",
+            std::process::id()
+        )))
         .await
         .expect("bus should open");
         let publisher = CommandPublisher::new(

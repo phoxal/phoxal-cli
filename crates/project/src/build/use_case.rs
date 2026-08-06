@@ -1138,7 +1138,11 @@ robot:
         BundlePlan {
             source_manifest: phoxal_cli_core::project::resolver::parse_robot_from_string(yaml)
                 .expect("minimal fixture robot.yaml parses"),
-            compiled: Default::default(),
+            compiled: crate::stage::compile_test_bundle(
+                &phoxal_cli_core::project::resolver::parse_robot_from_string(yaml)
+                    .expect("minimal fixture robot.yaml parses"),
+            )
+            .expect("the fixture project compiles"),
             train: "0.36.0".to_string(),
             target: "aarch64-unknown-linux-gnu".to_string(),
             brain: phoxal_cli_core::project::resolver::ResolvedBrain {

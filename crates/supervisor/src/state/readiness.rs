@@ -54,8 +54,9 @@ mod tests {
     /// A deterministic producer identity for tests, so a case can name the
     /// exact restart it means.
     fn producer(seed: u8) -> ProducerId {
-        ProducerId::parse(&format!("{:032x}", u128::from(seed)))
-            .expect("test producer id must parse")
+        // A producer id is the publisher's session ZID: 1 to 32 lowercase hex
+        // characters with no leading zero, so a seed renders bare.
+        ProducerId::parse(&format!("{seed:x}")).expect("test producer id must parse")
     }
     use super::*;
     use phoxal_bus::ParticipantLivelinessKey;

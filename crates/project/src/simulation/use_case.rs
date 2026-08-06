@@ -212,10 +212,8 @@ mod tests {
             )]
         );
         assert!(
-            env.iter().all(|(key, _)| {
-                key != phoxal_runtime_contract::env::EXECUTION_ORIGIN
-                    && key != phoxal_runtime_contract::env::PRODUCER_ID
-            }),
+            env.iter()
+                .all(|(key, _)| { key != phoxal_runtime_contract::env::EXECUTION_ORIGIN }),
             "Webots must not receive bus or time-authority identity"
         );
     }

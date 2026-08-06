@@ -206,3 +206,149 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// Materialize a complete finalized bundle at `root` from an authored
+/// `robot.yaml` body, so tests exercise the real loader against real staged
+/// files rather than a hand-assembled directory.
+///
+/// Every component type the document uses gets a minimal frozen definition;
+/// `simulated_types` additionally get a `simulation.yaml`, which is what makes a
+/// `clock: simulated` fixture coherent.
+#[cfg(test)]
+pub(crate) fn write_test_bundle(
+    root: &Path,
+    robot_yaml: &str,
+    intent: &RunIntent,
+    simulated_types: &[&str],
+) -> Result<()> {
+    let source = tempfile::tempdir()?;
+    let phoxal_manifest::source::robot::Manifest::V0(authored) =
+        phoxal_manifest::source::robot::parse_from_string(robot_yaml)?;
+    fs::write(source.path().join("robot.yaml"), robot_yaml)?;
+    let structure = source.path().join(&authored.robot.structure);
+    if let Some(parent) = structure.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &structure,
+        r#"<robot name="fixture"><link name="base_footprint"/><link name="base_link"/><link name="base"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="base_mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
+    )?;
+    let mut component_roots = std::collections::BTreeMap::new();
+    for component_type in authored.used_component_types() {
+        let component_root = source.path().join("components").join(component_type);
+        fs::create_dir_all(&component_root)?;
+        fs::write(
+            component_root.join("component.yaml"),
+            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+        )?;
+        fs::write(
+            component_root.join("structure.urdf"),
+            r#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
+        )?;
+        if simulated_types.contains(&component_type) {
+            fs::write(
+                component_root.join("simulation.yaml"),
+                "schema: simulation/v0\ncapabilities: {}\n",
+            )?;
+        }
+        component_roots.insert(component_type.to_string(), component_root);
+    }
+    let compiled = phoxal_cli_core::project::resolver::CompiledBundle::from_project(
+        phoxal_manifest::compile(phoxal_manifest::SourceSet {
+            project_root: source.path().to_path_buf(),
+            robot_manifest: source.path().join("robot.yaml"),
+            component_roots: component_roots.clone(),
+        })?,
+    );
+    let resolved = BundlePlan {
+        source_manifest: authored,
+        compiled,
+        train: "0.54.0".to_string(),
+        target: crate::resolve::project::host_target_triple(),
+        brain: phoxal_cli_core::project::resolver::ResolvedBrain {
+            crate_dir: source.path().to_path_buf(),
+            package: "fixture-robot".to_string(),
+            bin_target: "fixture-robot".to_string(),
+        },
+        platform_runtimes: Vec::new(),
+        simulators: Vec::new(),
+        user_runtimes: Vec::new(),
+        undeclared_runtimes: Vec::new(),
+        components: component_roots
+            .iter()
+            .map(|(component_type, assets_root)| {
+                phoxal_cli_core::project::resolver::ResolvedComponent {
+                    instance: component_type.clone(),
+                    source_name: component_type.clone(),
+                    assets_root: assets_root.clone(),
+                    driver: None,
+                }
+            })
+            .collect(),
+        path_overrides: Vec::new(),
+    };
+    fs::create_dir_all(root)?;
+    stage_candidate(source.path(), root, &resolved, intent)
+}
+
+/// Compile a minimal real project into a [`CompiledBundle`], for fixtures that
+/// need a plausible compiler output without staging a whole bundle.
+#[cfg(test)]
+pub(crate) fn compile_test_bundle(
+    source_manifest: &phoxal_manifest::source::robot::v0::Manifest,
+) -> Result<phoxal_cli_core::project::resolver::CompiledBundle> {
+    let source = tempfile::tempdir()?;
+    let component = source.path().join("components/wheel");
+    fs::create_dir_all(&component)?;
+    fs::write(
+        source.path().join("robot.yaml"),
+        r#"schema: robot/v0
+robot:
+  id: testbot
+  namespace: dev
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  structure: structure.urdf
+  kinematic:
+    kind: omnidirectional
+    actuators:
+      - wheel.motor
+    encoders: []
+  components:
+    wheel:
+      component: wheel
+      mount_link: base_link
+"#,
+    )?;
+    fs::write(
+        source.path().join("structure.urdf"),
+        r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint></robot>"#,
+    )?;
+    fs::write(
+        component.join("component.yaml"),
+        "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+    )?;
+    fs::write(
+        component.join("structure.urdf"),
+        r#"<robot name="wheel"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
+    )?;
+    let mut bundle = phoxal_cli_core::project::resolver::CompiledBundle::from_project(
+        phoxal_manifest::compile(phoxal_manifest::SourceSet {
+            project_root: source.path().to_path_buf(),
+            robot_manifest: source.path().join("robot.yaml"),
+            component_roots: std::collections::BTreeMap::from([("wheel".to_string(), component)]),
+        })?,
+    );
+    bundle.participants = source_manifest
+        .services
+        .iter()
+        .map(|(id, service)| phoxal_manifest::Participant {
+            id: id.clone(),
+            kind: phoxal_manifest::ParticipantKind::Service,
+            component_instance: None,
+            config: service.config.clone(),
+        })
+        .collect();
+    Ok(bundle)
+}

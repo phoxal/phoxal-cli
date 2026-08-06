@@ -505,9 +505,26 @@ mod tests {
         obj.write().expect("synthesize object file")
     }
 
+    /// The exact document a role macro embeds, for a binary that agrees with
+    /// this CLI on every process-boundary contract.
+    fn current_record(id: &str, extra: &str) -> Vec<u8> {
+        let current = CompatibilitySet::current();
+        format!(
+            r#"{{"schema":"{schema}","api":"{api}","schemas":{{"bus":"{bus}","launch":"{launch}","robot":"{robot}","component":"{component}","simulation":"{simulation}"}},"id":"{id}","kind":"service","config_schema":{{"type":"null"}}{extra}}}"#,
+            schema = phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA,
+            api = current.api,
+            bus = current.schemas.bus,
+            launch = current.schemas.launch,
+            robot = current.schemas.robot,
+            component = current.schemas.component,
+            simulation = current.schemas.simulation,
+        )
+        .into_bytes()
+    }
+
     #[test]
     fn extracts_metadata_from_foreign_format_and_arch_object_files() -> Result<()> {
-        let payload = br#"{"schema":"phoxal/participant-metadata/v0","id":"drive","kind":"service","config_schema":{"type":"null"}}"#;
+        let payload = &current_record("drive", "");
 
         // aarch64 ELF (Linux robot / release binary shape), `.phoxal_meta`.
         let elf = synthesize_object(
@@ -676,5 +693,79 @@ mod tests {
             message.contains("no phoxal participant metadata section"),
             "{message}"
         );
+    }
+
+    /// A binary built against a different robot API is rejected before its
+    /// config schema is trusted, with a diagnostic naming the participant, both
+    /// revisions, and the exact command that fixes it.
+    #[test]
+    fn a_binary_on_another_api_revision_is_rejected_with_an_actionable_diagnostic() {
+        let record = String::from_utf8(current_record("cleaning", ""))
+            .expect("the fixture record is UTF-8")
+            .replace(
+                &format!(r#""api":"{}""#, CompatibilitySet::current().api),
+                r#""api":"v9.9""#,
+            );
+        let elf = synthesize_object(
+            object::BinaryFormat::Elf,
+            object::Architecture::Aarch64,
+            b".phoxal_meta",
+            b"",
+            record.as_bytes(),
+        );
+        let error = extract_participant_metadata_from_bytes(&elf, "bin/cleaning")
+            .expect_err("a foreign API revision must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("cleaning"), "{message}");
+        assert!(message.contains("v9.9"), "{message}");
+        assert!(message.contains("cargo update -p phoxal"), "{message}");
+    }
+
+    /// A document schema mismatch names the contract that disagreed and which
+    /// side has to move, rather than reporting a generic parse failure.
+    #[test]
+    fn a_binary_on_another_document_schema_is_rejected_naming_the_contract() {
+        let record = String::from_utf8(current_record("drive", ""))
+            .expect("the fixture record is UTF-8")
+            .replace(
+                &format!(r#""robot":"{}""#, CompatibilitySet::current().schemas.robot),
+                r#""robot":"robot/v9""#,
+            );
+        let elf = synthesize_object(
+            object::BinaryFormat::Elf,
+            object::Architecture::Aarch64,
+            b".phoxal_meta",
+            b"",
+            record.as_bytes(),
+        );
+        let message = extract_participant_metadata_from_bytes(&elf, "bin/phoxal-service-drive")
+            .expect_err("a foreign robot document schema must be rejected")
+            .to_string();
+        assert!(message.contains("robot document schema"), "{message}");
+        assert!(message.contains("robot/v9"), "{message}");
+    }
+
+    /// An unknown metadata schema tag and an unknown field are both rejected by
+    /// the tagged document itself: there is no post-hoc string comparison the
+    /// CLI could get wrong.
+    #[test]
+    fn an_unsupported_metadata_document_is_rejected() {
+        for record in [
+            br#"{"schema":"phoxal/participant-metadata/v1","id":"drive","kind":"service","config_schema":null}"#.to_vec(),
+            current_record("drive", r#","framework":"0.54.0""#),
+        ] {
+            let elf = synthesize_object(
+                object::BinaryFormat::Elf,
+                object::Architecture::Aarch64,
+                b".phoxal_meta",
+                b"",
+                &record,
+            );
+            assert!(
+                extract_participant_metadata_from_bytes(&elf, "bin/phoxal-service-drive").is_err(),
+                "unsupported metadata document must be rejected: {}",
+                String::from_utf8_lossy(&record)
+            );
+        }
     }
 }

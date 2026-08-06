@@ -3,7 +3,7 @@
 use super::*;
 use crate::build::cargo::missing_device_path;
 use anyhow::Result;
-use phoxal_cli_core::identity::{ExecutionId, ProducerId};
+use phoxal_cli_core::identity::ExecutionId;
 use phoxal_cli_core::project::launch_plan::{
     LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
 };
@@ -27,9 +27,7 @@ fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRe
         launch: ParticipantLaunch {
             participant_id: id.to_string(),
             execution: ExecutionId::mint(),
-            producer: ProducerId::mint(),
             execution_origin: None,
-            namespace: "dev".to_string(),
             robot_id: "robot".to_string(),
             bus: BusProfile {
                 connect_endpoints: vec![

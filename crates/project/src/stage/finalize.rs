@@ -104,7 +104,8 @@ robot:
     max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
-    actuators: []
+    actuators:
+      - left_drive.motor
     encoders: []
   components:
     left_drive:
@@ -181,17 +182,18 @@ robot:
         assert_eq!(simulated.clock, Clock::Simulated);
         assert!(drivers(&simulated).is_empty());
 
-        let mut kept = authored();
-        kept.clock = Clock::Simulated;
         let error = finalize_manifest(
-            &kept,
+            &authored(),
             &phoxal_cli_core::project::intent::RunIntent {
                 clock: Clock::Simulated,
                 drivers: DriverSelection::All,
             },
         )
         .expect_err("`clock: simulated` plus a driver block must be rejected");
-        assert!(error.to_string().contains("driver"), "{error}");
+        assert!(
+            error.to_string().contains("DriverUnderSimulatedClock"),
+            "{error}"
+        );
         Ok(())
     }
 

@@ -15,7 +15,7 @@ pub(crate) mod telemetry;
 use crate::SupervisorState;
 use anyhow::{Result, anyhow};
 use phoxal_bus::{Bus, BusConfig};
-use phoxal_cli_core::identity::{ExecutionId, ProducerId};
+use phoxal_cli_core::identity::ExecutionId;
 use phoxal_model::ParticipantAssetResolver;
 use std::time::Duration;
 use tokio::task::JoinHandle;

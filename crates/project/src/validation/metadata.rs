@@ -93,8 +93,10 @@ mod tests {
     use super::*;
 
     fn meta(id: &str) -> participant_metadata::ParticipantMeta {
+        let current = participant_metadata::CompatibilitySet::current();
         participant_metadata::ParticipantMeta {
-            schema: phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA.to_string(),
+            api: current.api,
+            schemas: current.schemas,
             id: id.to_string(),
             kind: phoxal_runtime_contract::ParticipantKind::Service,
             config_schema: serde_json::json!({"type": "object", "properties": {"speed": {"type": "integer"}}}),

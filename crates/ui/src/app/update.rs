@@ -804,7 +804,7 @@ mod tests {
     fn epoch() -> AttachmentEpoch {
         AttachmentEpoch {
             supervisor_generation: 1,
-            execution_id: ExecutionId::parse(&"0".repeat(ExecutionId::LEN))
+            execution_id: ExecutionId::parse(&"1".repeat(ExecutionId::LEN))
                 .expect("fixed execution id"),
             graph_generation: 1,
         }

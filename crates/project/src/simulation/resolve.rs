@@ -300,9 +300,12 @@ mod tests {
             ),
         )
         .expect("write fixture Cargo.lock");
-        let json = format!(
-            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{SIMULATOR_CONTROLLER_ARTIFACT_NAME}","kind":"simulator","config_schema":{{"type":"null"}}}}"#
-        );
+        let json = String::from_utf8(crate::stage::test_metadata_payload(
+            SIMULATOR_CONTROLLER_ARTIFACT_NAME,
+            "simulator",
+            serde_json::json!({"type": "null"}),
+        ))
+        .expect("the metadata document is UTF-8");
         let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
         let len = json.len();
         std::fs::write(
@@ -340,7 +343,12 @@ mod tests {
             "version = 4\n\n[[package]]\nname = \"testbot-robot\"\nversion = \"0.1.0\"\n",
         )
         .expect("write brain fixture Cargo.lock");
-        let json = r#"{"schema":"phoxal/participant-metadata/v0","id":"brain","kind":"brain","config_schema":{"type":"null"}}"#;
+        let json = String::from_utf8(crate::stage::test_metadata_payload(
+            "brain",
+            "brain",
+            serde_json::json!({"type": "null"}),
+        ))
+        .expect("the metadata document is UTF-8");
         let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
         let len = json.len();
         std::fs::write(
@@ -406,10 +414,17 @@ services:
         )
         .expect("write fixture Cargo.lock");
 
-        let schema = r#"{"type":"object","required":["gain"],"properties":{"gain":{"type":"number"}},"additionalProperties":false}"#;
-        let json = format!(
-            r#"{{"schema":"phoxal/participant-metadata/v0","id":"avoid","kind":"service","config_schema":{schema}}}"#
-        );
+        let json = String::from_utf8(crate::stage::test_metadata_payload(
+            "avoid",
+            "service",
+            serde_json::json!({
+                "type": "object",
+                "required": ["gain"],
+                "properties": {"gain": {"type": "number"}},
+                "additionalProperties": false
+            }),
+        ))
+        .expect("the metadata document is UTF-8");
         let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
         let len = json.len();
         std::fs::write(
@@ -512,7 +527,11 @@ services:
             false,
             &crate::SilentReporter,
         )?;
-        let candidate = crate::stage::begin_runtime_layout(temp.path(), &resolved)?;
+        let candidate = crate::stage::begin_runtime_layout(
+            temp.path(),
+            &resolved,
+            &phoxal_cli_core::project::intent::RunIntent::simulated(),
+        )?;
         let world = temp.path().join("world.wbt");
 
         let result = build_checked_sim_launch_plan(
