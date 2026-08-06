@@ -1223,10 +1223,10 @@ robot:
     fn registry_selection_excludes_path_overrides_and_includes_selected_registry_drivers() {
         let mut resolved = minimal_bundle_plan();
         resolved.platform_runtimes.push(ResolvedPlatformRuntime {
-            name: "service-behavior".to_string(),
-            package: "phoxal/service-behavior".to_string(),
+            name: "map".to_string(),
+            package: "phoxal/service-map".to_string(),
             kind: ArtifactKind::Service,
-            path_override: Some(PathBuf::from("services/behavior")),
+            path_override: Some(PathBuf::from("services/map")),
             train: resolved.train.clone(),
             target: Some(resolved.target.clone()),
         });
@@ -1242,7 +1242,7 @@ robot:
             .collect::<BTreeSet<_>>();
 
         assert!(
-            !packages.contains("phoxal-service-behavior"),
+            !packages.contains("phoxal-service-map"),
             "a path-overridden official builds from source, never from the registry"
         );
         assert!(packages.contains("phoxal-service-drive"));
@@ -1288,7 +1288,7 @@ robot:
     #[test]
     fn snapshot_containment_compares_canonical_filesystem_paths() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let selected = root.path().join("services/behavior");
+        let selected = root.path().join("services/mission");
         std::fs::create_dir_all(&selected)?;
         let canonical_selected = selected.canonicalize()?;
         assert!(canonical_path_is_within(root.path(), &canonical_selected)?);

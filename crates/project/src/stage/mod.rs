@@ -157,13 +157,8 @@ robot:
         let _scratch = ScratchPhoxalHome::new()?;
         let project = tempfile::tempdir()?;
         fs::create_dir_all(project.path().join("model/meshes"))?;
-        fs::create_dir_all(project.path().join("behaviors"))?;
         fs::write(project.path().join("model/structure.urdf"), "<robot/>")?;
         fs::write(project.path().join("model/meshes/chassis.dae"), "mesh")?;
-        fs::write(
-            project.path().join("behaviors/default.yaml"),
-            "behavior: []",
-        )?;
         // Source-project noise that must never appear in the staged layout.
         fs::write(project.path().join("Cargo.toml"), "[workspace]\n")?;
         fs::write(project.path().join("lib.rs"), "fn main() {}\n")?;
@@ -182,7 +177,6 @@ robot:
         // `.phoxal` enter the runtime bundle.
         assert!(!staged.join("robot.yaml").exists());
         assert!(!staged.join("model").exists());
-        assert!(!staged.join("behaviors").exists());
         assert!(!staged.join("Cargo.toml").exists());
         assert!(!staged.join("lib.rs").exists());
         assert!(!staged.join(".phoxal").exists());

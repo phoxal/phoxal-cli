@@ -128,10 +128,6 @@ pub struct OfficialRuntime {
 
 pub const NATIVE: &[OfficialRuntime] = &[
     OfficialRuntime {
-        package: "phoxal/service-behavior",
-        kind: ArtifactKind::Service,
-    },
-    OfficialRuntime {
         package: "phoxal/service-drive",
         kind: ArtifactKind::Service,
     },

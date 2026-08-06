@@ -350,7 +350,7 @@ mod tests {
         let project = project()?;
         let report = generate_command(project.path())?;
         // A schema kind this CLI no longer delivers must not keep resolving.
-        let retired = report.schema_dir.join("behavior.schema.json");
+        let retired = report.schema_dir.join("retired.schema.json");
         fs::write(&retired, b"{}\n")?;
         // Not ours: the directory is CLI-owned, but this is not a cleaner.
         let foreign = report.schema_dir.join("notes.md");
@@ -364,7 +364,7 @@ mod tests {
         };
 
         let second = generate_command(project.path())?;
-        assert_eq!(second.removed, vec!["behavior.schema.json".to_string()]);
+        assert_eq!(second.removed, vec!["retired.schema.json".to_string()]);
         assert!(second.unremovable.is_empty());
         assert!(!retired.exists(), "a retired schema must be removed");
         assert!(foreign.exists(), "a foreign file must be left alone");
@@ -462,7 +462,7 @@ mod tests {
         let project = project()?;
         let generated = generate_schemas(project.path())?;
         write_schemas(&generated)?;
-        let retired = generated.schema_dir.join("behavior.schema.json");
+        let retired = generated.schema_dir.join("retired.schema.json");
         fs::write(&retired, b"{}\n")?;
         // A directory without write permission refuses to unlink its entries.
         fs::set_permissions(&generated.schema_dir, PermissionsExt::from_mode(0o555))?;
@@ -470,7 +470,7 @@ mod tests {
         fs::set_permissions(&generated.schema_dir, PermissionsExt::from_mode(0o755))?;
 
         assert!(removed.is_empty());
-        assert_eq!(unremovable, vec!["behavior.schema.json".to_string()]);
+        assert_eq!(unremovable, vec!["retired.schema.json".to_string()]);
         // The command's actual contract - the delivered schemas - still holds.
         for (path, bytes) in &generated.files {
             assert_eq!(&fs::read(path)?, bytes);

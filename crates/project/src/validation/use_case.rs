@@ -93,21 +93,23 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         workspace.problems.join("\n")
     );
 
-    // Config-schema validation (#951 WS4 follow-up): every declared user
+    // The mandatory root brain plus config-schema validation (#951 WS4
+    // follow-up): every declared user
     // service's `services.<id>.config` must satisfy the JSON Schema its own
     // `#[phoxal::service(config = ...)]` type embeds. There is no schema
     // until that type compiles, so
     // this is the one part of `validate` that is not free - it builds
-    // ONLY the declared participant crates (never the official set, never
-    // a staged bundle), through the same check engine `build`/`run`/
-    // `simulate` already use.
+    // the root brain and ONLY the declared participant crates (never the
+    // official set, never a staged bundle), through the same check engine
+    // `build`/`run`/`simulate` already use.
     let config_participants = declared_config_source_participants(&robot, &project);
-    if !config_participants.is_empty() {
+    {
         request.reporter.info(format!(
-            "compiling {} declared service crate{} to validate config against its \
-                 embedded schema (first build may take a while; cached afterward)",
-            config_participants.len(),
-            if config_participants.len() == 1 {
+            "compiling the root brain and {} declared service crate{} to validate the brain and \
+                 each config against its embedded schema (first build may take a while; cached \
+                 afterward)",
+            config_participants.len() - 1,
+            if config_participants.len() == 2 {
                 ""
             } else {
                 "s"
@@ -200,8 +202,15 @@ fn workspace_runtime_report(robot: &Robot, project: &LockedProject) -> Workspace
     report
 }
 
-/// Every workspace runtime crate that can legally carry a robot.yaml `config:`
-/// value: a `services/<id>` crate whose `<id>` is a declared key in
+/// The mandatory root brain plus every workspace runtime crate that can
+/// legally carry a robot.yaml `config:` value.
+///
+/// The brain carries no config at all (`#[phoxal::brain]` fixes `Config = ()`),
+/// but it is built and inspected here anyway so `phoxal validate` proves the
+/// root package really is a brain - the right id, kind, and unit config schema -
+/// before anything else depends on it (organization#973).
+///
+/// The config-bearing half is a `services/<id>` crate whose `<id>` is a declared key in
 /// `robot.services`. An official identity can never be a declared key
 /// (`validate_runtime_declarations` rejects that at parse time), so this
 /// filter alone is enough to exclude a workspace crate that path-overrides an
@@ -215,17 +224,18 @@ fn declared_config_source_participants(
     robot: &Robot,
     project: &LockedProject,
 ) -> Vec<SourceParticipant> {
-    project
-        .runtimes
-        .iter()
-        .filter_map(|runtime| {
-            let name = runtime.crate_dir.file_name()?.to_str()?.to_string();
-            robot
-                .services
-                .contains_key(&name)
-                .then(|| SourceParticipant::user_service(name, runtime.crate_dir.clone()))
-        })
-        .collect()
+    let mut participants = vec![SourceParticipant::brain(
+        project.brain.crate_dir.clone(),
+        project.brain.bin_target.clone(),
+    )];
+    participants.extend(project.runtimes.iter().filter_map(|runtime| {
+        let name = runtime.crate_dir.file_name()?.to_str()?.to_string();
+        robot
+            .services
+            .contains_key(&name)
+            .then(|| SourceParticipant::user_service(name, runtime.crate_dir.clone()))
+    }));
+    participants
 }
 
 /// Build every declared config-bearing participant and validate its
@@ -364,7 +374,7 @@ services:
     }
 
     #[test]
-    fn declared_config_source_participants_covers_only_declared_services() {
+    fn declared_config_source_participants_covers_the_brain_and_only_declared_services() {
         let robot = minimal_robot();
         let project = locked_project(vec![
             workspace_runtime("services/avoid"),
@@ -375,7 +385,17 @@ services:
 
         let participants = declared_config_source_participants(&robot, &project);
 
-        assert_eq!(participants.len(), 1, "{participants:?}");
+        // The mandatory root brain plus the one declared service - never the
+        // undeclared drift crate (organization#973, #950).
+        assert_eq!(participants.len(), 2, "{participants:?}");
+        let brain = &participants[0];
+        assert_eq!(brain.name, "brain");
+        assert_eq!(
+            brain.kind,
+            phoxal_cli_core::check::source::SourceParticipantKind::Brain
+        );
+        assert_eq!(brain.crate_dir, PathBuf::from("/fake/project"));
+        assert_eq!(brain.preferred_binary_name(), "testbot-robot");
         assert!(
             participants
                 .iter()

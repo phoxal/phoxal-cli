@@ -222,7 +222,6 @@ mod tests {
             vec!["phoxal", "status", "--message-format", "json", "safety"],
             vec!["phoxal", "version", "--message-format", "json"],
             vec!["phoxal", "self", "upgrade", "--message-format", "json"],
-            vec!["phoxal", "behavior", "validate", "--message-format", "json"],
         ] {
             assert!(
                 Cli::try_parse_from(args.clone()).is_err(),
