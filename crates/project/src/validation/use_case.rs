@@ -318,7 +318,7 @@ mod tests {
         }
     }
 
-    const MINIMAL_ROBOT: &str = r#"schema: robot/v0
+    const MINIMAL_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: bot
   namespace: dev

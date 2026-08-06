@@ -4,7 +4,7 @@
 //! only what a Liveliness event means for the board.
 
 use crate::SupervisorState;
-use phoxal_bus::{ParticipantLivelinessEvent, ParticipantLivelinessStatus};
+use phoxal_bus::{LivelinessStatus, ParticipantLivelinessEvent};
 use phoxal_cli_core::project::launch_plan::DEFAULT_ROUTER_CONNECT;
 use phoxal_cli_core::runtime::{ParticipantInstanceKey, RobotKey};
 
@@ -39,7 +39,7 @@ pub(crate) fn apply_liveliness_event(
             participant: id.to_string(),
         },
         event.key.producer(),
-        event.status == ParticipantLivelinessStatus::Alive,
+        event.status == LivelinessStatus::Alive,
     );
 }
 
@@ -62,7 +62,7 @@ mod tests {
     use phoxal_bus::ParticipantLivelinessKey;
     use phoxal_cli_core::runtime::ParticipantKind;
 
-    fn event(participant: &str, status: ParticipantLivelinessStatus) -> ParticipantLivelinessEvent {
+    fn event(participant: &str, status: LivelinessStatus) -> ParticipantLivelinessEvent {
         ParticipantLivelinessEvent {
             key: ParticipantLivelinessKey::new("dev/robots/rover/xdead", participant, producer(7))
                 .expect("valid participant key"),
@@ -88,7 +88,7 @@ mod tests {
             &board,
             "dev",
             "rover",
-            event("drive", ParticipantLivelinessStatus::Alive),
+            event("drive", LivelinessStatus::Alive),
         );
         assert_eq!(
             board.supervisor_snapshot().processes[&key].status.actual,
@@ -99,7 +99,7 @@ mod tests {
             &board,
             "dev",
             "rover",
-            event("drive", ParticipantLivelinessStatus::Lost),
+            event("drive", LivelinessStatus::Lost),
         );
         assert_eq!(
             board.supervisor_snapshot().processes[&key].status.actual,
@@ -126,7 +126,7 @@ mod tests {
             &board,
             "dev",
             "rover",
-            event(SUPERVISOR_SESSION_ID, ParticipantLivelinessStatus::Alive),
+            event(SUPERVISOR_SESSION_ID, LivelinessStatus::Alive),
         );
         assert_eq!(
             board.supervisor_snapshot().processes[&key].status.actual,

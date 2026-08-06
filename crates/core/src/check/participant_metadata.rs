@@ -11,122 +11,41 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use object::{Object, ObjectSection};
 use phoxal_runtime_contract::{
-    ApiId, COMPONENT_DOCUMENT_SCHEMA, LAUNCH_ABI, ParticipantKind, ParticipantMetadata,
-    ParticipantSchemas, ROBOT_DOCUMENT_SCHEMA, SIMULATION_DOCUMENT_SCHEMA, SchemaId,
+    BusAbi, ComponentSchema, LaunchAbi, ParticipantKind, ParticipantMetadata, ParticipantSchemas,
+    RobotSchema, SimulationSchema,
 };
 
-/// The process-boundary contracts this `phoxal` release speaks.
+/// The version set this CLI build speaks.
 ///
-/// Every identifier is imported from the crate that owns it - there is no
-/// second spelling of any of these strings anywhere in this repository, and no
-/// framework SemVer anywhere in the set. A binary agrees with this CLI exactly
-/// when its embedded record matches every field.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompatibilitySet {
-    pub api: ApiId,
-    pub schemas: ParticipantSchemas,
-}
-
-impl CompatibilitySet {
-    /// The set this CLI release was built against.
-    #[must_use]
-    pub fn current() -> Self {
-        Self {
-            api: ApiId::new(<phoxal_api::v0_1::Api as phoxal_bus::ApiVersion>::ID),
-            schemas: ParticipantSchemas {
-                bus: SchemaId::new(phoxal_bus::BUS_ABI),
-                launch: SchemaId::new(LAUNCH_ABI),
-                robot: SchemaId::new(ROBOT_DOCUMENT_SCHEMA),
-                component: SchemaId::new(COMPONENT_DOCUMENT_SCHEMA),
-                simulation: SchemaId::new(SIMULATION_DOCUMENT_SCHEMA),
-            },
-        }
-    }
-
-    /// Reject a binary that does not speak every contract in this set, naming
-    /// what mismatched and which side has to be updated.
-    fn verify(&self, meta: &ParticipantMeta, describe: &str) -> Result<()> {
-        if meta.api != self.api {
-            bail!(
-                "participant `{id}` uses robot API {found},\nbut this phoxal CLI requires \
-                 {expected}.\n\nUpdate the project dependency and rebuild:\n    cargo update -p \
-                 phoxal\n\n({describe})",
-                id = meta.id,
-                found = meta.api,
-                expected = self.api,
-            );
-        }
-        for (contract, found, expected, owner) in [
-            ("bus ABI", &meta.schemas.bus, &self.schemas.bus, Side::Cli),
-            (
-                "participant launch ABI",
-                &meta.schemas.launch,
-                &self.schemas.launch,
-                Side::Cli,
-            ),
-            (
-                "robot document schema",
-                &meta.schemas.robot,
-                &self.schemas.robot,
-                Side::Project,
-            ),
-            (
-                "component document schema",
-                &meta.schemas.component,
-                &self.schemas.component,
-                Side::Project,
-            ),
-            (
-                "simulation document schema",
-                &meta.schemas.simulation,
-                &self.schemas.simulation,
-                Side::Project,
-            ),
-        ] {
-            if found != expected {
-                bail!(
-                    "participant `{id}` speaks {contract} {found},\nbut this phoxal CLI requires \
-                     {expected}.\n\n{fix}\n\n({describe})",
-                    id = meta.id,
-                    fix = owner.fix(),
-                );
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Which side of a contract mismatch has to move.
-#[derive(Clone, Copy, Debug)]
-enum Side {
-    /// The CLI is older than the binary: the operator updates the tool.
-    Cli,
-    /// The project crate is older than the CLI: the operator updates the crate.
-    Project,
-}
-
-impl Side {
-    const fn fix(self) -> &'static str {
-        match self {
-            Self::Cli => {
-                "The built binary is newer than this CLI. Update the phoxal CLI to the release \
-                 that ships this contract."
-            }
-            Self::Project => {
-                "Update the project dependency and rebuild:\n    cargo update -p phoxal"
-            }
-        }
-    }
-}
+/// Every field is a one-variant enum, so this is the *only* value of its type
+/// that exists on this train - which is exactly why nothing compares against
+/// it: a binary that disagrees fails to parse. It is named here so a test that
+/// synthesizes a participant binary can emit the same document a role macro
+/// does, without restating a single version string.
+pub const CURRENT_SCHEMAS: ParticipantSchemas = ParticipantSchemas {
+    bus: BusAbi::V0,
+    launch: LaunchAbi::V0,
+    robot: RobotSchema::V0,
+    component: ComponentSchema::V0,
+    simulation: SimulationSchema::V0,
+};
 
 /// One binary's accepted embedded compatibility record: the tagged `V0`
 /// document destructured into the fields callers actually branch on.
+///
+/// Every version identity in it is a `phoxal-runtime-contract` enum with one
+/// variant per version this train speaks, so **holding this value is already
+/// the compatibility proof**. There is no set to compare it against and no
+/// check a caller could forget: a binary from another train carries a token
+/// none of those enums has a variant for, and it fails at
+/// [`phoxal_runtime_contract::parse_participant_metadata`] - where serde names
+/// both the token it found and the one it expected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParticipantMeta {
-    pub api: ApiId,
+    pub api: phoxal_runtime_contract::RobotApi,
     pub schemas: ParticipantSchemas,
     pub id: String,
     pub kind: ParticipantKind,
@@ -211,13 +130,21 @@ pub fn extract_participant_metadata_from_bytes(
             SECTION_NAMES.join(" or ")
         )
     })?;
+    // The parse IS the compatibility check. Every version identity in the
+    // document is a one-variant enum, so a binary from another train fails
+    // here, naming the token it carries and the token this CLI expects. The
+    // context below adds only the two things serde cannot know: which file it
+    // was, and what an operator does about it.
     let metadata =
         phoxal_runtime_contract::parse_participant_metadata(&bytes).with_context(|| {
-            format!("phoxal participant metadata section in {describe} is not valid JSON")
+            format!(
+                "{describe} was built against a different phoxal train than this CLI.\n\nIf the \
+                 binary is older, update the project dependency and rebuild:\n    cargo update -p \
+                 phoxal\n\nIf it is newer, update the phoxal CLI to the release that ships this \
+                 contract."
+            )
         })?;
-    let meta = ParticipantMeta::from(metadata);
-    CompatibilitySet::current().verify(&meta, describe)?;
-    Ok(meta)
+    Ok(ParticipantMeta::from(metadata))
 }
 
 /// Extracts and parses `binary_path`'s embedded participant metadata: reads
@@ -506,25 +433,30 @@ mod tests {
     }
 
     /// The exact document a role macro embeds, for a binary that agrees with
-    /// this CLI on every process-boundary contract.
-    fn current_record(id: &str, extra: &str) -> Vec<u8> {
-        let current = CompatibilitySet::current();
-        format!(
-            r#"{{"schema":"{schema}","api":"{api}","schemas":{{"bus":"{bus}","launch":"{launch}","robot":"{robot}","component":"{component}","simulation":"{simulation}"}},"id":"{id}","kind":"service","config_schema":{{"type":"null"}}{extra}}}"#,
-            schema = phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA,
-            api = current.api,
-            bus = current.schemas.bus,
-            launch = current.schemas.launch,
-            robot = current.schemas.robot,
-            component = current.schemas.component,
-            simulation = current.schemas.simulation,
+    /// this CLI on every process-boundary contract. Written through the
+    /// framework's own serialize twin, so the fixture cannot drift from the
+    /// parser it is meant to satisfy.
+    fn current_record(id: &str) -> serde_json::Value {
+        serde_json::to_value(
+            phoxal_runtime_contract::emit::ParticipantMetadataRecord::V0 {
+                api: phoxal_runtime_contract::RobotApi::V0_1,
+                schemas: CURRENT_SCHEMAS,
+                id,
+                kind: ParticipantKind::Service,
+                config_schema: serde_json::json!({"type": "null"}),
+            },
         )
-        .into_bytes()
+        .expect("the typed record serializes")
+    }
+
+    /// [`current_record`] as the bytes a linker section carries.
+    fn current_record_bytes(id: &str) -> Vec<u8> {
+        serde_json::to_vec(&current_record(id)).expect("a JSON value serializes")
     }
 
     #[test]
     fn extracts_metadata_from_foreign_format_and_arch_object_files() -> Result<()> {
-        let payload = &current_record("drive", "");
+        let payload = &current_record_bytes("drive");
 
         // aarch64 ELF (Linux robot / release binary shape), `.phoxal_meta`.
         let elf = synthesize_object(
@@ -695,54 +627,54 @@ mod tests {
         );
     }
 
-    /// A binary built against a different robot API is rejected before its
-    /// config schema is trusted, with a diagnostic naming the participant, both
-    /// revisions, and the exact command that fixes it.
+    /// A binary from another train is rejected before its config schema is
+    /// trusted. The rejection is the *parse*, not a comparison: the diagnostic
+    /// therefore names the token the binary carries, the token this CLI
+    /// expects, and - from this module's own context - the fix for either
+    /// direction.
     #[test]
     fn a_binary_on_another_api_revision_is_rejected_with_an_actionable_diagnostic() {
-        let record = String::from_utf8(current_record("cleaning", ""))
-            .expect("the fixture record is UTF-8")
-            .replace(
-                &format!(r#""api":"{}""#, CompatibilitySet::current().api),
-                r#""api":"v9.9""#,
-            );
+        let mut record = current_record("cleaning");
+        record["api"] = serde_json::json!("phoxal/robot-api/v9.9");
         let elf = synthesize_object(
             object::BinaryFormat::Elf,
             object::Architecture::Aarch64,
             b".phoxal_meta",
             b"",
-            record.as_bytes(),
+            serde_json::to_vec(&record).unwrap().as_slice(),
         );
         let error = extract_participant_metadata_from_bytes(&elf, "bin/cleaning")
             .expect_err("a foreign API revision must be rejected");
-        let message = error.to_string();
-        assert!(message.contains("cleaning"), "{message}");
-        assert!(message.contains("v9.9"), "{message}");
+        let message = format!("{error:#}");
+        assert!(message.contains("bin/cleaning"), "{message}");
+        assert!(message.contains("phoxal/robot-api/v9.9"), "{message}");
+        assert!(message.contains("phoxal/robot-api/v0.1"), "{message}");
         assert!(message.contains("cargo update -p phoxal"), "{message}");
+        assert!(message.contains("update the phoxal CLI"), "{message}");
     }
 
-    /// A document schema mismatch names the contract that disagreed and which
-    /// side has to move, rather than reporting a generic parse failure.
+    /// The same for a document grammar, including the 0.53-era unnamespaced
+    /// spelling a stale binary would still carry.
     #[test]
     fn a_binary_on_another_document_schema_is_rejected_naming_the_contract() {
-        let record = String::from_utf8(current_record("drive", ""))
-            .expect("the fixture record is UTF-8")
-            .replace(
-                &format!(r#""robot":"{}""#, CompatibilitySet::current().schemas.robot),
-                r#""robot":"robot/v9""#,
+        for stale in ["robot/v0", "phoxal/robot/v9"] {
+            let mut record = current_record("drive");
+            record["schemas"]["robot"] = serde_json::json!(stale);
+            let elf = synthesize_object(
+                object::BinaryFormat::Elf,
+                object::Architecture::Aarch64,
+                b".phoxal_meta",
+                b"",
+                serde_json::to_vec(&record).unwrap().as_slice(),
             );
-        let elf = synthesize_object(
-            object::BinaryFormat::Elf,
-            object::Architecture::Aarch64,
-            b".phoxal_meta",
-            b"",
-            record.as_bytes(),
-        );
-        let message = extract_participant_metadata_from_bytes(&elf, "bin/phoxal-service-drive")
-            .expect_err("a foreign robot document schema must be rejected")
-            .to_string();
-        assert!(message.contains("robot document schema"), "{message}");
-        assert!(message.contains("robot/v9"), "{message}");
+            let message = format!(
+                "{:#}",
+                extract_participant_metadata_from_bytes(&elf, "bin/phoxal-service-drive")
+                    .expect_err("a foreign robot document schema must be rejected")
+            );
+            assert!(message.contains(stale), "{message}");
+            assert!(message.contains("phoxal/robot/v0"), "{message}");
+        }
     }
 
     /// An unknown metadata schema tag and an unknown field are both rejected by
@@ -750,21 +682,28 @@ mod tests {
     /// CLI could get wrong.
     #[test]
     fn an_unsupported_metadata_document_is_rejected() {
+        let mut with_framework = current_record("drive");
+        with_framework["framework"] = serde_json::json!("0.54.0");
         for record in [
-            br#"{"schema":"phoxal/participant-metadata/v1","id":"drive","kind":"service","config_schema":null}"#.to_vec(),
-            current_record("drive", r#","framework":"0.54.0""#),
+            serde_json::json!({
+                "schema": "phoxal/participant-metadata/v1",
+                "id": "drive",
+                "kind": "service",
+                "config_schema": null,
+            }),
+            with_framework,
         ] {
+            let bytes = serde_json::to_vec(&record).unwrap();
             let elf = synthesize_object(
                 object::BinaryFormat::Elf,
                 object::Architecture::Aarch64,
                 b".phoxal_meta",
                 b"",
-                &record,
+                &bytes,
             );
             assert!(
                 extract_participant_metadata_from_bytes(&elf, "bin/phoxal-service-drive").is_err(),
-                "unsupported metadata document must be rejected: {}",
-                String::from_utf8_lossy(&record)
+                "unsupported metadata document must be rejected: {record}",
             );
         }
     }

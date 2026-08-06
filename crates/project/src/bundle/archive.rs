@@ -510,7 +510,11 @@ mod tests {
     fn stage_layout(root: &Path) {
         fs::create_dir_all(root.join("bin")).unwrap();
         fs::create_dir_all(root.join("assets")).unwrap();
-        fs::write(root.join("robot.yaml"), b"schema: robot/v0\nclock: real\n").unwrap();
+        fs::write(
+            root.join("robot.yaml"),
+            b"schema: phoxal/robot/v0\nclock: real\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         write_executable(&root.join("bin/mission"), b"\x7fELF-ish-binary");
         #[cfg(not(unix))]

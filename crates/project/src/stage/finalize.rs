@@ -5,13 +5,13 @@
 //! manifest data:
 //!
 //! 1. read the exact source manifest, composing `extends` deterministically;
-//! 2. validate it as a current `robot/v0` document;
+//! 2. validate it as a current `phoxal/robot/v0` document;
 //! 3. require the composed `extends` to be empty;
 //! 4. rewrite every referenced path to its deterministic bundle-relative
 //!    location below `assets/`;
 //! 5. write `clock:` explicitly - `real` by default, `simulated` for a
 //!    simulation build - and strip the `driver:` blocks the intent excludes;
-//! 6. serialize the same `robot/v0` DTO.
+//! 6. serialize the same `phoxal/robot/v0` DTO.
 //!
 //! Nothing downstream carries a mode flag or a driver flag: the finalized
 //! document alone answers "what runs and on which clock", and the one
@@ -70,7 +70,7 @@ fn finalization_error(
     )
 }
 
-/// Serialize a finalized document as the tagged `robot/v0` YAML a bundle root
+/// Serialize a finalized document as the tagged `phoxal/robot/v0` YAML a bundle root
 /// carries.
 pub(crate) fn render_finalized(manifest: &Manifest) -> Result<String> {
     let document = phoxal_manifest::source::robot::Manifest::V0(manifest.clone());
@@ -94,7 +94,7 @@ mod tests {
     use phoxal_cli_core::project::intent::DriverSelection;
     use phoxal_manifest::source::robot::v0::Clock;
 
-    const AUTHORED: &str = r#"schema: robot/v0
+    const AUTHORED: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev

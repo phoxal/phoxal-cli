@@ -10,7 +10,7 @@
 //! reads:
 //!
 //! ```text
-//! robot.yaml                              finalized robot/v0
+//! robot.yaml                              finalized phoxal/robot/v0
 //! assets/robot/structure.urdf
 //! assets/robot/meshes/...
 //! assets/components/<type>/component.yaml
@@ -239,7 +239,7 @@ pub(crate) fn write_test_bundle(
         fs::create_dir_all(&component_root)?;
         fs::write(
             component_root.join("component.yaml"),
-            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+            "schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
         )?;
         fs::write(
             component_root.join("structure.urdf"),
@@ -248,7 +248,7 @@ pub(crate) fn write_test_bundle(
         if simulated_types.contains(&component_type) {
             fs::write(
                 component_root.join("simulation.yaml"),
-                "schema: simulation/v0\ncapabilities: {}\n",
+                "schema: phoxal/simulation/v0\ncapabilities: {}\n",
             )?;
         }
         component_roots.insert(component_type.to_string(), component_root);
@@ -302,7 +302,7 @@ pub(crate) fn compile_test_bundle(
     fs::create_dir_all(&component)?;
     fs::write(
         source.path().join("robot.yaml"),
-        r#"schema: robot/v0
+        r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -327,7 +327,7 @@ robot:
     )?;
     fs::write(
         component.join("component.yaml"),
-        "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+        "schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
     )?;
     fs::write(
         component.join("structure.urdf"),
@@ -361,7 +361,7 @@ mod tests {
     use phoxal_cli_core::project::requirements::RequiredParticipantKind;
     use std::collections::BTreeSet;
 
-    const DRIVEN: &str = r#"schema: robot/v0
+    const DRIVEN: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev

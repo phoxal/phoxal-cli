@@ -1122,7 +1122,7 @@ mod tests {
     };
 
     fn minimal_bundle_plan() -> BundlePlan {
-        let yaml = r#"schema: robot/v0
+        let yaml = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev

@@ -30,7 +30,7 @@ fn platform_refs(images: &[(String, String)]) -> Vec<PlatformArtifactRef> {
         .collect()
 }
 
-const LAUNCH_PLAN_FIXTURE_ROBOT: &str = r#"schema: robot/v0
+const LAUNCH_PLAN_FIXTURE_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -1139,7 +1139,7 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Bundle
     })
 }
 
-const MINIMAL_ROBOT: &str = r#"schema: robot/v0
+const MINIMAL_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: test

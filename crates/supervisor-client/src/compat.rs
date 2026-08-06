@@ -52,7 +52,7 @@ mod tests {
                 id: phoxal_supervisor_api::Name::new("rover"),
                 namespace: phoxal_supervisor_api::Name::new("demo"),
             },
-            api: phoxal_supervisor_api::RobotApi::CURRENT,
+            api: phoxal_supervisor_api::RobotApi::V0_1,
             schemas: SupervisorSchemas::current(),
             mode: phoxal_supervisor_api::ExecutionMode::Real,
         })
@@ -93,7 +93,7 @@ mod tests {
                 id: phoxal_supervisor_api::Name::new("rover"),
                 namespace: phoxal_supervisor_api::Name::new("demo"),
             },
-            api: phoxal_supervisor_api::RobotApi::CURRENT,
+            api: phoxal_supervisor_api::RobotApi::V0_1,
             schemas: SupervisorSchemas::current(),
             mode: phoxal_supervisor_api::ExecutionMode::Real,
         };

@@ -32,7 +32,7 @@ fn locked_project_root() -> anyhow::Result<tempfile::TempDir> {
     )?;
     std::fs::write(
         root.path().join("components/fixture/component.yaml"),
-        "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+        "schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
     )?;
     std::fs::write(
         root.path().join("components/fixture/structure.urdf"),
@@ -94,7 +94,7 @@ fn minimal_robot_with_components(components: &str, extra: &str) -> anyhow::Resul
         (components, "[left_drive.motor]")
     };
     phoxal_cli_core::project::resolver::parse_robot_from_string(&format!(
-        r#"schema: robot/v0
+        r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -130,7 +130,7 @@ fn write_compiler_sources(root: &std::path::Path, robot: &Robot) -> anyhow::Resu
         std::fs::create_dir_all(&component_root)?;
         std::fs::write(
             component_root.join("component.yaml"),
-            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+            "schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
         )?;
         std::fs::write(
             component_root.join("structure.urdf"),
@@ -260,7 +260,7 @@ fn container_snapshot_uses_the_live_registry_cache_for_components_and_metadata()
     for (path, bytes) in [
         ("Cargo.toml", manifest.as_bytes()),
         ("src/main.rs", b"fn main() {}" as &[u8]),
-        ("component.yaml", b"schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n" as &[u8]),
+        ("component.yaml", b"schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n" as &[u8]),
         ("structure.urdf", br#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"# as &[u8]),
     ] {
         let mut header = tar::Header::new_gnu();
@@ -521,7 +521,10 @@ fn a_workspace_component_resolves_its_assets_and_driver_without_the_registry() -
         "[package]\nname = \"ddsm115\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"ddsm115\"\npath = \"src/main.rs\"\n",
     )?;
     std::fs::write(crate_dir.join("src/main.rs"), "fn main() {}")?;
-    std::fs::write(crate_dir.join("component.yaml"), "schema: component/v0\n")?;
+    std::fs::write(
+        crate_dir.join("component.yaml"),
+        "schema: phoxal/component/v0\n",
+    )?;
     declare_workspace_member(project.path(), "components/ddsm115")?;
     write_lock(project.path(), &["ddsm115"])?;
     let crate_dir = crate_dir.canonicalize()?;
@@ -672,7 +675,10 @@ fn direct_component_scan_distinguishes_asset_only_and_invalid_driver_shapes() ->
 
     let nonmember = project.path().join("components/nonmember");
     std::fs::create_dir_all(nonmember.join("src"))?;
-    std::fs::write(nonmember.join("component.yaml"), "schema: component/v0\n")?;
+    std::fs::write(
+        nonmember.join("component.yaml"),
+        "schema: phoxal/component/v0\n",
+    )?;
     std::fs::write(
         nonmember.join("Cargo.toml"),
         "[package]\nname = \"nonmember\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"nonmember\"\npath = \"src/main.rs\"\n",
@@ -699,7 +705,10 @@ fn direct_component_driver_requires_the_root_locked_workspace() -> anyhow::Resul
     let standalone = tempfile::tempdir()?;
     let component = standalone.path().join("components/standalone");
     std::fs::create_dir_all(component.join("src"))?;
-    std::fs::write(component.join("component.yaml"), "schema: component/v0\n")?;
+    std::fs::write(
+        component.join("component.yaml"),
+        "schema: phoxal/component/v0\n",
+    )?;
     std::fs::write(
         component.join("Cargo.toml"),
         "[package]\nname = \"standalone\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[[bin]]\nname = \"standalone\"\npath = \"src/main.rs\"\n",
@@ -749,7 +758,7 @@ fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_dr
         for (path, bytes) in [
             ("Cargo.toml", manifest.as_bytes()),
             ("src/main.rs", b"fn main() {}" as &[u8]),
-            ("component.yaml", b"schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n" as &[u8]),
+            ("component.yaml", b"schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n" as &[u8]),
             ("structure.urdf", br#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"# as &[u8]),
         ] {
             let mut header = tar::Header::new_gnu();
@@ -846,7 +855,7 @@ fn direct_component_directory_symlinks_are_rejected() -> anyhow::Result<()> {
     let external = tempfile::tempdir()?;
     std::fs::write(
         external.path().join("component.yaml"),
-        "schema: component/v0\n",
+        "schema: phoxal/component/v0\n",
     )?;
     std::os::unix::fs::symlink(external.path(), project.path().join("components/external"))?;
     let error = discover_local_components(project.path(), false)
@@ -906,7 +915,10 @@ fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
         "[package]\nname = \"ddsm115\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"ddsm115\"\npath = \"src/main.rs\"\n",
     )?;
     std::fs::write(crate_dir.join("src/main.rs"), "fn main() {}")?;
-    std::fs::write(crate_dir.join("component.yaml"), "schema: component/v0\n")?;
+    std::fs::write(
+        crate_dir.join("component.yaml"),
+        "schema: phoxal/component/v0\n",
+    )?;
     declare_workspace_member(project.path(), "components/ddsm115")?;
     write_lock(project.path(), &["ddsm115"])?;
 

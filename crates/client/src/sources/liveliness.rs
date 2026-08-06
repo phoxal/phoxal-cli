@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use phoxal_bus::{Bus, ParticipantLivelinessEvent, ParticipantLivelinessStatus};
+use phoxal_bus::{Bus, LivelinessStatus, ParticipantLivelinessEvent};
 use phoxal_cli_core::runtime::RobotKey;
 use phoxal_cli_observation::AttachmentEvent;
 use tokio::sync::{Notify, RwLock, mpsc};
@@ -54,7 +54,7 @@ pub(crate) fn spawn(
                             .unwrap_or_else(PoisonError::into_inner)
                             .insert(
                                 event.key.participant().to_string(),
-                                event.status == ParticipantLivelinessStatus::Alive,
+                                event.status == LivelinessStatus::Alive,
                             );
                         callback_wake.notify_one();
                     }

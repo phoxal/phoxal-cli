@@ -21,9 +21,18 @@
 //! Tags are documents, not keys. Bus key segments are unchanged: the robot API
 //! still routes on `v0.1/...` and this protocol on `supervisor/...`.
 //!
+//! # Framework-owned identities are the framework's types
+//!
+//! The bus ABI, the robot API revision, and the authored robot grammar are not
+//! this protocol's to version. They are re-used straight from
+//! `phoxal-runtime-contract` ([`BusAbi`], [`RobotApi`], [`RobotSchema`]), so
+//! there is no local twin to pin, no pin test to keep honest, and no way for
+//! this crate to advertise a spelling the framework does not speak.
+//!
 //! Pre-v1 the single current variant is edited in place and every binary is
 //! rebuilt.
 
+pub use phoxal_runtime_contract::{BusAbi, RobotApi, RobotSchema};
 use serde::{Deserialize, Serialize};
 
 /// Declare one version identity from one literal.
@@ -105,74 +114,6 @@ version! {
     TelemetrySchema = "phoxal/supervisor/telemetry/snapshot/v0"
 }
 
-version! {
-    /// The bus wire ABI every typed topic rides on.
-    ///
-    /// Framework-owned identity, declared locally because `phoxal-bus` 0.54
-    /// exposes it only as the `BUS_ABI` string constant, and pinned to that
-    /// constant by `local_versions_match_the_framework_constants` so the two
-    /// cannot drift. The framework owns the rename: it moves to
-    /// `phoxal/bus-abi/v0` on the next train, at which point this local bridge
-    /// is deleted rather than renamed here.
-    BusAbi = "phoxal/bus/v0"
-}
-
-version! {
-    /// The authored robot document grammar.
-    ///
-    /// This is the manifest grammar a client parses after fetching `robot.yaml`
-    /// through `bundle/get` - a different axis from [`RobotApi`], which names
-    /// the contract tree the robot-domain keys carry. A client needs both: one
-    /// to read the manifest, one to speak to the graph.
-    ///
-    /// Framework-owned identity, declared locally for the same reason as
-    /// [`BusAbi`] and pinned to `ROBOT_DOCUMENT_SCHEMA` by the same test.
-    RobotDocumentSchema = "robot/v0"
-}
-
-/// The robot API revision the execution runs.
-///
-/// Namespaced like every other version identity, so the tag is self-describing
-/// wherever it is read. **The key segment is unaffected**: robot-domain keys
-/// still route on the bare revision (`phoxal/{execution}/v0.1/drive/state`),
-/// which `phoxal-api` owns and this crate does not touch.
-///
-/// Framework-owned identity, declared locally because `phoxal-api` 0.54
-/// publishes the revision only as `ApiVersion::ID`, a `&str`. Its variant is
-/// `V0_1` rather than `V0` because a revision is dotted, which is why it is
-/// declared here rather than through the `version!` macro.
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
-)]
-pub enum RobotApi {
-    #[default]
-    #[serde(rename = "phoxal/robot-api/v0.1")]
-    V0_1,
-}
-
-impl RobotApi {
-    /// The one revision this build speaks.
-    pub const CURRENT: Self = Self::V0_1;
-
-    /// The namespace every robot API revision tag carries. The revision itself
-    /// belongs to `phoxal-api`, so it is never spelled out in this crate: the
-    /// pin test composes this prefix with `ApiVersion::ID` and asserts the
-    /// result is exactly the serde rename.
-    pub const NAMESPACE: &'static str = "phoxal/robot-api/";
-
-    /// The canonical wire text.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        "phoxal/robot-api/v0.1"
-    }
-}
-
-impl std::fmt::Display for RobotApi {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
 /// Every version a remote client consumes, advertised in the connect reply.
 ///
 /// Each field names its topic's **primary** document - the stream for a topic
@@ -190,17 +131,16 @@ impl std::fmt::Display for RobotApi {
 /// descriptor this client cannot deserialize, and serde names the offending
 /// version in the error. There is no range, no negotiation, and nothing for a
 /// caller to remember to compare.
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
-)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupervisorSchemas {
-    /// The bus wire ABI every topic below rides on.
+    /// The bus wire ABI every topic below rides on. Framework-owned.
     pub bus: BusAbi,
     /// The authored robot document grammar, for the `robot.yaml` a client
-    /// fetches through `bundle/get`. Distinct from the connect reply's `api`,
-    /// which is the robot API revision.
-    pub robot: RobotDocumentSchema,
+    /// fetches through `bundle/get`. Framework-owned, and a different axis from
+    /// the connect reply's `api`, which is the robot API revision: one reads
+    /// the manifest, the other speaks to the graph.
+    pub robot: RobotSchema,
     /// Primary: the pushed snapshot stream.
     pub snapshot: SnapshotSchema,
     /// Primary: the command reply.
@@ -219,8 +159,8 @@ impl SupervisorSchemas {
     #[must_use]
     pub const fn current() -> Self {
         Self {
-            bus: BusAbi::CURRENT,
-            robot: RobotDocumentSchema::CURRENT,
+            bus: BusAbi::V0,
+            robot: RobotSchema::V0,
             snapshot: SnapshotSchema::CURRENT,
             command: CommandSchema::CURRENT,
             bundle_get: BundleGetSchema::CURRENT,
@@ -233,11 +173,11 @@ impl SupervisorSchemas {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_bus::{ApiVersion, BUS_ABI};
-    use phoxal_runtime_contract::ROBOT_DOCUMENT_SCHEMA;
 
     /// `as_str` and the serde rename come from one literal per version; this
-    /// proves the generated pair really does agree for every one of them.
+    /// proves the generated pair really does agree for every one of them. Only
+    /// the versions this crate declares are listed: the framework-owned three
+    /// are the framework's own types now, and it proves this property for them.
     #[test]
     fn as_str_matches_the_serde_rename() {
         macro_rules! pin {
@@ -254,30 +194,6 @@ mod tests {
             BundleGetSchema::CURRENT,
             LogsSchema::CURRENT,
             TelemetrySchema::CURRENT,
-            BusAbi::CURRENT,
-            RobotDocumentSchema::CURRENT,
-            RobotApi::CURRENT,
-        );
-    }
-
-    /// The three framework-owned identities are declared locally only because
-    /// `phoxal-bus` / `phoxal-api` still publish them as `&str`. This pins each
-    /// local rename to the framework's own value, so the day the framework
-    /// ships the enums this crate cannot already have drifted from them.
-    ///
-    /// `RobotApi` is composed rather than compared: the revision itself is
-    /// never spelled out here, only the namespace it hangs under.
-    #[test]
-    fn local_versions_match_the_framework_constants() {
-        assert_eq!(BusAbi::CURRENT.as_str(), BUS_ABI);
-        assert_eq!(RobotDocumentSchema::CURRENT.as_str(), ROBOT_DOCUMENT_SCHEMA);
-        assert_eq!(
-            RobotApi::CURRENT.as_str(),
-            format!(
-                "{}{}",
-                RobotApi::NAMESPACE,
-                <phoxal_api::latest::Api as ApiVersion>::ID
-            )
         );
     }
 
@@ -327,7 +243,7 @@ mod tests {
     fn the_descriptor_round_trips_and_rejects_an_unknown_field() {
         let current = SupervisorSchemas::current();
         let json = serde_json::to_value(current).unwrap();
-        assert_eq!(json["bus"], BUS_ABI);
+        assert_eq!(json["bus"], BusAbi::V0.as_str());
         assert_eq!(
             serde_json::from_value::<SupervisorSchemas>(json.clone()).unwrap(),
             current

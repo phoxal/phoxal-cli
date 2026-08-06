@@ -3,7 +3,7 @@
 //! Execution consumes exactly one artifact: a finalized bundle, whose shape is
 //!
 //! ```text
-//! <bundle>/robot.yaml               finalized robot/v0: no extends, explicit clock
+//! <bundle>/robot.yaml               finalized phoxal/robot/v0: no extends, explicit clock
 //! <bundle>/assets/robot/...         robot structure and meshes
 //! <bundle>/assets/components/...    frozen component definitions and meshes
 //! <bundle>/assets/router/...        optional Zenoh router config
@@ -35,8 +35,7 @@ use super::requirements::{
     derive_runtime_requirements,
 };
 use crate::check::participant_metadata::{
-    CompatibilitySet, ExpectedTarget, ParticipantMeta, expected_target_for_host,
-    inspect_selected_binary_for_target,
+    ExpectedTarget, ParticipantMeta, expected_target_for_host, inspect_selected_binary_for_target,
 };
 
 pub mod plan;
@@ -145,7 +144,7 @@ impl RuntimeLayout {
         self.bundle.robot()
     }
 
-    /// The finalized `robot/v0` document this bundle persists.
+    /// The finalized `phoxal/robot/v0` document this bundle persists.
     #[must_use]
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
@@ -250,9 +249,13 @@ impl RuntimeLayout {
         Ok(SelectedBinary { path, meta })
     }
 
-    /// Inspect every distinct selected binary once, and require the whole graph
-    /// to agree on one compatibility set. Keyed by canonical `bin/` name, since
-    /// one binary serves every instance of a component type.
+    /// Inspect every distinct selected binary once. Keyed by canonical `bin/`
+    /// name, since one binary serves every instance of a component type.
+    ///
+    /// The graph agrees on one compatibility set by construction: every
+    /// version identity in an accepted record is a one-variant enum, so a
+    /// binary that disagrees with this CLI never parses, and two binaries that
+    /// both parsed cannot disagree with each other.
     pub fn inspect_selected(
         &self,
         inspection: LayoutInspection,
@@ -264,7 +267,6 @@ impl RuntimeLayout {
                 self.inspect_for(required, inspection)?,
             );
         }
-        ensure_one_compatibility_set(&selected)?;
         Ok(selected)
     }
 }
@@ -282,24 +284,7 @@ const fn expected_kind(kind: RequiredParticipantKind) -> phoxal_runtime_contract
     }
 }
 
-/// Every selected binary already matched this CLI's compatibility set
-/// individually, so a disagreement between two of them is structurally
-/// impossible. Asserting it here is what makes the graph-wide invariant
-/// explicit rather than implied, and names the binary if it ever breaks.
-fn ensure_one_compatibility_set(selected: &BTreeMap<String, SelectedBinary>) -> Result<()> {
-    let expected = CompatibilitySet::current();
-    for (binary_name, binary) in selected {
-        ensure!(
-            binary.meta.api == expected.api && binary.meta.schemas == expected.schemas,
-            "bin/{binary_name} does not agree with the rest of the graph on the execution \
-             compatibility set; every binary in one execution speaks exactly one API and one set \
-             of document schemas"
-        );
-    }
-    Ok(())
-}
-
-/// Validate the runtime declaration maps of an authored `robot/v0` document
+/// Validate the runtime declaration maps of an authored `phoxal/robot/v0` document
 /// against the CLI catalog, before any workspace scanning or build.
 ///
 /// - `brain` is never declared: the mandatory root brain IS the root Cargo

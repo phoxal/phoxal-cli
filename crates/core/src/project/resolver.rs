@@ -341,18 +341,41 @@ mod tests {
         );
     }
 
+    /// Both version directions reach the operator as the gate's own message,
+    /// not as serde's unknown-variant text - and each one points at the side
+    /// that actually has to move.
     #[test]
     fn load_robot_gates_an_unsupported_schema_revision_before_parsing() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join(ROBOT_FILE);
+
+        // The document is newer than the tool.
+        let newer = dir.path().join(ROBOT_FILE);
         std::fs::write(
-            &path,
-            "schema: robot/v1\nrobot:\n  id: rover\n  namespace: dev\n",
+            &newer,
+            "schema: phoxal/robot/v1\nrobot:\n  id: rover\n  namespace: dev\n",
         )?;
-        let error = load_robot(&path).expect_err("robot/v1 must be gated");
-        let message = format!("{error:#}");
-        assert!(message.contains("robot/v1"), "{message}");
-        assert!(message.contains("Update phoxal-cli"), "{message}");
+        let message = format!(
+            "{:#}",
+            load_robot(&newer).expect_err("phoxal/robot/v1 must be gated")
+        );
+        assert!(message.contains("phoxal/robot/v1"), "{message}");
+        assert!(message.contains("Update the phoxal CLI"), "{message}");
+        assert!(!message.contains("unknown variant"), "{message}");
+
+        // The document is older than the tool: a project authored against the
+        // 0.53-era CLI, whose grammar tag was not namespaced yet.
+        let older = dir.path().join("stale.robot.yaml");
+        std::fs::write(
+            &older,
+            "schema: robot/v0\nrobot:\n  id: rover\n  namespace: dev\n",
+        )?;
+        let message = format!(
+            "{:#}",
+            load_robot(&older).expect_err("the unnamespaced spelling must be gated")
+        );
+        assert!(message.contains("`robot/v0`"), "{message}");
+        assert!(message.contains("phoxal/robot/v0"), "{message}");
+        assert!(message.contains("Change its `schema:` tag"), "{message}");
         assert!(!message.contains("unknown variant"), "{message}");
         Ok(())
     }

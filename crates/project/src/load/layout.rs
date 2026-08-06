@@ -79,7 +79,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    const ROBOT_YAML: &str = r#"schema: robot/v0
+    const ROBOT_YAML: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev

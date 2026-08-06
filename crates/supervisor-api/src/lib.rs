@@ -61,11 +61,15 @@
 //!
 //! Every version this contract names - each document's schema, the bus ABI, the
 //! authored robot grammar, the robot API revision - is a serde enum whose
-//! variant rename is the canonical text, and that text exists exactly once in
-//! this crate. Nothing here holds a `SchemaId`/`ApiId` string newtype, and
-//! nothing compares two strings to decide compatibility: a foreign version
+//! variant rename is the canonical text. Nothing here holds a version string,
+//! and nothing compares two strings to decide compatibility: a foreign version
 //! fails to *deserialize*, and serde's error already names the tag it found and
 //! the set it expected. See [`schemas`].
+//!
+//! The three framework-owned identities - [`BusAbi`], [`RobotApi`],
+//! [`RobotSchema`] - are re-used from `phoxal-runtime-contract` rather than
+//! restated here, so this crate cannot advertise a spelling the framework does
+//! not speak.
 //!
 //! Document **tags** are not bus **keys**. Key building is untouched by any of
 //! this: robot-domain topics still route on the bare revision (`v0.1/...`) and
@@ -73,14 +77,6 @@
 //!
 //! # NEEDED-FROM-FRAMEWORK
 //!
-//! - **The framework's own version identities should be enums too.**
-//!   `phoxal-bus` publishes the bus ABI as `BUS_ABI: &str` and `phoxal-api`
-//!   publishes the revision as `ApiVersion::ID: &str`, so [`schemas::BusAbi`]
-//!   and [`schemas::RobotApi`] are declared here and pinned to those constants
-//!   by test. The framework-owned enums replace them on the next train.
-//!   `phoxal_runtime_contract::{ApiId, SchemaId}` are then unnecessary on this
-//!   contract - which is just as well, since they are `Deserialize`-only and a
-//!   connect reply must be serialized.
 //! - `phoxal-api` imports `phoxal_api_tree!` privately (`use
 //!   phoxal_macros::phoxal_api_tree;`), so a downstream protocol tree cannot
 //!   reach it through the crate that documents it and must depend on
@@ -102,8 +98,8 @@ pub use model::{
     StartupStepKind, StartupStepState, TelemetryRecord, WallTime,
 };
 pub use schemas::{
-    BundleGetSchema, BusAbi, CommandSchema, LogsSchema, RobotApi, RobotDocumentSchema,
-    SnapshotSchema, SupervisorSchemas, TelemetrySchema,
+    BundleGetSchema, BusAbi, CommandSchema, LogsSchema, RobotApi, RobotSchema, SnapshotSchema,
+    SupervisorSchemas, TelemetrySchema,
 };
 pub use text::{Bounded, BundlePath, Detail, LogText, Name, StderrTail, TextTooLong};
 

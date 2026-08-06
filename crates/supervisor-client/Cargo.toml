@@ -13,14 +13,12 @@ repository.workspace = true
 name = "phoxal_supervisor_client"
 path = "src/lib.rs"
 
-# Pinned to the 0.54 framework train directly - see the note in
-# `crates/supervisor-api/Cargo.toml`.
 [dependencies]
-async-trait = "0.1.89"
-phoxal-bus = "0.54.0"
-phoxal-runtime-contract = "0.54.0"
-phoxal-supervisor-api = { path = "../supervisor-api" }
-thiserror = "2.0.18"
+async-trait = { workspace = true }
+phoxal-bus = { workspace = true }
+phoxal-runtime-contract = { workspace = true }
+phoxal-supervisor-api = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
 

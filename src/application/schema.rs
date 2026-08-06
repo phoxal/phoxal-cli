@@ -205,7 +205,7 @@ fn remove_retired_schemas(generated: &GeneratedSchemas) -> (Vec<String>, Vec<Str
 mod tests {
     use super::*;
 
-    const ROBOT_YAML: &str = "schema: robot/v0\nname: rover\n";
+    const ROBOT_YAML: &str = "schema: phoxal/robot/v0\nname: rover\n";
 
     /// A project with a root `robot.yaml` and one component directory.
     fn project() -> Result<tempfile::TempDir> {
@@ -566,14 +566,17 @@ mod tests {
         let robot = project.path().join("robot.yaml");
         fs::write(&robot, format!("{stale_association}{ROBOT_YAML}"))?;
         let component = project.path().join("components/wheel/component.yaml");
-        fs::write(&component, "schema: component/v0\n")?;
+        fs::write(&component, "schema: phoxal/component/v0\n")?;
 
         generate_command(project.path())?;
         assert_eq!(
             fs::read_to_string(&robot)?,
             format!("{stale_association}{ROBOT_YAML}")
         );
-        assert_eq!(fs::read_to_string(&component)?, "schema: component/v0\n");
+        assert_eq!(
+            fs::read_to_string(&component)?,
+            "schema: phoxal/component/v0\n"
+        );
         assert!(!project.path().join(".idea").exists());
         assert!(!project.path().join(".vscode").exists());
         Ok(())

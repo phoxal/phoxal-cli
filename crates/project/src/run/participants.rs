@@ -692,7 +692,7 @@ mod tests {
         Ok(())
     }
 
-    const LAYOUT_ROBOT_YAML: &str = r#"schema: robot/v0
+    const LAYOUT_ROBOT_YAML: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev

@@ -49,26 +49,25 @@ pub(crate) use candidate::{compile_test_bundle, write_test_bundle};
 
 /// The exact embedded-metadata document a role macro writes, for tests that
 /// synthesize a participant binary.
+///
+/// Built through the framework's own serialize twin rather than a JSON literal,
+/// so a fixture can never claim a version spelling the parser would reject.
 #[cfg(test)]
 pub(crate) fn test_metadata_payload(
     id: &str,
     kind: &str,
     config_schema: serde_json::Value,
 ) -> Vec<u8> {
-    let current = phoxal_cli_core::check::participant_metadata::CompatibilitySet::current();
-    serde_json::to_vec(&serde_json::json!({
-        "schema": phoxal_runtime_contract::PARTICIPANT_METADATA_SCHEMA,
-        "api": current.api.as_str(),
-        "schemas": {
-            "bus": current.schemas.bus.as_str(),
-            "launch": current.schemas.launch.as_str(),
-            "robot": current.schemas.robot.as_str(),
-            "component": current.schemas.component.as_str(),
-            "simulation": current.schemas.simulation.as_str(),
+    let kind = serde_json::from_value(serde_json::Value::String(kind.to_string()))
+        .expect("the fixture names a participant kind this train has");
+    serde_json::to_vec(
+        &phoxal_runtime_contract::emit::ParticipantMetadataRecord::V0 {
+            api: phoxal_runtime_contract::RobotApi::V0_1,
+            schemas: phoxal_cli_core::check::participant_metadata::CURRENT_SCHEMAS,
+            id,
+            kind,
+            config_schema,
         },
-        "id": id,
-        "kind": kind,
-        "config_schema": config_schema,
-    }))
+    )
     .expect("metadata serializes")
 }

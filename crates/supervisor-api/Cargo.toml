@@ -13,25 +13,18 @@ repository.workspace = true
 name = "phoxal_supervisor_api"
 path = "src/lib.rs"
 
-# Pinned to the 0.54 framework train directly rather than through
-# `[workspace.dependencies]`: the rest of this workspace is still on 0.53 while
-# the cutover lands, and these two crates are the first consumers of the 0.54
-# `phoxal_api_tree!` protocol mode. Fold these into the workspace table when the
-# whole workspace moves.
 [dependencies]
-phoxal-bus = "0.54.0"
+phoxal-bus = { workspace = true }
 # `phoxal-api` imports the macro privately, so a downstream protocol tree must
 # name `phoxal-macros` itself. See NEEDED-FROM-FRAMEWORK in src/lib.rs.
-phoxal-macros = "0.54.0"
-phoxal-runtime-contract = "0.54.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_bytes = "0.11.19"
-thiserror = "2.0.18"
+phoxal-macros = { workspace = true }
+phoxal-runtime-contract = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-# Test-only: the pin test reads the framework's own `ApiVersion::ID`.
-phoxal-api = "0.54.0"
-rmp-serde = "1.3.1"
+rmp-serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

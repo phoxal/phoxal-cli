@@ -104,7 +104,7 @@ mod resolve_project_tests {
         )?;
         std::fs::write(
             project.path().join("robot.yaml"),
-            "schema: robot/v0\nrobot:\n  id: test\n  namespace: dev\n  motion_limits:\n    max_linear_speed_mps: 1.0\n    max_angular_speed_radps: 1.0\n  kinematic:\n    kind: omnidirectional\n    actuators: [drive.motor]\n    encoders: []\n  components:\n    drive:\n      component: wheel\n      mount_link: base\n",
+            "schema: phoxal/robot/v0\nrobot:\n  id: test\n  namespace: dev\n  motion_limits:\n    max_linear_speed_mps: 1.0\n    max_angular_speed_radps: 1.0\n  kinematic:\n    kind: omnidirectional\n    actuators: [drive.motor]\n    encoders: []\n  components:\n    drive:\n      component: wheel\n      mount_link: base\n",
         )?;
         let reporter = Reporter;
         let seen = std::sync::atomic::AtomicBool::new(false);
@@ -370,7 +370,7 @@ mod tests {
     /// itself (that happens inside `resolve()`, which this test bypasses by
     /// constructing `BundlePlan` directly), so an empty `components: {}`
     /// is fine here.
-    const FIXTURE_ROBOT: &str = r#"schema: robot/v0
+    const FIXTURE_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: test

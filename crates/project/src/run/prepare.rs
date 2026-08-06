@@ -636,7 +636,7 @@ pub(crate) fn repoint_after_publish(path: &mut PathBuf, candidate: &Path, publis
 mod root_classification_tests {
     use super::*;
 
-    const LAYOUT_YAML: &str = r#"schema: robot/v0
+    const LAYOUT_YAML: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -657,7 +657,10 @@ robot:
     #[test]
     fn classifies_source_layout_and_neither_without_resolving_dependencies() -> Result<()> {
         let source = tempfile::tempdir()?;
-        std::fs::write(source.path().join("robot.yaml"), "schema: robot/v0\n")?;
+        std::fs::write(
+            source.path().join("robot.yaml"),
+            "schema: phoxal/robot/v0\n",
+        )?;
         assert_eq!(classify_run_root(source.path())?, RunRootKind::Source);
 
         let layout = tempfile::tempdir()?;
@@ -672,7 +675,7 @@ robot:
         let source_with_bin = tempfile::tempdir()?;
         std::fs::write(
             source_with_bin.path().join("robot.yaml"),
-            "schema: robot/v0\n",
+            "schema: phoxal/robot/v0\n",
         )?;
         std::fs::write(source_with_bin.path().join("Cargo.toml"), "[workspace]\n")?;
         std::fs::create_dir(source_with_bin.path().join("bin"))?;
@@ -769,7 +772,7 @@ mod tests {
     use phoxal_cli_core::project::intent::{DriverSelection, RunIntent};
     use phoxal_cli_core::project::requirements::RequiredParticipantKind;
 
-    const ROBOT_YAML: &str = r#"schema: robot/v0
+    const ROBOT_YAML: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev

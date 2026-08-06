@@ -185,7 +185,7 @@ mod tests {
         std::fs::create_dir_all(&component)?;
         std::fs::write(
             source.path().join("robot.yaml"),
-            r#"schema: robot/v0
+            r#"schema: phoxal/robot/v0
 robot:
   id: asset-free
   namespace: dev
@@ -209,7 +209,7 @@ robot:
         )?;
         std::fs::write(
             component.join("component.yaml"),
-            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+            "schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
         )?;
         std::fs::write(
             component.join("structure.urdf"),

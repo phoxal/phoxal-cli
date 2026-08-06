@@ -159,7 +159,7 @@ fn connect_reply() -> supervisor::connect::Reply {
             id: Name::new("rover"),
             namespace: Name::new("demo"),
         },
-        api: RobotApi::CURRENT,
+        api: RobotApi::V0_1,
         schemas: SupervisorSchemas::current(),
         mode: ExecutionMode::Real,
     }
@@ -186,7 +186,7 @@ fn the_current_connect_round_trips_and_an_unknown_schema_is_rejected() {
 
     let json = serde_json::to_value(&reply).unwrap();
     assert_eq!(json["schema"], "phoxal/supervisor/connect/reply/v0");
-    assert_eq!(json["api"], RobotApi::CURRENT.as_str());
+    assert_eq!(json["api"], RobotApi::V0_1.as_str());
     assert_eq!(
         json["schemas"]["snapshot"],
         crate::SnapshotSchema::CURRENT.as_str()

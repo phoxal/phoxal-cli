@@ -63,12 +63,7 @@ pub(crate) fn raw_participant_report_from_extracted_metadata(
             meta.id,
         );
     }
-    let kind = match meta.kind {
-        phoxal_runtime_contract::ParticipantKind::Brain => "brain",
-        phoxal_runtime_contract::ParticipantKind::Service => "service",
-        phoxal_runtime_contract::ParticipantKind::Driver => "driver",
-        phoxal_runtime_contract::ParticipantKind::Simulator => "simulator",
-    };
+    let kind = meta.kind.as_str();
     if kind != artifact_kind {
         bail!(
             "{} at {} declares participant kind '{}', but it was selected as a '{}' artifact; \
@@ -93,10 +88,9 @@ mod tests {
     use super::*;
 
     fn meta(id: &str) -> participant_metadata::ParticipantMeta {
-        let current = participant_metadata::CompatibilitySet::current();
         participant_metadata::ParticipantMeta {
-            api: current.api,
-            schemas: current.schemas,
+            api: phoxal_runtime_contract::RobotApi::V0_1,
+            schemas: participant_metadata::CURRENT_SCHEMAS,
             id: id.to_string(),
             kind: phoxal_runtime_contract::ParticipantKind::Service,
             config_schema: serde_json::json!({"type": "object", "properties": {"speed": {"type": "integer"}}}),

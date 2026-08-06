@@ -1,6 +1,6 @@
 //! The one owner of "what should run".
 //!
-//! [`derive_runtime_requirements`] is a pure function of a finalized `robot/v0`
+//! [`derive_runtime_requirements`] is a pure function of a finalized `phoxal/robot/v0`
 //! document, the frozen simulation membership of its component types, and the
 //! CLI-internal catalog. It reads no Cargo metadata, no registry, no source
 //! directory outside the bundle, no descriptor, and no persisted plan, and it
@@ -266,7 +266,7 @@ mod tests {
         manifest
     }
 
-    const DRIVEN: &str = r#"schema: robot/v0
+    const DRIVEN: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -401,7 +401,10 @@ services:
         // The simulation shape finalization produces: `clock: simulated` with
         // every driver block stripped.
         let simulated = DRIVEN
-            .replace("schema: robot/v0\n", "schema: robot/v0\nclock: simulated\n")
+            .replace(
+                "schema: phoxal/robot/v0\n",
+                "schema: phoxal/robot/v0\nclock: simulated\n",
+            )
             .lines()
             .filter(|line| {
                 !line.contains("driver:")
@@ -438,8 +441,10 @@ services:
 
     #[test]
     fn a_simulated_clock_with_a_remaining_driver_block_is_rejected() {
-        let simulated =
-            DRIVEN.replace("schema: robot/v0\n", "schema: robot/v0\nclock: simulated\n");
+        let simulated = DRIVEN.replace(
+            "schema: phoxal/robot/v0\n",
+            "schema: phoxal/robot/v0\nclock: simulated\n",
+        );
         let error = derive(&simulated, &[])
             .expect_err("`clock: simulated` plus a driver block must be rejected");
         assert!(error.to_string().contains("clock: simulated"), "{error}");

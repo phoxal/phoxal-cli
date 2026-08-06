@@ -689,7 +689,10 @@ mod tests {
     #[test]
     fn resolve_target_reaches_a_layout_root_socket() -> Result<()> {
         let layout = tempfile::tempdir()?;
-        fs::write(layout.path().join("robot.yaml"), "schema: robot/v0\n")?;
+        fs::write(
+            layout.path().join("robot.yaml"),
+            "schema: phoxal/robot/v0\n",
+        )?;
         fs::create_dir_all(layout.path().join("bin"))?;
 
         let target = resolve_target(Some(layout.path()), layout.path())?;
@@ -707,7 +710,7 @@ mod tests {
         let project = tempfile::tempdir()?;
         fs::write(
             project.path().join("robot.yaml"),
-            "schema: robot/v0\nname: test\n",
+            "schema: phoxal/robot/v0\nname: test\n",
         )?;
         let identity = phoxal_cli_supervisor::ProjectLockIdentity::resolve(
             project.path(),
