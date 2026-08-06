@@ -9,6 +9,18 @@ struct Doctor;
 
 impl Doctor {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
+        // The pair first: a host whose `phoxald` is missing or mismatched
+        // cannot execute anything this CLI builds, whatever else is right
+        // (organization#978).
+        let pair = crate::pair::status();
+        if pair.is_exact() {
+            app.ui.success(pair.summary());
+        } else {
+            app.ui.warn(
+                pair.failure()
+                    .expect("a pair that is not exact always has a failure"),
+            );
+        }
         for status in phoxal_cli_project::host::doctor::probes() {
             match status {
                 phoxal_cli_project::host::doctor::ProbeStatus::Ok(message) => {

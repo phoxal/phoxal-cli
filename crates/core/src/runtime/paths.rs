@@ -7,6 +7,15 @@ pub const INSTALL_ROOT: &str = "/var/lib/phoxal";
 pub const RELEASES_ROOT: &str = "/var/lib/phoxal/releases";
 pub const INSTALLED_STATE_ROOT: &str = "/var/lib/phoxal/state";
 pub const INSTALLED_VOLATILE_ROOT: &str = "/run/phoxal";
+/// Where the exact `phoxal` + `phoxald` pair is installed on a managed host.
+/// The verified release archive carries both binaries and they are placed here
+/// together (organization#978), so the unit and the client resolve the daemon
+/// from one place rather than from `PATH`.
+pub const INSTALLED_BINARY_ROOT: &str = "/usr/local/bin";
+/// The installed interactive client. It is never the daemon.
+pub const INSTALLED_CLIENT_BINARY: &str = "/usr/local/bin/phoxal";
+/// The installed supervisor. This is what `phoxal.service` executes.
+pub const INSTALLED_DAEMON_BINARY: &str = "/usr/local/bin/phoxald";
 pub const SYSTEMD_UNIT: &str = "phoxal.service";
 pub const SYSTEMD_ACTIVE_ROOT: &str = "/run/systemd/system";
 pub const SYSTEMD_UNIT_ROOT: &str = "/etc/systemd/system";

@@ -17,6 +17,13 @@ const UNIT_PATH: &str = phoxal_cli_project::SYSTEMD_UNIT_PATH;
 const UNIT_MARKER: &str = "# Managed by phoxal";
 const LEGACY_INSTALL_ROOT: &str = "/opt/phoxal";
 
+/// The managed unit.
+///
+/// `ExecStart` is the daemon and its bundle root, and nothing else
+/// (organization#978): `phoxald <INSTALLED_BUNDLE_ROOT>`. The interactive
+/// client is never run as the daemon - it builds, and a durable systemd-owned
+/// service must never acquire Cargo, registries, a toolchain, or a terminal.
+/// `Type=notify` because the daemon owns READY and the watchdog itself.
 fn unit_contents() -> String {
     format!(
         r#"# Managed by phoxal
@@ -32,7 +39,7 @@ User=phoxal
 Group=phoxal-engineering
 SupplementaryGroups=phoxal
 WorkingDirectory={active}
-ExecStart=/usr/local/bin/phoxal start {active}
+ExecStart={daemon} {active}
 Restart=on-failure
 RestartSec=2s
 WatchdogSec=30s
@@ -49,6 +56,7 @@ ReadWritePaths={state} {volatile}
 [Install]
 WantedBy=multi-user.target
 "#,
+        daemon = phoxal_cli_project::INSTALLED_DAEMON_BINARY,
         active = phoxal_cli_project::ACTIVE_RUNTIME_ROOT,
         state = phoxal_cli_project::INSTALLED_STATE_ROOT,
         volatile = phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
@@ -435,11 +443,28 @@ mod unit_tests {
 
     use super::*;
 
+    /// The unit runs the daemon on the installed bundle root and nothing else.
+    /// The interactive client is never the daemon: it builds, and no `phoxal`
+    /// invocation may appear in `ExecStart` (organization#978).
     #[test]
-    fn managed_service_renders_one_resident_runtime_authority() {
+    fn managed_service_executes_the_daemon_on_the_installed_bundle_root() {
         let unit = unit_contents();
         assert_eq!(unit.matches("ExecStart=").count(), 1);
-        assert!(unit.contains("ExecStart=/usr/local/bin/phoxal start /var/phoxal"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/phoxald /var/phoxal"));
+        let exec_start = unit
+            .lines()
+            .find(|line| line.starts_with("ExecStart="))
+            .expect("the unit has an ExecStart");
+        assert!(
+            !exec_start.contains("/phoxal "),
+            "the interactive client must never be run as the daemon: {exec_start}"
+        );
+        for absent in [" start ", " run ", "--drivers", "--driver"] {
+            assert!(
+                !exec_start.contains(absent),
+                "the daemon takes a bundle root and nothing else: {exec_start}"
+            );
+        }
         assert!(unit.contains("Type=notify"));
         assert!(unit.contains("NotifyAccess=main"));
         assert!(unit.contains("WatchdogSec=30s"));

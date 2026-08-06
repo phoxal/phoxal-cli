@@ -7,7 +7,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::AppContext;
 
-pub(crate) const REMOTE_PHOXAL: &str = "/usr/local/bin/phoxal";
+pub(crate) const REMOTE_PHOXAL: &str = phoxal_cli_project::INSTALLED_CLIENT_BINARY;
+pub(crate) const REMOTE_PHOXALD: &str = phoxal_cli_project::INSTALLED_DAEMON_BINARY;
 
 pub(crate) struct DeployRequest {
     pub(crate) target: String,
@@ -118,16 +119,25 @@ pub(crate) fn validate_ssh_target(target: &str) -> Result<()> {
     Ok(())
 }
 
+/// Require the remote host to carry the exact CLI pair.
+///
+/// The unit executes `phoxald`, so a host with only `phoxal` installed accepts
+/// an install and then cannot execute it (organization#978). Both halves are
+/// checked here, before anything is built or copied.
 pub(crate) fn require_remote_phoxal(target: &str) -> Result<()> {
     let output = remote_output(
         target,
-        &format!("test -x {REMOTE_PHOXAL} && sudo -n test -x {REMOTE_PHOXAL}"),
+        &format!(
+            "test -x {REMOTE_PHOXAL} && sudo -n test -x {REMOTE_PHOXAL} && \
+             test -x {REMOTE_PHOXALD} && sudo -n test -x {REMOTE_PHOXALD}"
+        ),
     )?;
     anyhow::ensure!(
         output.status.success(),
-        "{target} does not have phoxal installed. Install the verified Linux release binary as \
-         `/usr/local/bin/phoxal`, then run `sudo /usr/local/bin/phoxal service install` and \
-         `/usr/local/bin/phoxal service status`; deploy never provisions the device"
+        "{target} does not have the phoxal CLI pair installed. `phoxal` and `phoxald` ship and \
+         install together: place both verified Linux release binaries as `{REMOTE_PHOXAL}` and \
+         `{REMOTE_PHOXALD}`, then run `sudo {REMOTE_PHOXAL} service install` and \
+         `{REMOTE_PHOXAL} service status`; deploy never provisions the device"
     );
     Ok(())
 }

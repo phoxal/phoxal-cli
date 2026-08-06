@@ -230,6 +230,7 @@ async fn install_archive(
             reporter: std::sync::Arc::new(phoxal_cli_project::SilentReporter),
         })
         .await?;
+        reject_simulation_bundle(&candidate)?;
         fsync_tree(&candidate)?;
         Ok::<_, anyhow::Error>(())
     }
@@ -337,6 +338,37 @@ async fn restore_after_failed_activation(
                 .parent()
                 .context("active runtime path has no parent")?,
         )?;
+    }
+    Ok(())
+}
+
+/// The error a simulation bundle earns at the installer.
+pub(crate) const SIMULATION_BUNDLE_REJECTED: &str = "PHOXAL-E-INSTALL-SIMULATION-BUNDLE";
+
+/// Refuse to install a simulation bundle.
+///
+/// Keeping simulation off systemd is an install-path rule, not a daemon rule
+/// (organization#978): `phoxald` reads `clock` from the manifest like any other
+/// bundle and would come up waiting for a world clock only the client-owned
+/// Webots can produce - forever, on a `Restart=on-failure` unit. So the refusal
+/// is here, where the durable install is being made.
+fn reject_simulation_bundle(root: &Path) -> Result<()> {
+    let robot = root.join(phoxal_cli_core::project::layout::ROBOT_FILE);
+    let manifest = phoxal_cli_core::project::resolver::load_robot(&robot)
+        .with_context(|| format!("failed to read the bundle's {}", robot.display()))?;
+    ensure_real_clock(manifest.clock)
+}
+
+/// The clock rule alone, so the refusal is testable without a bundle on disk.
+fn ensure_real_clock(clock: phoxal_manifest::source::robot::v0::Clock) -> Result<()> {
+    if clock == phoxal_manifest::source::robot::v0::Clock::Simulated {
+        bail!(
+            "error[{SIMULATION_BUNDLE_REJECTED}]: this build.phoxal is a simulation bundle \
+             (clock: simulated) and is never installed. A simulated execution needs the \
+             client-owned Webots for its world clock, which a systemd service has no way to \
+             start; run it with `phoxal simulation webots run <ROBOT_YAML> <WORLD>` instead, and \
+             install a real-clock bundle built by `phoxal build`"
+        );
     }
     Ok(())
 }
@@ -692,6 +724,21 @@ mod tests {
         atomic_symlink_switch(&roots.active, &selected)?;
         assert_eq!(std::fs::read_link(&roots.active)?, previous);
         Ok(())
+    }
+
+    /// A simulation bundle is never installed, and the refusal says why and
+    /// what to run instead (organization#978).
+    #[test]
+    fn a_simulation_bundle_is_rejected_at_the_installer_with_a_named_error() {
+        use phoxal_manifest::source::robot::v0::Clock;
+
+        assert!(ensure_real_clock(Clock::Real).is_ok());
+        let error = ensure_real_clock(Clock::Simulated)
+            .expect_err("a simulated bundle is never installable")
+            .to_string();
+        assert!(error.contains(SIMULATION_BUNDLE_REJECTED), "{error}");
+        assert!(error.contains("clock: simulated"), "{error}");
+        assert!(error.contains("phoxal simulation webots run"), "{error}");
     }
 
     #[test]

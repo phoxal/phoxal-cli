@@ -63,28 +63,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libudev-dev pkg-config
 
-      - name: Build release binary
+      # `phoxal` and `phoxald` are one product at one version (organization#978),
+      # so they are built together, from the same commit and the same locked
+      # graph, and packaged into the same archive.
+      - name: Build the release pair
         run: >-
           cargo build
           --locked
           --release
           --target ${{ matrix.target }}
-          -p phoxal-cli
-          --bin phoxal
+          -p phoxal-cli-client
+          -p phoxal-cli-supervisor
 
       - name: Package
         run: |
           set -euo pipefail
-          # The shipped executable is `phoxal` (the package stays `phoxal-cli`).
           # The published asset contract is shared with the phoxal.com installer
           # (install.sh in phoxal/website) and `phoxal self upgrade`: archive
-          # `phoxal-<version>-<target>.tar.gz` containing a binary named
-          # `phoxal-<target>`.
-          bin=phoxal
+          # `phoxal-<version>-<target>.tar.gz` containing BOTH binaries, named
+          # `phoxal-<target>` and `phoxald-<target>`. An archive carrying only
+          # one of them is rejected by `self upgrade` rather than half applied.
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${bin}" "dist/${bin}-${{ matrix.target }}"
-          archive="${bin}-${{ needs.plan.outputs.version }}-${{ matrix.target }}.tar.gz"
-          tar -czf "dist/${archive}" -C dist "${bin}-${{ matrix.target }}"
+          for bin in phoxal phoxald; do
+            cp "target/${{ matrix.target }}/release/${bin}" "dist/${bin}-${{ matrix.target }}"
+          done
+          archive="phoxal-${{ needs.plan.outputs.version }}-${{ matrix.target }}.tar.gz"
+          tar -czf "dist/${archive}" \
+            -C dist "phoxal-${{ matrix.target }}" "phoxald-${{ matrix.target }}"
           # Sibling checksum asset, verified by the phoxal.com installer and
           # `self upgrade`.
           # Format: "<hex>  <archive>" (sha256sum default).

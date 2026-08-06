@@ -29,6 +29,7 @@ mod cli;
 mod cutover;
 mod joypad;
 mod lock;
+mod pair;
 mod reconcile;
 
 use std::process::ExitCode;

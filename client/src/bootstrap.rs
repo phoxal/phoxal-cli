@@ -1,4 +1,11 @@
 //! Process bootstrap is owned by the binary entry point.
+//!
+//! `self upgrade` moves the whole CLI pair. `phoxal` and `phoxald` are one
+//! product released under one version (organization#978), so the archive
+//! carries both, both are extracted before anything is touched, and the swap
+//! either lands both or leaves the installation exactly as it was. A successful
+//! upgrade that produced a mixed pair is not a degraded outcome to warn about -
+//! it is an outcome this module must make impossible.
 
 use std::fs;
 use std::io::Read;
@@ -104,11 +111,16 @@ fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<UpgradeOutcome> {
         ),
     }
 
-    let new_binary_path = extract_binary(&archive_path, &asset.binary_name, temp_dir.path())
-        .with_context(|| format!("failed to extract {}", asset.binary_name))?;
+    // Both halves are extracted and verified present before anything on disk is
+    // replaced: an archive that carries only one is a broken release, and the
+    // right moment to say so is while the installation is still untouched.
+    let staged = extract_pair(&archive_path, &asset, temp_dir.path())?;
     let current_exe = current_executable()?;
     refuse_managed_install(&current_exe)?;
-    replace_current_executable(&new_binary_path)?;
+    let directory = current_exe
+        .parent()
+        .context("the running executable has no parent directory")?;
+    install_pair(directory, &staged, &SelfReplaceInstaller)?;
 
     let action = if requested_version < current_version {
         UpgradeAction::Switched
@@ -121,7 +133,7 @@ fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<UpgradeOutcome> {
         UpgradeAction::UpToDate => unreachable!("UpToDate returns earlier"),
     };
     ui.success(format!(
-        "{verb} phoxal v{current_version} -> v{requested_version}"
+        "{verb} the phoxal + phoxald pair v{current_version} -> v{requested_version}"
     ));
     Ok(UpgradeOutcome {
         version_from: current_version.to_string(),
@@ -259,7 +271,19 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn extract_binary(archive_path: &Path, binary_name: &str, temp_root: &Path) -> Result<PathBuf> {
+/// Both halves of the pair, extracted and not yet installed.
+#[derive(Debug)]
+struct StagedPair {
+    client: PathBuf,
+    daemon: PathBuf,
+}
+
+/// Extract `phoxal` and `phoxald` from one release archive.
+///
+/// An archive missing either half is rejected outright rather than half
+/// applied: the pair is the unit of release, so half of one is not a partial
+/// success (organization#978).
+fn extract_pair(archive_path: &Path, asset: &ReleaseAsset, temp_root: &Path) -> Result<StagedPair> {
     let archive_file = fs::File::open(archive_path)
         .with_context(|| format!("failed to open {}", archive_path.display()))?;
     let decoder = flate2::read::GzDecoder::new(archive_file);
@@ -267,7 +291,8 @@ fn extract_binary(archive_path: &Path, binary_name: &str, temp_root: &Path) -> R
     let extract_dir = temp_root.join("extract");
     fs::create_dir_all(&extract_dir)
         .with_context(|| format!("failed to create {}", extract_dir.display()))?;
-    let destination = extract_dir.join(binary_name);
+    let mut client = None;
+    let mut daemon = None;
 
     for entry in archive.entries().context("failed to read tar archive")? {
         let mut entry = entry.context("failed to read tar entry")?;
@@ -278,17 +303,130 @@ fn extract_binary(archive_path: &Path, binary_name: &str, temp_root: &Path) -> R
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if file_name != binary_name {
+        let file_name = file_name.to_owned();
+        let slot = if file_name == asset.client_binary_name {
+            &mut client
+        } else if file_name == asset.daemon_binary_name {
+            &mut daemon
+        } else {
             continue;
-        }
+        };
+        let destination = extract_dir.join(&file_name);
+        drop(path);
         entry
             .unpack(&destination)
-            .with_context(|| format!("failed to unpack {binary_name}"))?;
+            .with_context(|| format!("failed to unpack {file_name}"))?;
         make_executable(&destination)?;
-        return Ok(destination);
+        *slot = Some(destination);
     }
 
-    bail!("tar archive did not contain {binary_name}")
+    match (client, daemon) {
+        (Some(client), Some(daemon)) => Ok(StagedPair { client, daemon }),
+        (client, daemon) => bail!(
+            "release archive {} is not a complete CLI pair: it is missing {}. `phoxal` and \
+             `phoxald` are released together, so this release cannot be installed",
+            asset.archive_name,
+            match (client.is_some(), daemon.is_some()) {
+                (false, false) => format!(
+                    "both {} and {}",
+                    asset.client_binary_name, asset.daemon_binary_name
+                ),
+                (true, false) => asset.daemon_binary_name.clone(),
+                (false, true) => asset.client_binary_name.clone(),
+                (true, true) => unreachable!("both present is the success arm"),
+            }
+        ),
+    }
+}
+
+/// Replacing the running executable.
+///
+/// Behind a trait because it is the one step that cannot be undone, and the
+/// all-or-nothing behavior around it has to be provable without replacing the
+/// test binary.
+trait PairInstaller {
+    fn replace_client(&self, new_binary: &Path) -> Result<()>;
+}
+
+struct SelfReplaceInstaller;
+
+impl PairInstaller for SelfReplaceInstaller {
+    fn replace_client(&self, new_binary: &Path) -> Result<()> {
+        replace_current_executable(new_binary)
+    }
+}
+
+/// Install both halves, or leave the installation exactly as it was.
+///
+/// The daemon moves first and the client last. That order is the whole point:
+/// the daemon swap is a rename within one directory, so the previous bytes are
+/// still there to put back, while replacing the running client is irreversible.
+/// Doing the recoverable step first means the irreversible one can still fail
+/// without ever leaving a mixed pair behind.
+fn install_pair(
+    directory: &Path,
+    staged: &StagedPair,
+    installer: &dyn PairInstaller,
+) -> Result<()> {
+    let daemon = directory.join(crate::pair::DAEMON_BINARY);
+    let incoming = directory.join(format!(
+        ".{}.incoming-{}",
+        crate::pair::DAEMON_BINARY,
+        std::process::id()
+    ));
+    let previous = directory.join(format!(
+        ".{}.previous-{}",
+        crate::pair::DAEMON_BINARY,
+        std::process::id()
+    ));
+
+    // Copy into the install directory before renaming: a rename within one
+    // directory is atomic, a move across filesystems is not, and the extracted
+    // pair lives in a temp directory that is usually on another one.
+    fs::copy(&staged.daemon, &incoming).with_context(|| {
+        format!(
+            "failed to stage the new {} in {}",
+            crate::pair::DAEMON_BINARY,
+            directory.display()
+        )
+    })?;
+    make_executable(&incoming)?;
+
+    let had_daemon = daemon.exists();
+    if had_daemon {
+        fs::rename(&daemon, &previous)
+            .with_context(|| format!("failed to set the current {} aside", daemon.display()))?;
+    }
+    if let Err(error) = fs::rename(&incoming, &daemon) {
+        restore_daemon(had_daemon, &previous, &daemon);
+        let _ = fs::remove_file(&incoming);
+        return Err(
+            anyhow!(error).context(format!("failed to install the new {}", daemon.display()))
+        );
+    }
+
+    if let Err(error) = installer.replace_client(&staged.client) {
+        restore_daemon(had_daemon, &previous, &daemon);
+        return Err(error.context(
+            "the CLI pair was left untouched: the supervisor was restored because the client \
+             could not be replaced",
+        ));
+    }
+
+    if had_daemon {
+        let _ = fs::remove_file(&previous);
+    }
+    Ok(())
+}
+
+/// Put the previous daemon back, or remove the one that was just installed when
+/// there was no previous daemon at all.
+fn restore_daemon(had_daemon: bool, previous: &Path, daemon: &Path) {
+    if had_daemon {
+        let _ = fs::rename(previous, daemon);
+    } else {
+        let _ = fs::remove_file(daemon);
+    }
 }
 
 #[cfg(unix)]
@@ -346,9 +484,15 @@ fn replace_current_executable(new_binary_path: &Path) -> Result<()> {
     })
 }
 
+/// The published assets for one version and target.
+///
+/// One archive carries the whole pair, named for the target inside it, which is
+/// the contract `.github/workflows/release.yml` produces and the phoxal.com
+/// installer consumes.
 struct ReleaseAsset {
     archive_name: String,
-    binary_name: String,
+    client_binary_name: String,
+    daemon_binary_name: String,
     checksum_name: String,
     archive_url: String,
     checksum_url: String,
@@ -357,13 +501,15 @@ struct ReleaseAsset {
 impl ReleaseAsset {
     fn new(version: &Version, target: &str) -> Self {
         let archive_name = format!("phoxal-{version}-{target}.tar.gz");
-        let binary_name = format!("phoxal-{target}");
+        let client_binary_name = format!("{}-{target}", crate::pair::CLIENT_BINARY);
+        let daemon_binary_name = format!("{}-{target}", crate::pair::DAEMON_BINARY);
         let checksum_name = format!("{archive_name}.sha256");
         let archive_url = format!("{DOWNLOAD_BASE_URL}/v{version}/{archive_name}");
         let checksum_url = format!("{DOWNLOAD_BASE_URL}/v{version}/{checksum_name}");
         Self {
             archive_name,
-            binary_name,
+            client_binary_name,
+            daemon_binary_name,
             checksum_name,
             archive_url,
             checksum_url,
@@ -431,6 +577,233 @@ mod tests {
                 "upgraded": true,
                 "action": "upgraded",
             })
+        );
+    }
+
+    /// Build a `.tar.gz` carrying exactly the named entries.
+    fn archive_with(root: &Path, name: &str, entries: &[(&str, &str)]) -> PathBuf {
+        let archive_path = root.join(name);
+        let file = fs::File::create(&archive_path).expect("create archive");
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        for (entry_name, contents) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, entry_name, contents.as_bytes())
+                .expect("append entry");
+        }
+        builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip");
+        archive_path
+    }
+
+    fn asset() -> ReleaseAsset {
+        ReleaseAsset::new(
+            &Version::parse("0.36.0").expect("version"),
+            "aarch64-apple-darwin",
+        )
+    }
+
+    /// An upgrade only proceeds from an archive that carries the whole pair.
+    #[test]
+    fn a_release_archive_must_carry_both_binaries() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let asset = asset();
+        let both = archive_with(
+            temp.path(),
+            "both.tar.gz",
+            &[
+                (asset.client_binary_name.as_str(), "client bytes"),
+                (asset.daemon_binary_name.as_str(), "daemon bytes"),
+            ],
+        );
+        let staged = extract_pair(&both, &asset, temp.path()).expect("a complete pair extracts");
+        assert_eq!(fs::read_to_string(&staged.client).unwrap(), "client bytes");
+        assert_eq!(fs::read_to_string(&staged.daemon).unwrap(), "daemon bytes");
+
+        for (name, entries, missing) in [
+            (
+                "client-only.tar.gz",
+                vec![(asset.client_binary_name.as_str(), "client bytes")],
+                asset.daemon_binary_name.as_str(),
+            ),
+            (
+                "daemon-only.tar.gz",
+                vec![(asset.daemon_binary_name.as_str(), "daemon bytes")],
+                asset.client_binary_name.as_str(),
+            ),
+        ] {
+            let archive = archive_with(temp.path(), name, &entries);
+            let error = extract_pair(&archive, &asset, temp.path())
+                .expect_err("half a pair is never installable")
+                .to_string();
+            assert!(error.contains(missing), "{error}");
+            assert!(error.contains("released together"), "{error}");
+        }
+    }
+
+    struct FakeInstaller {
+        fail: bool,
+        replaced: std::cell::RefCell<Option<PathBuf>>,
+    }
+
+    impl PairInstaller for FakeInstaller {
+        fn replace_client(&self, new_binary: &Path) -> Result<()> {
+            if self.fail {
+                bail!("permission denied replacing the current executable");
+            }
+            *self.replaced.borrow_mut() = Some(new_binary.to_path_buf());
+            Ok(())
+        }
+    }
+
+    fn staged_pair(root: &Path) -> StagedPair {
+        let client = root.join("new-phoxal");
+        let daemon = root.join("new-phoxald");
+        fs::write(&client, "new client").expect("write client");
+        fs::write(&daemon, "new daemon").expect("write daemon");
+        StagedPair { client, daemon }
+    }
+
+    /// The good path moves both halves.
+    #[test]
+    fn a_successful_upgrade_replaces_both_halves() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install = temp.path().join("bin");
+        fs::create_dir_all(&install).expect("install dir");
+        fs::write(install.join(crate::pair::DAEMON_BINARY), "old daemon").expect("old daemon");
+        let staged = staged_pair(temp.path());
+        let installer = FakeInstaller {
+            fail: false,
+            replaced: std::cell::RefCell::new(None),
+        };
+
+        install_pair(&install, &staged, &installer).expect("the pair installs");
+
+        assert_eq!(
+            fs::read_to_string(install.join(crate::pair::DAEMON_BINARY)).unwrap(),
+            "new daemon"
+        );
+        assert_eq!(installer.replaced.into_inner(), Some(staged.client.clone()));
+        assert!(
+            leftovers(&install).is_empty(),
+            "no staging files are left behind: {:?}",
+            leftovers(&install)
+        );
+    }
+
+    /// A mixed pair must be impossible: if the irreversible half fails, the
+    /// recoverable half is put back and the installation is unchanged
+    /// (organization#978).
+    #[test]
+    fn a_failed_client_replacement_restores_the_previous_daemon() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install = temp.path().join("bin");
+        fs::create_dir_all(&install).expect("install dir");
+        fs::write(install.join(crate::pair::DAEMON_BINARY), "old daemon").expect("old daemon");
+        let staged = staged_pair(temp.path());
+        let installer = FakeInstaller {
+            fail: true,
+            replaced: std::cell::RefCell::new(None),
+        };
+
+        let error = install_pair(&install, &staged, &installer)
+            .expect_err("a failed client replacement fails the upgrade")
+            .to_string();
+
+        assert!(error.contains("left untouched"), "{error}");
+        assert_eq!(
+            fs::read_to_string(install.join(crate::pair::DAEMON_BINARY)).unwrap(),
+            "old daemon",
+            "the previous supervisor is restored"
+        );
+        assert!(
+            leftovers(&install).is_empty(),
+            "no staging files are left behind: {:?}",
+            leftovers(&install)
+        );
+    }
+
+    /// The same rule with nothing to restore: a first-time install that fails
+    /// its client half must not leave a lone daemon behind.
+    #[test]
+    fn a_failed_first_install_leaves_no_lone_daemon() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install = temp.path().join("bin");
+        fs::create_dir_all(&install).expect("install dir");
+        let staged = staged_pair(temp.path());
+        let installer = FakeInstaller {
+            fail: true,
+            replaced: std::cell::RefCell::new(None),
+        };
+
+        install_pair(&install, &staged, &installer).expect_err("the upgrade fails");
+
+        assert!(!install.join(crate::pair::DAEMON_BINARY).exists());
+        assert!(
+            leftovers(&install).is_empty(),
+            "no staging files are left behind: {:?}",
+            leftovers(&install)
+        );
+    }
+
+    /// Every file in the install directory that is not one of the two binaries.
+    fn leftovers(install: &Path) -> Vec<String> {
+        fs::read_dir(install)
+            .expect("read install dir")
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name != crate::pair::DAEMON_BINARY && name != crate::pair::CLIENT_BINARY)
+            .collect()
+    }
+
+    /// The producer and the consumer of the release asset contract must agree.
+    ///
+    /// This reads the packaging plan rather than a built archive on purpose: a
+    /// real cross-target release build is minutes of work to prove one naming
+    /// contract, while the contract itself is entirely in the workflow's text -
+    /// which packages are built and which file names go into the tar. What the
+    /// archive must contain once built is proven by
+    /// `a_release_archive_must_carry_both_binaries` against a real tar.
+    #[test]
+    fn the_release_workflow_packages_both_binaries_under_the_names_upgrade_expects() {
+        let workflow = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/release.yml"),
+        )
+        .expect("the release workflow is readable");
+        let asset = asset();
+
+        for package in ["-p phoxal-cli-client", "-p phoxal-cli-supervisor"] {
+            assert!(
+                workflow.contains(package),
+                "the release build must produce the whole pair: {package} is missing"
+            );
+        }
+        assert!(
+            workflow.contains("for bin in phoxal phoxald; do"),
+            "both binaries must be copied into the archive directory"
+        );
+        for name in [&asset.client_binary_name, &asset.daemon_binary_name] {
+            // The workflow writes the target through a matrix expression, so
+            // the contract to check is the prefix plus the expansion.
+            let (prefix, _) = name.split_once('-').expect("<bin>-<target>");
+            assert!(
+                workflow.contains(&format!("\"{prefix}-${{{{ matrix.target }}}}\"")),
+                "{name} must be packaged under `<bin>-<target>`"
+            );
+        }
+        assert!(
+            workflow.contains(
+                "archive=\"phoxal-${{ needs.plan.outputs.version }}-${{ matrix.target }}.tar.gz\""
+            ),
+            "the archive name must be the one `self upgrade` downloads: {}",
+            asset.archive_name
         );
     }
 

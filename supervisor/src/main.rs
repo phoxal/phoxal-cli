@@ -11,6 +11,11 @@
 //! and participant selection are already written into the finalized manifest by
 //! whoever built the bundle, so the bundle root is the daemon's complete input.
 //!
+//! The one non-executing invocation is `--version`. It exists because `phoxal`
+//! and `phoxald` ship as one exact pair (organization#978): the client probes
+//! its sibling with it and refuses to build anything for a missing or
+//! mismatched daemon. It is a pair check, not an execution option.
+//!
 //! Everything an operator does *to* a running execution goes through the
 //! supervisor API on the bus - `phoxal attach`, `phoxal status`, `phoxal stop`
 //! - not through a second invocation of this binary.
@@ -87,6 +92,10 @@ async fn main() -> ExitCode {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
         }
+        Invocation::Version => {
+            println!("{VERSION_LINE}");
+            return ExitCode::SUCCESS;
+        }
         Invocation::Misuse => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -109,6 +118,8 @@ enum Invocation {
     Run(PathBuf),
     /// Help was asked for, which is a successful invocation.
     Usage,
+    /// The pair check: print `phoxald <version>` and exit.
+    Version,
     /// Anything else: no operand, several operands, or a flag this binary does
     /// not have.
     Misuse,
@@ -129,6 +140,9 @@ fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Invocation 
         (Some(root), None) if matches!(root.to_string_lossy().as_ref(), "-h" | "--help") => {
             Invocation::Usage
         }
+        (Some(root), None) if matches!(root.to_string_lossy().as_ref(), "-V" | "--version") => {
+            Invocation::Version
+        }
         (Some(root), None) if !root.to_string_lossy().starts_with('-') => {
             Invocation::Run(PathBuf::from(root))
         }
@@ -136,16 +150,24 @@ fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Invocation 
     }
 }
 
+/// What `--version` prints. `phoxal` parses exactly this to decide whether the
+/// installed pair is exact.
+const VERSION_LINE: &str = concat!("phoxald ", env!("CARGO_PKG_VERSION"));
+
 const USAGE: &str = "\
 phoxald - the Phoxal execution supervisor
 
 Usage:
     phoxald <BUNDLE_ROOT>
+    phoxald --version
 
 <BUNDLE_ROOT> is a finalized bundle directory: robot.yaml, assets/, and bin/.
 Build one with `phoxal build`. The daemon validates and executes it; it never
 builds, and it takes no other options - the clock and the participant set are
-already written into the bundle's robot.yaml.";
+already written into the bundle's robot.yaml.
+
+`--version` reports this daemon's version so `phoxal` can confirm the two ship
+as the exact pair they must be.";
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -167,7 +189,7 @@ fn init_tracing() {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{Invocation, parse};
+    use super::{Invocation, VERSION_LINE, parse};
 
     fn arguments<const N: usize>(values: [&str; N]) -> Vec<OsString> {
         values.into_iter().map(OsString::from).collect()
@@ -184,6 +206,8 @@ mod tests {
         );
         assert_eq!(parse(arguments(["-h"])), Invocation::Usage);
         assert_eq!(parse(arguments(["--help"])), Invocation::Usage);
+        assert_eq!(parse(arguments(["-V"])), Invocation::Version);
+        assert_eq!(parse(arguments(["--version"])), Invocation::Version);
 
         for misuse in [
             vec![],
@@ -198,5 +222,16 @@ mod tests {
         // There are no subcommands to shadow an operand, so a directory that
         // happens to be named `run` is a bundle root like any other.
         assert_eq!(parse(arguments(["run"])), Invocation::Run("run".into()));
+    }
+
+    /// `phoxal` parses this exact line to decide whether the installed pair is
+    /// exact, so its shape is a contract between the two binaries
+    /// (organization#978).
+    #[test]
+    fn the_version_line_is_the_pair_probes_contract() {
+        assert_eq!(
+            VERSION_LINE,
+            format!("phoxald {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 }

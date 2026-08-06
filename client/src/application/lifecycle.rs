@@ -84,6 +84,7 @@ pub(crate) async fn run_command(
     requested_target: Option<&Path>,
     options: RunOptions,
 ) -> Result<()> {
+    crate::pair::require_exact()?;
     let target = Target::resolve(requested_target, app.project.root())?;
     let launched = build_publish_and_launch(app, &target, options).await?;
     let session = await_attachment(&target, launched, HANDSHAKE_BUDGET).await?;
@@ -92,6 +93,7 @@ pub(crate) async fn run_command(
 }
 
 pub(crate) async fn start_command(app: &AppContext, requested_target: Option<&Path>) -> Result<()> {
+    crate::pair::require_exact()?;
     let target = Target::resolve(requested_target, app.project.root())?;
     let options = RunOptions {
         drivers: DriversMode::On,
@@ -110,10 +112,15 @@ pub(crate) async fn start_command(app: &AppContext, requested_target: Option<&Pa
 
 /// The shared front half of `run` and `start`.
 ///
-/// The live check comes first and it is a real handshake, not a socket-file
-/// probe: an execution that answers connect is live, and `run` refuses rather
-/// than silently attaching to it. Only then is the build lock taken, so a
-/// refused run never blocks the running execution's own operations.
+/// Both callers confirm the exact `phoxal` + `phoxald` pair before they even
+/// resolve a project: a build no matching daemon can execute is wasted work,
+/// and the operator's real problem is a broken installation rather than their
+/// robot (organization#978).
+///
+/// The live check is a real handshake, not a socket-file probe: an execution
+/// that answers connect is live, and `run` refuses rather than silently
+/// attaching to it. Only then is the build lock taken, so a refused run never
+/// blocks the running execution's own operations.
 async fn build_publish_and_launch(
     app: &AppContext,
     target: &Target,
@@ -599,6 +606,31 @@ mod tests {
             existing_half.contains("Session::open"),
             "the existing-execution commands attach and nothing else"
         );
+    }
+
+    /// The pair is confirmed before a project is even resolved, let alone
+    /// built: `run` and `start` are the two commands that need a `phoxald`, and
+    /// a missing or mismatched one is an installation problem the operator must
+    /// hear about first (organization#978).
+    #[test]
+    fn run_and_start_confirm_the_exact_pair_before_resolving_anything() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/application/lifecycle.rs"),
+        )
+        .expect("this module is readable");
+        for command in [
+            "pub(crate) async fn run_command(",
+            "pub(crate) async fn start_command(",
+        ] {
+            let (_, body) = source.split_once(command).expect("the command exists");
+            let (opening, _) = body
+                .split_once("Target::resolve")
+                .expect("it resolves a target");
+            assert!(
+                opening.contains("crate::pair::require_exact()?"),
+                "{command} must confirm the pair before it resolves a project"
+            );
+        }
     }
 
     #[test]

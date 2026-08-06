@@ -7,14 +7,11 @@
 //! proves nothing.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-
-/// The executable a `phoxal` launches.
-pub(crate) const DAEMON_BINARY: &str = "phoxald";
 
 /// How much of the daemon's stderr is kept as early-exit evidence. The daemon
 /// writes its own log; this is only what a client shows when the child died
@@ -65,7 +62,9 @@ impl LaunchedDaemon {
 /// process group, and the daemon is durable - it must survive the client that
 /// started it, because detaching is not stopping.
 pub(crate) fn spawn(bundle_root: &Path) -> Result<LaunchedDaemon> {
-    let executable = resolve_binary()?;
+    // The pair is confirmed before anything is built, so by here the sibling is
+    // known to exist and to be this client's exact version.
+    let executable = crate::pair::resolve_daemon();
     let mut command = Command::new(&executable);
     command
         .arg(bundle_root)
@@ -124,34 +123,10 @@ fn isolate_process_group(command: &mut Command) {
 #[cfg(not(unix))]
 fn isolate_process_group(_command: &mut Command) {}
 
-/// Find `phoxald`.
-///
-/// It ships as an exact pair with this binary, so the sibling next to
-/// `current_exe` is the only correct answer when there is one - looking at
-/// `PATH` first would let an older installed daemon answer for a newer client
-/// run out of a build directory. `PATH` is the fallback for the case where
-/// `current_exe` cannot be resolved at all.
-fn resolve_binary() -> Result<PathBuf> {
-    if let Ok(current) = std::env::current_exe()
-        && let Some(directory) = current.parent()
-    {
-        let sibling = directory.join(DAEMON_BINARY);
-        if sibling.is_file() {
-            return Ok(sibling);
-        }
-        return Err(anyhow::anyhow!(
-            "the supervisor `{DAEMON_BINARY}` is not installed next to this `phoxal` ({}). \
-             `phoxal` and `{DAEMON_BINARY}` ship and install as one exact pair; reinstall the \
-             CLI so both are present",
-            directory.display()
-        ));
-    }
-    Ok(PathBuf::from(DAEMON_BINARY))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pair::DAEMON_BINARY;
 
     /// The daemon must not be in this client's process group, or a terminal
     /// Ctrl+C would stop the robot the client only meant to detach from
