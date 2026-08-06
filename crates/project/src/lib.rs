@@ -131,16 +131,12 @@ pub fn manual_input_from_staged_root(
 ) -> phoxal_cli_protocol::ManualInput {
     use phoxal_cli_protocol::{ManualDrive, ManualInput};
 
-    let path = staged_root.join(phoxal_cli_core::project::layout::ROBOT_FILE);
-    let robot = match std::fs::read(&path)
-        .map_err(|error| error.to_string())
-        .and_then(|bytes| phoxal_model::Robot::decode(&bytes).map_err(|error| error.to_string()))
-    {
-        Ok(robot) => robot,
+    let robot = match phoxal_manifest::bundle::FinalizedBundle::load(staged_root) {
+        Ok(bundle) => bundle.into_robot(),
         Err(error) => {
             return ManualInput::Unsupported(format!(
-                "failed to read the robot model at {}: {error}",
-                path.display()
+                "failed to read the finalized bundle at {}: {error}",
+                staged_root.display()
             ));
         }
     };

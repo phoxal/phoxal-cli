@@ -41,8 +41,14 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
             request.reporter.as_ref(),
         )?
     };
-    let candidate = crate::stage::begin_runtime_layout(&resolved.project_root, &resolved.resolved)
-        .context("failed to stage the simulation runtime layout")?;
+    // A simulation bundle is `clock: simulated` with every driver block
+    // stripped; the daemon never learns it is a simulation from anything else.
+    let candidate = crate::stage::begin_runtime_layout(
+        &resolved.project_root,
+        &resolved.resolved,
+        &phoxal_cli_core::project::intent::RunIntent::simulated(),
+    )
+    .context("failed to stage the simulation bundle")?;
     let mut plan = crate::progress::run_phase(
         request.reporter.as_ref(),
         crate::PhaseId::new("check"),

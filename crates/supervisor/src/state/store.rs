@@ -55,8 +55,15 @@ impl SupervisorState {
         Self::default()
     }
 
-    /// Consume exact producer Liveliness only as startup proof.
-    pub fn record_instance_presence(&self, instance: ParticipantInstanceKey, present: bool) {
+    /// Consume a participant's liveliness token as startup proof, and as the
+    /// one place the supervisor learns which producer this incarnation
+    /// actually publishes under.
+    pub fn record_instance_presence(
+        &self,
+        instance: ParticipantInstanceKey,
+        producer: ProducerId,
+        present: bool,
+    ) {
         let mut readiness = self
             .exact_instances
             .lock()
@@ -87,17 +94,18 @@ impl SupervisorState {
                 return;
             }
         };
-        let exact_starting = self
+        let starting = self
             .snapshot
             .lock()
             .expect("supervisor state mutex poisoned")
             .processes
             .get(&key)
-            .is_some_and(|entry| {
-                entry.status.producer == Some(instance.producer)
-                    && entry.status.actual == ProcessState::Starting
-            });
-        if exact_starting {
+            .is_some_and(|entry| entry.status.actual == ProcessState::Starting);
+        if starting {
+            // The token is the first evidence this incarnation has a session,
+            // so it carries both facts at once: which producer it publishes
+            // under, and that it is ready.
+            self.set_producer(&key, producer);
             self.set_state(key, ProcessState::Ready, None);
         }
     }
@@ -271,6 +279,17 @@ impl SupervisorState {
         self.modify(|snapshot| {
             if let Some(entry) = snapshot.processes.get_mut(key) {
                 entry.status.producer = Some(producer);
+            }
+        });
+    }
+
+    /// Forget the producer of a process that is being (re)spawned. A fresh
+    /// incarnation has not opened its session yet, so it has no producer to
+    /// report - and a restart fenced on the previous one must not match.
+    pub fn clear_producer(&self, key: &ProcessKey) {
+        self.modify(|snapshot| {
+            if let Some(entry) = snapshot.processes.get_mut(key) {
+                entry.status.producer = None;
             }
         });
     }

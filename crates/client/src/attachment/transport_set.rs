@@ -19,11 +19,8 @@ impl GraphTransportSet {
         let mut buses: BTreeMap<RobotKey, Bus> = BTreeMap::new();
         for robot in robot_keys(snapshot) {
             let opened = Bus::open(BusConfig {
-                namespace: robot.namespace.clone(),
-                robot_id: robot.robot_id.clone(),
                 participant: "phoxal-cli-attachment".to_string(),
                 execution: snapshot.execution_id,
-                producer: ProducerId::mint(),
                 connect_endpoints: vec![snapshot.router.clone()],
             });
             let bus = match tokio::select! {

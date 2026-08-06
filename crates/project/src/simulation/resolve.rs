@@ -14,11 +14,9 @@ use crate::validation::run_check_with_context;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
-use phoxal_cli_core::project::launch_plan::build_launch_plan;
 use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::simulation::world;
@@ -163,7 +161,7 @@ pub(crate) fn build_checked_sim_launch_plan(
     // fetching, not after Cargo has already done unnecessary host work.
     let platform_refs = check_artifact_refs_from_resolved(
         resolved,
-        phoxal_cli_core::project::layout::DriverSelection::None,
+        phoxal_cli_core::project::intent::DriverSelection::None,
     );
     // Materialize the full selected registry set once into the caller's
     // unpublished candidate. This candidate is later published as the
@@ -255,18 +253,16 @@ pub(crate) fn build_checked_sim_launch_plan(
     // silently accepted invalid user config and missing images).
     crate::validation::ensure_check_outcome_ok(&metadata_outcome)?;
 
-    let plan = build_launch_plan(
-        LaunchMode::Webots {
-            world: world.to_path_buf(),
-        },
-        &[CheckedRobotLaunchInput {
-            project_root,
-            resolved,
-            checked_participants: &sim_participants,
-            source_participants,
-        }],
-        run,
-    )?;
+    // The simulation bundle is an ordinary finalized bundle - `clock:
+    // simulated`, every driver block stripped - so its process graph comes from
+    // the one requirement derivation, exactly like a real run. The world path
+    // is a client-owned input that never reaches the daemon, so it rides the
+    // plan mode rather than the bundle.
+    let mut plan =
+        phoxal_cli_core::project::layout::RuntimeLayout::construct_plan(candidate_root, run)?.plan;
+    plan.mode = LaunchMode::Webots {
+        world: world.to_path_buf(),
+    };
     Ok(plan)
 }
 

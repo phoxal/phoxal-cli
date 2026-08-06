@@ -824,7 +824,7 @@ fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_dr
         project.path(),
         ResolveOptions {
             offline: true,
-            drivers: phoxal_cli_core::project::layout::DriverSelection::None,
+            drivers: phoxal_cli_core::project::intent::DriverSelection::None,
             ..Default::default()
         },
     )?;
@@ -914,7 +914,7 @@ fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
         &robot,
         project.path(),
         ResolveOptions {
-            drivers: phoxal_cli_core::project::layout::DriverSelection::None,
+            drivers: phoxal_cli_core::project::intent::DriverSelection::None,
             ..ResolveOptions::default()
         },
     )?;

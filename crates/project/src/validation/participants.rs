@@ -126,7 +126,7 @@ pub(crate) fn component_driver_runtimes_by_ref(
 
 pub(crate) fn check_artifact_refs_from_resolved(
     resolved: &BundlePlan,
-    drivers: phoxal_cli_core::project::layout::DriverSelection,
+    drivers: phoxal_cli_core::project::intent::DriverSelection,
 ) -> Vec<PlatformArtifactRef> {
     let mut refs = platform_artifact_refs_from_resolved(resolved);
     refs.extend(

@@ -62,6 +62,7 @@ impl EmbeddedRouter {
 /// (`tcp/…#exit_on_failure=false`) would override the pinned listen settings
 /// that make a successful open mean "bound".
 pub async fn start_embedded_router(
+    execution: phoxal_cli_core::identity::ExecutionId,
     endpoint: String,
     config: Option<&Path>,
     board: SupervisorState,
@@ -81,7 +82,10 @@ pub async fn start_embedded_router(
             )
         })?;
     }
-    let router = phoxal_bus::Router::open(std::slice::from_ref(&endpoint), config)
+    // One execution equals one router lifetime: the router's ZID IS the
+    // execution id, so a client that reads the router id has learned the
+    // execution without asking anyone.
+    let router = phoxal_bus::Router::open(execution, std::slice::from_ref(&endpoint), config)
         .await
         .with_context(|| format!("failed to open the embedded router on {endpoint}"))?;
 

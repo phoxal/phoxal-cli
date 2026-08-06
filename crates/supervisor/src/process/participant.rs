@@ -105,22 +105,12 @@ impl RunningParticipant {
             ProcessState::Starting,
             self.spec.note.clone(),
         );
-        if let ReadinessPolicy::ExactLiveliness(instance) = &mut self.spec.readiness {
-            // A restarted participant is structurally a different producer
-            // (#952 section G), so the supervisor pre-mints the identity the
-            // child will publish under and keys its own restart fencing on the
-            // same value. The Liveliness key carries it too, which is what
-            // makes "this exact restart is live" observable.
-            let producer = ProducerId::mint();
-            instance.producer = producer;
-            self.spec
-                .env
-                .retain(|(key, _)| key != phoxal_runtime_contract::env::PRODUCER_ID);
-            self.spec.env.push((
-                phoxal_runtime_contract::env::PRODUCER_ID.to_string(),
-                producer.to_string(),
-            ));
-            board.set_producer(&self.spec.key, producer);
+        if matches!(self.spec.readiness, ReadinessPolicy::ExactLiveliness(_)) {
+            // Nothing mints a producer any more: a participant's producer is
+            // the ZID of the Zenoh session it opens, which does not exist yet.
+            // Clearing it here is what makes the snapshot report a fact - this
+            // incarnation has no session - until its liveliness token arrives.
+            board.clear_producer(&self.spec.key);
         }
         let mut command = Command::new(&self.spec.executable);
         command.args(&self.spec.args);

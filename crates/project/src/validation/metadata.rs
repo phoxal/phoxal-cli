@@ -24,7 +24,7 @@ pub(crate) fn extract_participant_report_from_staged_runtime(
         )
     })?;
     raw_participant_report_from_extracted_metadata(
-        runtime.kind.wire_kind(),
+        runtime.kind.as_str(),
         &runtime.name,
         &binary,
         meta,

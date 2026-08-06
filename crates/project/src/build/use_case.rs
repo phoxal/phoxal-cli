@@ -205,10 +205,8 @@ impl Worker {
                 .prefix("phoxal-ssh-layout-")
                 .tempdir()?;
             crate::bundle::archive::extract_build_archive(pulled.path(), extracted.path())?;
-            crate::load::header::RuntimeHeader::read_and_validate(extracted.path())?;
             crate::load::layout::validate_layout_plan(
                 extracted.path(),
-                &phoxal_cli_core::project::layout::PlanOptions::default(),
                 LayoutInspection::Target(expected_target_for_triple(&target)?),
                 RunIdentity::default(),
             )?;
@@ -630,7 +628,8 @@ fn selected_registry_officials(
         .filter(|runtime| runtime.path_override.is_some())
         .map(|runtime| runtime.package.clone())
         .collect::<BTreeSet<_>>();
-    let mut officials = phoxal_cli_catalog::for_webots(false)
+    let mut officials = phoxal_cli_catalog::Catalog::official()
+        .native()
         .filter(|official| !overridden.contains(official.package))
         .map(|official| ContainerOfficial {
             package: phoxal_cli_catalog::cargo_package_name(official.package),

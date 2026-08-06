@@ -43,12 +43,10 @@ async fn open_bus(target: &BusTarget, participant: &str) -> Result<Bus> {
             target.robot_id.clone().unwrap_or(robot.robot.id),
         )
     };
+    let _ = (namespace, robot_id);
     Ok(Bus::open(BusConfig {
-        namespace,
-        robot_id,
         execution: target.execution,
         participant: participant.to_string(),
-        producer: ProducerId::mint(),
         connect_endpoints: vec![target.connect.clone()],
     })
     .await?)

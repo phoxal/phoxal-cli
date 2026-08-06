@@ -30,7 +30,7 @@ use anyhow::anyhow;
 use phoxal_cli_core::check::participant_metadata::expected_target_for_triple;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
-use phoxal_cli_core::project::layout::{LayoutInspection, PlanOptions, RuntimeLayout};
+use phoxal_cli_core::project::layout::{LayoutInspection, RuntimeLayout};
 use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::project::resolver::discover_robot_yaml;
@@ -217,8 +217,12 @@ pub(crate) fn refresh_staging_resolved(
     // metadata read, and loader validation below runs against
     // `candidate.path()`; only the final `publish_runtime_layout` call at the
     // bottom of this function ever touches the live `.phoxal/bundle/`.
-    let candidate = crate::stage::begin_runtime_layout(&project_root, &resolved)
-        .context("failed to stage the runtime layout")?;
+    // Driver exclusion is applied HERE, at finalization, before any binary is
+    // resolved or inspected: the excluded `driver:` blocks are stripped out of
+    // the finalized document, so nothing downstream can see them.
+    let intent = phoxal_cli_core::project::intent::RunIntent::real(driver_policy.selection());
+    let candidate = crate::stage::begin_runtime_layout(&project_root, &resolved, &intent)
+        .context("failed to stage the finalized bundle")?;
     crate::progress::ensure_active(ui)?;
     let materialize_settings = build.materialize_settings(&project_root, options.offline)?;
 
@@ -314,10 +318,6 @@ pub(crate) fn refresh_staging_resolved(
     // inspects against the declared target signature instead, since the
     // staged binaries were cross-compiled (or container-built) for it, not
     // for this host.
-    crate::load::header::RuntimeHeader::read_and_validate(candidate.path())?;
-    let plan_options = PlanOptions {
-        drivers: driver_policy.selection(),
-    };
     let inspection = match build.target() {
         Some(target) => {
             LayoutInspection::Target(expected_target_for_triple(target).with_context(|| {
@@ -326,9 +326,8 @@ pub(crate) fn refresh_staging_resolved(
         }
         None => LayoutInspection::Host,
     };
-    let mut plan =
-        crate::load::layout::validate_layout_plan(candidate.path(), &plan_options, inspection, run)
-            .context("failed to validate the staged runtime layout")?;
+    let mut plan = crate::load::layout::validate_layout_plan(candidate.path(), inspection, run)
+        .context("failed to validate the finalized bundle candidate")?;
     crate::progress::ensure_active(ui)?;
 
     // Every install, build, check, and validation above succeeded against the
@@ -462,41 +461,25 @@ pub(crate) fn prepare_layout_run(
     run: RunIdentity,
     reporter: &dyn crate::Reporter,
 ) -> Result<PreparedRun> {
-    // A compiled root declares its whole typed-document contract before any
-    // robot or participant metadata is interpreted.
-    crate::load::header::RuntimeHeader::read_and_validate(layout_root)?;
-    let layout = RuntimeLayout::open(layout_root).with_context(|| {
-        format!(
-            "failed to open staged runtime layout {}",
-            layout_root.display()
-        )
-    })?;
+    let layout = RuntimeLayout::open(layout_root)
+        .with_context(|| format!("failed to open finalized bundle {}", layout_root.display()))?;
 
-    // The same driver policy the source path applies, so `--drivers off` runs an
-    // extracted bundle on a host whose driver binaries it cannot inspect (#936):
-    // excluded drivers are not required, resolved, inspected, or planned.
-    let driven = layout
-        .participants()
-        .iter()
-        .filter(|participant| participant.kind == phoxal_manifest::ParticipantKind::Driver)
-        .filter_map(|participant| participant.component_instance.clone())
-        .collect();
-    let driver_policy = DriverPolicy::from_options(&options, &driven)?;
-    let plan_options = phoxal_cli_core::project::layout::PlanOptions {
-        drivers: driver_policy.selection(),
-    };
+    // Driver selection was applied at finalization, by stripping the excluded
+    // `driver:` blocks out of this bundle's own document. There is nothing left
+    // to select here, so a driver flag against an existing bundle is refused
+    // rather than silently ignored.
+    anyhow::ensure!(
+        matches!(options.drivers, crate::DriverMode::On) && options.drivers_subset.is_empty(),
+        "driver selection is written into the bundle at build time; run the source project to \
+         change it, or run this bundle as it was finalized"
+    );
     let plan = crate::progress::run_phase(
         reporter,
         crate::PhaseId::new("validate"),
         "Opening staged layout",
         || {
-            crate::load::layout::validate_layout_plan(
-                layout_root,
-                &plan_options,
-                phoxal_cli_core::project::layout::LayoutInspection::Host,
-                run,
-            )
-            .context("failed to construct the launch plan from the staged runtime layout")
+            crate::load::layout::validate_layout_plan(layout_root, LayoutInspection::Host, run)
+                .context("failed to construct the launch plan from the finalized bundle")
         },
     )?;
     reporter.report(crate::PreparationEvent::ProjectResolved {
@@ -706,7 +689,7 @@ fn run_source_check(
     resolved: &BundlePlan,
     source_participants: &[phoxal_cli_core::check::source::SourceParticipant],
     source_artifacts: &SourceArtifacts,
-    drivers: phoxal_cli_core::project::layout::DriverSelection,
+    drivers: phoxal_cli_core::project::intent::DriverSelection,
     reporter: &dyn crate::Reporter,
 ) -> Result<()> {
     let bin_dir = staged_root.join("bin");
@@ -755,7 +738,7 @@ fn run_source_check(
 
 fn selected_native_source_participants(
     participants: &[phoxal_cli_core::check::source::SourceParticipant],
-    drivers: phoxal_cli_core::project::layout::DriverSelection,
+    drivers: phoxal_cli_core::project::intent::DriverSelection,
 ) -> Vec<phoxal_cli_core::check::source::SourceParticipant> {
     use phoxal_cli_core::check::source::SourceParticipantKind;
     participants

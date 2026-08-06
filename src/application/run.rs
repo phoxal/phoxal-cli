@@ -1220,6 +1220,7 @@ pub(crate) async fn live_run_setup(
         "starting router",
     );
     let router = match start_embedded_router(
+        run.execution(),
         connect.clone(),
         prepared.router.config.as_deref(),
         prepared.board.clone(),
@@ -1258,14 +1259,14 @@ pub(crate) async fn live_run_setup(
     // failing is not fatal: a bundle may legitimately declare no assets, and a
     // malformed tree should not stop a robot from running - it makes asset
     // queries answer `Missing` instead.
-    let assets = phoxal_model::AssetResolver::discover(
+    let assets = phoxal_model::ParticipantAssetResolver::discover(
         prepared
             .staged_root
             .join(phoxal_cli_core::project::layout::ASSETS_DIR),
     )
     .unwrap_or_else(|error| {
         tracing::warn!("serving no declared assets: {error}");
-        phoxal_model::AssetResolver::default()
+        phoxal_model::ParticipantAssetResolver::default()
     });
     let mut background_tasks = AbortTasks::default();
     background_tasks.extend(prepared.robot_targets.iter().map(|target| {

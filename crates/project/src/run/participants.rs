@@ -20,11 +20,11 @@ use phoxal_cli_catalog::ArtifactKind;
 use phoxal_cli_core::check::participant_metadata::inspect_selected_binary;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
+#[cfg(test)]
+use phoxal_cli_core::project::intent::DriverSelection;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
-#[cfg(test)]
-use phoxal_cli_core::project::layout::DriverSelection;
 use phoxal_cli_core::project::layout::RuntimeLayout;
 use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
@@ -208,18 +208,12 @@ fn layout_device_missing_note(
     layout: &RuntimeLayout,
     participant_id: &str,
 ) -> Result<Option<String>> {
-    let Some(participant) = layout.participants().iter().find(|participant| {
-        participant.kind == phoxal_manifest::ParticipantKind::Driver
-            && participant.component_instance.as_deref() == Some(participant_id)
-    }) else {
+    let Some(component) = layout.manifest().robot.components.get(participant_id) else {
         return Ok(None);
     };
-    let Some(config) = participant.config.clone() else {
+    let Some(driver) = component.driver.as_ref() else {
         return Ok(None);
     };
-    let driver: phoxal_manifest::source::robot::v0::DriverConfig =
-        serde_json::from_value(config)
-            .with_context(|| format!("compiled driver config for '{participant_id}' is invalid"))?;
     let Some(missing) = missing_device_path(&driver.connection) else {
         return Ok(None);
     };

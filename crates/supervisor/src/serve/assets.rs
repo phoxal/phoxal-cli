@@ -6,7 +6,7 @@
 //!
 //! Two properties come free from that, rather than being maintained:
 //!
-//! - **Fencing.** [`AssetResolver`] discovers the tree once and only ever
+//! - **Fencing.** [`ParticipantAssetResolver`] discovers the tree once and only ever
 //!   consults that map, so `robot.json`, participant binaries, and anything
 //!   outside the asset root are unreachable because they are not keys - not
 //!   because a request is inspected for traversal.
@@ -17,13 +17,13 @@
 use anyhow::{Context, Result};
 use phoxal_api::v0_1::supervisor::asset::{GetRequest, GetResponse};
 use phoxal_bus::{Bus, Codec, ContractBody, MessagePack, QueryFailure};
-use phoxal_model::{AssetId, AssetResolver};
+use phoxal_model::{AssetId, ParticipantAssetResolver};
 
 /// Serve `supervisor/asset/get` on `bus` until the session ends.
 ///
 /// Returns only when the bus closes; the caller supervises it like any other
 /// long-lived session task.
-pub(crate) async fn run(bus: &Bus, assets: &AssetResolver) -> Result<()> {
+pub(crate) async fn run(bus: &Bus, assets: &ParticipantAssetResolver) -> Result<()> {
     let topic = <GetRequest as ContractBody>::TOPIC;
     let queryable = bus
         .declare_server(topic)
@@ -83,7 +83,7 @@ pub(crate) async fn run(bus: &Bus, assets: &AssetResolver) -> Result<()> {
 /// `InvalidPath`, an id that is simply not declared is `Missing`. The
 /// distinction matters to a caller - one is a bug in the request, the other is
 /// a fact about the bundle.
-fn resolve(assets: &AssetResolver, path: &str) -> GetResponse {
+fn resolve(assets: &ParticipantAssetResolver, path: &str) -> GetResponse {
     let Ok(id) = AssetId::new(path.trim()) else {
         return GetResponse::InvalidPath;
     };
@@ -112,7 +112,8 @@ mod tests {
     #[test]
     fn a_declared_asset_is_found() {
         let root = staged_bundle();
-        let assets = AssetResolver::discover(root.path().join("assets")).expect("discover");
+        let assets =
+            ParticipantAssetResolver::discover(root.path().join("assets")).expect("discover");
         assert_eq!(
             resolve(&assets, "meshes/base.stl"),
             GetResponse::Found {
@@ -129,7 +130,8 @@ mod tests {
     #[test]
     fn traversal_and_unusable_ids_are_rejected_not_merely_missing() {
         let root = staged_bundle();
-        let assets = AssetResolver::discover(root.path().join("assets")).expect("discover");
+        let assets =
+            ParticipantAssetResolver::discover(root.path().join("assets")).expect("discover");
         for path in ["", "   ", "../robot.json", "a/../b", "/etc/passwd", "a\\b"] {
             assert_eq!(
                 resolve(&assets, path),
@@ -142,7 +144,8 @@ mod tests {
     #[test]
     fn the_bundles_own_files_are_unreachable() {
         let root = staged_bundle();
-        let assets = AssetResolver::discover(root.path().join("assets")).expect("discover");
+        let assets =
+            ParticipantAssetResolver::discover(root.path().join("assets")).expect("discover");
         // These are syntactically valid ids, so they reach the resolver - and
         // are still unreachable, because they were never discovered as assets.
         for path in [
@@ -161,7 +164,8 @@ mod tests {
     #[test]
     fn a_bundle_with_no_assets_answers_missing_rather_than_failing() {
         let root = tempfile::tempdir().expect("temp dir");
-        let assets = AssetResolver::discover(root.path().join("assets")).expect("discover");
+        let assets =
+            ParticipantAssetResolver::discover(root.path().join("assets")).expect("discover");
         assert_eq!(resolve(&assets, "anything"), GetResponse::Missing);
     }
 }

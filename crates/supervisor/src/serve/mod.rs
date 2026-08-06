@@ -16,7 +16,7 @@ use crate::SupervisorState;
 use anyhow::{Result, anyhow};
 use phoxal_bus::{Bus, BusConfig};
 use phoxal_cli_core::identity::{ExecutionId, ProducerId};
-use phoxal_model::AssetResolver;
+use phoxal_model::ParticipantAssetResolver;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
@@ -39,7 +39,7 @@ pub fn start_supervisor_session(
     connect: String,
     execution: ExecutionId,
     board: SupervisorState,
-    assets: AssetResolver,
+    assets: ParticipantAssetResolver,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -69,14 +69,11 @@ pub(crate) async fn supervisor_session_loop(
     connect: String,
     execution: ExecutionId,
     board: SupervisorState,
-    assets: AssetResolver,
+    assets: ParticipantAssetResolver,
 ) -> Result<()> {
     let bus = Bus::open(BusConfig {
-        namespace: namespace.clone(),
-        robot_id: robot_id.clone(),
         participant: super::state::readiness::SUPERVISOR_SESSION_ID.to_string(),
         execution,
-        producer: ProducerId::mint(),
         connect_endpoints: vec![connect],
     })
     .await

@@ -33,10 +33,7 @@ pub(crate) fn stage_simulation_for_robot(
         .robots
         .first()
         .context("sim launch plan has no robot")?;
-    let bundle = resolved
-        .compiled
-        .decode_robot()
-        .context("failed to decode the canonical robot for Webots staging")?;
+    let bundle = &resolved.compiled.robot;
     let robot_id = bundle.robot_id();
     anyhow::ensure!(
         !connect_endpoints.is_empty(),

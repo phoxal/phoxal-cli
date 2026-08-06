@@ -886,7 +886,7 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
 
     let off = check_artifact_refs_from_resolved(
         &resolved,
-        phoxal_cli_core::project::layout::DriverSelection::None,
+        phoxal_cli_core::project::intent::DriverSelection::None,
     );
     assert!(
         off.iter()
@@ -895,7 +895,7 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
     );
     let subset = check_artifact_refs_from_resolved(
         &resolved,
-        phoxal_cli_core::project::layout::DriverSelection::Only(
+        phoxal_cli_core::project::intent::DriverSelection::Only(
             ["left_drive".to_string()].into_iter().collect(),
         ),
     );

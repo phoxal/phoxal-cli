@@ -93,7 +93,7 @@ fn driver_subset_is_strict() -> Result<()> {
     // The subset maps onto the core plan selection, which keeps only `imu`.
     assert_eq!(
         policy.selection(),
-        phoxal_cli_core::project::layout::DriverSelection::Only(available_drivers(&["imu"]))
+        phoxal_cli_core::project::intent::DriverSelection::Only(available_drivers(&["imu"]))
     );
 
     let err = DriverPolicy::from_options(
@@ -129,7 +129,7 @@ fn drivers_off_selects_no_drivers() -> Result<()> {
     // Drivers off maps onto the core selection that plans no component drivers.
     assert_eq!(
         policy.selection(),
-        phoxal_cli_core::project::layout::DriverSelection::None
+        phoxal_cli_core::project::intent::DriverSelection::None
     );
     Ok(())
 }

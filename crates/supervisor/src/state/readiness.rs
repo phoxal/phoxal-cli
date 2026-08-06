@@ -37,8 +37,8 @@ pub(crate) fn apply_liveliness_event(
         ParticipantInstanceKey {
             robot: RobotKey::new(namespace, robot_id),
             participant: id.to_string(),
-            producer: event.key.producer(),
         },
+        event.key.producer(),
         event.status == ParticipantLivelinessStatus::Alive,
     );
 }

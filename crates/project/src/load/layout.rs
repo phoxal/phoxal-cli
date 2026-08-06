@@ -16,7 +16,7 @@ use anyhow::{Result, bail};
 use phoxal_cli_core::check::Problem;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
-use phoxal_cli_core::project::layout::{LayoutInspection, PlanOptions, RuntimeLayout};
+use phoxal_cli_core::project::layout::{LayoutInspection, RuntimeLayout};
 use std::path::Path;
 
 /// Construct and validate the launch plan for a staged runtime layout at
@@ -30,12 +30,10 @@ use std::path::Path;
 /// the immutable plan the supervisor would launch from.
 pub fn validate_layout_plan(
     root: &Path,
-    options: &PlanOptions,
     inspection: LayoutInspection,
     run: RunIdentity,
 ) -> Result<LaunchPlan> {
-    let constructed =
-        RuntimeLayout::construct_plan_with_inspection(root, options, inspection, run)?;
+    let constructed = RuntimeLayout::construct_plan_with_inspection(root, inspection, run)?;
     // The constructor pairs each compiler-owned config with the schema from
     // its selected binary; validate the carried value directly.
     let mut config_problems = Vec::new();

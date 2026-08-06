@@ -33,7 +33,7 @@ pub fn run_check_with_context(
         validate_artifact_identity(
             artifact.kind_label(),
             &artifact.name,
-            artifact.kind.wire_kind(),
+            artifact.kind.as_str(),
             &raw,
         )?;
         let participant =
