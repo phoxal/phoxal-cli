@@ -3067,7 +3067,7 @@ mod doctor {
                     phoxal_cli_core::project::train::TrainSource::Path => "path",
                 }
             );
-            println!("train anchor: Cargo.toml and Cargo.lock are coherent");
+            println!("root package: Cargo.toml and Cargo.lock are coherent");
             if train.is_published() {
                 if app.offline {
                     println!("framework facade: crates.io probe skipped in offline mode");

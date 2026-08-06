@@ -64,7 +64,7 @@ fn write_lock(root: &std::path::Path, extra_packages: &[&str]) -> anyhow::Result
     Ok(())
 }
 
-/// Turn `root`'s plain train-anchor package into a real Cargo workspace
+/// Turn `root`'s plain root brain package into a real Cargo workspace
 /// listing itself plus `member` (a `services/` or `components/`
 /// crate a test just created). `locked_project_root` deliberately declares no
 /// `[workspace]` table - a glob member errors when a test's temp dir has no
