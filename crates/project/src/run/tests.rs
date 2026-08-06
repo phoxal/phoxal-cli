@@ -224,7 +224,7 @@ fn selected_router_endpoint_reaches_plan_and_spawn_environment() {
         process_group: true,
         note: None,
         bus_participant: true,
-        readiness: ParticipantSpec::exact_liveliness_template(
+        readiness: ParticipantSpec::exact_liveliness(
             phoxal_cli_core::runtime::RobotKey::new("test", "robot"),
             "tool-bus",
         ),

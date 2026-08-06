@@ -16,10 +16,10 @@ use crate::build::cargo::{SourceArtifacts, device_missing_note, missing_device_p
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use phoxal_cli_catalog::ArtifactKind;
 use phoxal_cli_core::check::participant_metadata::inspect_selected_binary;
 use phoxal_cli_core::check::source::SourceParticipant;
 use phoxal_cli_core::check::source::SourceParticipantKind;
-use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::ParticipantExecution;
 use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
@@ -515,7 +515,7 @@ fn participant_spec(
         process_group: true,
         note: None,
         bus_participant: true,
-        readiness: ParticipantSpec::exact_liveliness_template(
+        readiness: ParticipantSpec::exact_liveliness(
             robot_key.clone(),
             &participant.launch.participant_id,
         ),

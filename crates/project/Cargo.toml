@@ -21,6 +21,7 @@ phoxal-bus = { workspace = true }
 phoxal-manifest = { workspace = true }
 phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
+phoxal-cli-catalog = { workspace = true }
 phoxal-cli-core = { workspace = true }
 phoxal-cli-protocol = { workspace = true }
 reqwest = { workspace = true }

@@ -72,8 +72,8 @@ mod tests {
     use crate::paths::host::test_support::ScratchPhoxalHome;
     use crate::resolve::project::host_target_triple;
     use anyhow::{Context, Result, ensure};
+    use phoxal_cli_catalog::ArtifactKind;
     use phoxal_cli_core::identity::{ExecutionId, ProducerId};
-    use phoxal_cli_core::project::catalog::ArtifactKind;
     use phoxal_cli_core::project::launch_plan::{ParticipantExecution, ParticipantLaunchRecord};
     use phoxal_cli_core::project::resolver::{
         BundlePlan, ResolvedComponent, ResolvedPlatformRuntime, ResolvedUserRuntime,

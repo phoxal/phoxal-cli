@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use phoxal_cli_core::project::catalog::{self, ArtifactKind};
+use phoxal_cli_catalog::{ArtifactKind, Catalog};
 pub use phoxal_cli_core::project::host_target_triple;
 use phoxal_cli_core::project::tooling::hash_tree;
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
@@ -312,7 +312,7 @@ fn resolve_registry_component_roots(
     component_ids
         .iter()
         .map(|id| {
-            let package = phoxal_cli_core::project::catalog::cargo_package_name(&format!(
+            let package = phoxal_cli_catalog::cargo_package_name(&format!(
                 "{PHOXAL_PROVIDER}/component-{id}"
             ));
             let package = crate::registry_package::fetch_registry_package(http, cache, &package, train, offline)

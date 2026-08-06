@@ -6,8 +6,8 @@ use super::participants::{
 use super::*;
 use anyhow::{Result, anyhow, bail};
 use graph_check::Problem;
+use phoxal_cli_catalog::ArtifactKind;
 use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind};
-use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
 use phoxal_cli_core::project::launch_plan::{
     CheckedRobotLaunchInput, LaunchMode, build_launch_plan,

@@ -12,6 +12,7 @@ repository = "https://github.com/phoxal/phoxal-cli"
 resolver = "3"
 members = [
     ".",
+    "crates/catalog",
     "crates/client",
     "crates/core",
     "crates/observation",
@@ -22,6 +23,7 @@ members = [
 ]
 default-members = [
     ".",
+    "crates/catalog",
     "crates/client",
     "crates/core",
     "crates/observation",
@@ -61,11 +63,12 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 webots-proto = "0.2.0"
 gilrs = "0.11.2"
-phoxal-api = "0.53.0"
-phoxal-bus = "0.53.0"
-phoxal-manifest = "0.53.0"
-phoxal-model = "0.53.0"
-phoxal-runtime-contract = "0.53.0"
+phoxal-api = "0.54.0"
+phoxal-bus = "0.54.0"
+phoxal-manifest = "0.54.0"
+phoxal-model = "0.54.0"
+phoxal-runtime-contract = "0.54.0"
+phoxal-cli-catalog = { path = "crates/catalog" }
 phoxal-cli-client = { path = "crates/client" }
 phoxal-cli-core = { path = "crates/core" }
 phoxal-cli-observation = { path = "crates/observation" }
@@ -116,6 +119,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 tar = { workspace = true }
 
+phoxal-cli-catalog = { workspace = true }
 phoxal-cli-client = { workspace = true }
 phoxal-cli-core = { workspace = true }
 phoxal-cli-observation = { workspace = true }

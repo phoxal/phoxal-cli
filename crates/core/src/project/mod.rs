@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub mod catalog;
+pub mod intent;
 pub mod launch_plan;
 pub mod layout;
+pub mod requirements;
 pub mod resolver;
 pub mod tooling;
 pub mod train;

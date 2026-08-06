@@ -30,7 +30,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, ensure};
 
-use phoxal_cli_core::project::catalog::{REGISTRY_NAME, cargo_package_name, registry_config_arg};
+use phoxal_cli_catalog::{REGISTRY_NAME, cargo_package_name, registry_config_arg};
 
 /// One official package to materialize: its catalog identity
 /// (`phoxal/service-drive`), the exact framework train it is pinned to, and
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn cargo_package_name_matches_official_binary_name_for_every_kind() {
-        use phoxal_cli_core::project::catalog::ArtifactKind;
+        use phoxal_cli_catalog::ArtifactKind;
         use phoxal_cli_core::project::resolver::official_binary_name;
 
         let cases = [

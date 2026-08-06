@@ -273,7 +273,7 @@ pub(crate) fn build_checked_sim_launch_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_cli_core::project::catalog::ArtifactKind;
+    use phoxal_cli_catalog::ArtifactKind;
     use phoxal_cli_core::project::launch_plan::RunIdentity;
     use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
     use phoxal_cli_core::project::resolver::ResolvedPathOverride;

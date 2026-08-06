@@ -11,9 +11,146 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use object::{Object, ObjectSection};
-pub use phoxal_runtime_contract::ParticipantMetadata as ParticipantMeta;
+use phoxal_runtime_contract::{
+    ApiId, COMPONENT_DOCUMENT_SCHEMA, LAUNCH_ABI, ParticipantKind, ParticipantMetadata,
+    ParticipantSchemas, ROBOT_DOCUMENT_SCHEMA, SIMULATION_DOCUMENT_SCHEMA, SchemaId,
+};
+
+/// The process-boundary contracts this `phoxal` release speaks.
+///
+/// Every identifier is imported from the crate that owns it - there is no
+/// second spelling of any of these strings anywhere in this repository, and no
+/// framework SemVer anywhere in the set. A binary agrees with this CLI exactly
+/// when its embedded record matches every field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompatibilitySet {
+    pub api: ApiId,
+    pub schemas: ParticipantSchemas,
+}
+
+impl CompatibilitySet {
+    /// The set this CLI release was built against.
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            api: ApiId::new(<phoxal_api::v0_1::Api as phoxal_bus::ApiVersion>::ID),
+            schemas: ParticipantSchemas {
+                bus: SchemaId::new(phoxal_bus::BUS_ABI),
+                launch: SchemaId::new(LAUNCH_ABI),
+                robot: SchemaId::new(ROBOT_DOCUMENT_SCHEMA),
+                component: SchemaId::new(COMPONENT_DOCUMENT_SCHEMA),
+                simulation: SchemaId::new(SIMULATION_DOCUMENT_SCHEMA),
+            },
+        }
+    }
+
+    /// Reject a binary that does not speak every contract in this set, naming
+    /// what mismatched and which side has to be updated.
+    fn verify(&self, meta: &ParticipantMeta, describe: &str) -> Result<()> {
+        if meta.api != self.api {
+            bail!(
+                "participant `{id}` uses robot API {found},\nbut this phoxal CLI requires \
+                 {expected}.\n\nUpdate the project dependency and rebuild:\n    cargo update -p \
+                 phoxal\n\n({describe})",
+                id = meta.id,
+                found = meta.api,
+                expected = self.api,
+            );
+        }
+        for (contract, found, expected, owner) in [
+            ("bus ABI", &meta.schemas.bus, &self.schemas.bus, Side::Cli),
+            (
+                "participant launch ABI",
+                &meta.schemas.launch,
+                &self.schemas.launch,
+                Side::Cli,
+            ),
+            (
+                "robot document schema",
+                &meta.schemas.robot,
+                &self.schemas.robot,
+                Side::Project,
+            ),
+            (
+                "component document schema",
+                &meta.schemas.component,
+                &self.schemas.component,
+                Side::Project,
+            ),
+            (
+                "simulation document schema",
+                &meta.schemas.simulation,
+                &self.schemas.simulation,
+                Side::Project,
+            ),
+        ] {
+            if found != expected {
+                bail!(
+                    "participant `{id}` speaks {contract} {found},\nbut this phoxal CLI requires \
+                     {expected}.\n\n{fix}\n\n({describe})",
+                    id = meta.id,
+                    fix = owner.fix(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Which side of a contract mismatch has to move.
+#[derive(Clone, Copy, Debug)]
+enum Side {
+    /// The CLI is older than the binary: the operator updates the tool.
+    Cli,
+    /// The project crate is older than the CLI: the operator updates the crate.
+    Project,
+}
+
+impl Side {
+    const fn fix(self) -> &'static str {
+        match self {
+            Self::Cli => {
+                "The built binary is newer than this CLI. Update the phoxal CLI to the release \
+                 that ships this contract."
+            }
+            Self::Project => {
+                "Update the project dependency and rebuild:\n    cargo update -p phoxal"
+            }
+        }
+    }
+}
+
+/// One binary's accepted embedded compatibility record: the tagged `V0`
+/// document destructured into the fields callers actually branch on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParticipantMeta {
+    pub api: ApiId,
+    pub schemas: ParticipantSchemas,
+    pub id: String,
+    pub kind: ParticipantKind,
+    pub config_schema: serde_json::Value,
+}
+
+impl From<ParticipantMetadata> for ParticipantMeta {
+    fn from(metadata: ParticipantMetadata) -> Self {
+        let ParticipantMetadata::V0 {
+            api,
+            schemas,
+            id,
+            kind,
+            config_schema,
+        } = metadata;
+        Self {
+            api,
+            schemas,
+            id,
+            kind,
+            config_schema,
+        }
+    }
+}
 
 /// The linker section names a participant attribute places its metadata
 /// static under, tried in order. `object`'s generic [`Object::section_by_name`]
@@ -74,9 +211,13 @@ pub fn extract_participant_metadata_from_bytes(
             SECTION_NAMES.join(" or ")
         )
     })?;
-    phoxal_runtime_contract::parse_participant_metadata(&bytes).with_context(|| {
-        format!("phoxal participant metadata section in {describe} is not valid JSON")
-    })
+    let metadata =
+        phoxal_runtime_contract::parse_participant_metadata(&bytes).with_context(|| {
+            format!("phoxal participant metadata section in {describe} is not valid JSON")
+        })?;
+    let meta = ParticipantMeta::from(metadata);
+    CompatibilitySet::current().verify(&meta, describe)?;
+    Ok(meta)
 }
 
 /// Extracts and parses `binary_path`'s embedded participant metadata: reads

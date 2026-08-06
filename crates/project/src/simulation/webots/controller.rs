@@ -195,7 +195,7 @@ impl Drop for WebotsHomeEnvGuard {
 mod tests {
     use super::*;
     use crate::paths::host::test_support::ScratchPhoxalHome;
-    use phoxal_cli_core::project::catalog::ArtifactKind;
+    use phoxal_cli_catalog::ArtifactKind;
     use std::sync::Mutex;
 
     static WEBOTS_HOME_TEST_LOCK: Mutex<()> = Mutex::new(());

@@ -3118,9 +3118,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-api"
-version = "0.53.0"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2502e59b5249ff8d1f40770b224b29896b38d5317fbc586ae16d42ff10368c33"
+checksum = "039e663efeddaf6a589666554dc578e254d445f115500c4fa4ab84140222de98"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -3130,9 +3130,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bus"
-version = "0.53.0"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ebec75ba20e6590f12e73dca2162c258833d58a732fc428c1944103d76f0327"
+checksum = "f978218d646a47624e8e79bb11e35e20135e81d99da8acc7ed3cc538919e5cd1"
 dependencies = [
  "libc",
  "phoxal-runtime-contract",
@@ -3156,6 +3156,7 @@ dependencies = [
  "flate2",
  "hex",
  "libc",
+ "phoxal-cli-catalog",
  "phoxal-cli-client",
  "phoxal-cli-core",
  "phoxal-cli-observation",
@@ -3180,6 +3181,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "phoxal-cli-catalog"
+version = "0.35.0"
+
+[[package]]
 name = "phoxal-cli-client"
 version = "0.35.0"
 dependencies = [
@@ -3187,6 +3192,7 @@ dependencies = [
  "gilrs",
  "phoxal-api",
  "phoxal-bus",
+ "phoxal-cli-catalog",
  "phoxal-cli-core",
  "phoxal-cli-observation",
  "phoxal-cli-protocol",
@@ -3204,6 +3210,9 @@ dependencies = [
  "anyhow",
  "hex",
  "object",
+ "phoxal-api",
+ "phoxal-bus",
+ "phoxal-cli-catalog",
  "phoxal-manifest",
  "phoxal-model",
  "phoxal-runtime-contract",
@@ -3220,6 +3229,7 @@ dependencies = [
 name = "phoxal-cli-observation"
 version = "0.35.0"
 dependencies = [
+ "phoxal-cli-catalog",
  "phoxal-cli-core",
 ]
 
@@ -3239,6 +3249,7 @@ dependencies = [
  "object",
  "pathdiff",
  "phoxal-bus",
+ "phoxal-cli-catalog",
  "phoxal-cli-core",
  "phoxal-cli-protocol",
  "phoxal-manifest",
@@ -3276,6 +3287,7 @@ dependencies = [
  "libc",
  "phoxal-api",
  "phoxal-bus",
+ "phoxal-cli-catalog",
  "phoxal-cli-core",
  "phoxal-cli-protocol",
  "phoxal-model",
@@ -3294,6 +3306,7 @@ version = "0.35.0"
 dependencies = [
  "anyhow",
  "console",
+ "phoxal-cli-catalog",
  "phoxal-cli-core",
  "phoxal-cli-observation",
  "tokio",
@@ -3303,9 +3316,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.53.0"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "063b88ab5c5d4bc99da3a1f2fb59d690caefd81dfd651e5adf8a85d5c1ae72d3"
+checksum = "a4af532dfa6fe2c99df1fe2b025e3f24e018fba329d47b63e3a53156a7f74c98"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3316,9 +3329,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-manifest"
-version = "0.53.0"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f04e4642554a42b00be3a70631b6c214a9c644b414810481b2af4ed9263e84ed"
+checksum = "7d0f6285e83bc39bc7b948bcd9c126145d237fa5291a46ce04d0420473841bc8"
 dependencies = [
  "anyhow",
  "phoxal-model",
@@ -3333,9 +3346,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-model"
-version = "0.53.0"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "253717e0cc6b0cd7f2d05e89c13863dc1a28e5fa8a810434c4d48df6a9a12757"
+checksum = "257406e05b5cd4b32ab1cea01a6ece601d807375cdf88d3c9b006e42ac152e9c"
 dependencies = [
  "serde",
  "serde_json",
@@ -3344,9 +3357,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-runtime-contract"
-version = "0.53.0"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20368172e5b1564dbb899c0ce9b67076dd028107a0c1b67a9ff64bddb1de7a1d"
+checksum = "f6df9e3cd614b4ac8aa5199fa8b80452ba001d5cd5ba2947b35d96ec91841e03"
 dependencies = [
  "getrandom 0.3.4",
  "libc",

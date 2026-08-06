@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, anyhow, bail};
+use phoxal_cli_catalog::{ArtifactKind, Catalog};
 use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::project::catalog::{self, ArtifactKind};
 use phoxal_cli_core::project::train::LockedProject;
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 

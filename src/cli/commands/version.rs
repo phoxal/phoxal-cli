@@ -23,12 +23,9 @@ impl VersionArgs {
         println!("phoxal {}", long_version());
         println!(
             "official packages: cargo install --registry {} at the Cargo.lock-selected framework train",
-            phoxal_cli_core::project::catalog::REGISTRY_NAME
+            phoxal_cli_catalog::REGISTRY_NAME
         );
-        println!(
-            "registry index: {}",
-            phoxal_cli_core::project::catalog::REGISTRY_INDEX
-        );
+        println!("registry index: {}", phoxal_cli_catalog::REGISTRY_INDEX);
         Ok(())
     }
 }

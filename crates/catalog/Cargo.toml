@@ -1,5 +1,5 @@
 [package]
-name = "phoxal-cli-observation"
+name = "phoxal-cli-catalog"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,8 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-phoxal-cli-catalog = { workspace = true }
-phoxal-cli-core = { workspace = true }
 
 [lints]
 workspace = true

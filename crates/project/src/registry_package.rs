@@ -436,7 +436,7 @@ pub(crate) fn fetch_registry_package(
         return offline_cached_package(package, version, &package_dir);
     }
 
-    let base = phoxal_cli_core::project::catalog::REGISTRY_INDEX
+    let base = phoxal_cli_catalog::REGISTRY_INDEX
         .strip_prefix("sparse+")
         .context("the configured registry index is not a sparse URL")?
         .trim_end_matches('/');

@@ -612,7 +612,7 @@ fn component_driver_officials(
         .into_values()
         .filter(|runtime| seen_packages.insert(runtime.package.clone()))
         .map(|runtime| ContainerOfficial {
-            package: phoxal_cli_core::project::catalog::cargo_package_name(&runtime.package),
+            package: phoxal_cli_catalog::cargo_package_name(&runtime.package),
             train: runtime.train.clone(),
         })
         .collect()
@@ -630,10 +630,10 @@ fn selected_registry_officials(
         .filter(|runtime| runtime.path_override.is_some())
         .map(|runtime| runtime.package.clone())
         .collect::<BTreeSet<_>>();
-    let mut officials = phoxal_cli_core::project::catalog::for_webots(false)
+    let mut officials = phoxal_cli_catalog::for_webots(false)
         .filter(|official| !overridden.contains(official.package))
         .map(|official| ContainerOfficial {
-            package: phoxal_cli_core::project::catalog::cargo_package_name(official.package),
+            package: phoxal_cli_catalog::cargo_package_name(official.package),
             train: resolved.train.clone(),
         })
         .collect::<Vec<_>>();
@@ -1117,7 +1117,7 @@ fn symlink_verbatim(_link_target: &Path, at: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_cli_core::project::catalog::ArtifactKind;
+    use phoxal_cli_catalog::ArtifactKind;
     use phoxal_cli_core::project::resolver::{
         BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
     };

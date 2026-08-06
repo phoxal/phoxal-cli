@@ -1,8 +1,8 @@
 //! Participants responsibilities for check.
 
 use anyhow::Result;
+use phoxal_cli_catalog::ArtifactKind;
 use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolvedComponentDriver;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;

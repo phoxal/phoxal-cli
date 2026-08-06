@@ -128,13 +128,14 @@ impl<'de> Deserialize<'de> for ProcessKey {
     }
 }
 
-// Identities compare only for equality (#952 section B), so this keys a
-// `HashSet` rather than an ordered container.
+/// The stable identity a supervised participant declares its liveliness token
+/// under. The producer is deliberately absent: nothing mints one any more, so
+/// the supervisor cannot name the incarnation it is waiting for - it learns the
+/// producer from the token the participant's own session publishes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ParticipantInstanceKey {
     pub robot: RobotKey,
     pub participant: String,
-    pub producer: ProducerId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

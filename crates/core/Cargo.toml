@@ -10,6 +10,9 @@ publish = false
 anyhow = { workspace = true }
 hex = { workspace = true }
 object = { workspace = true }
+phoxal-api = { workspace = true }
+phoxal-bus = { workspace = true }
+phoxal-cli-catalog = { workspace = true }
 phoxal-manifest = { workspace = true }
 phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
@@ -23,10 +26,6 @@ toml = { workspace = true }
 [dev-dependencies]
 object = { workspace = true, features = ["write"] }
 tempfile = { workspace = true }
-
-[build-dependencies]
-semver = { workspace = true }
-toml = { workspace = true }
 
 [lints]
 workspace = true

@@ -16,6 +16,7 @@ phoxal-api = { workspace = true }
 phoxal-bus = { workspace = true, features = ["router"] }
 phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
+phoxal-cli-catalog = { workspace = true }
 phoxal-cli-core = { workspace = true }
 phoxal-cli-protocol = { workspace = true }
 serde = { workspace = true }

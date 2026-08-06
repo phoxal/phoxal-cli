@@ -250,7 +250,7 @@ fn container_snapshot_uses_the_live_registry_cache_for_components_and_metadata()
 
     let live = tempfile::tempdir()?;
     let cache_root = live.path().join(".phoxal/cache/registry");
-    let package = phoxal_cli_core::project::catalog::cargo_package_name("phoxal/component-wheel");
+    let package = phoxal_cli_catalog::cargo_package_name("phoxal/component-wheel");
     let version = "0.1.0";
     let manifest = format!(
         "[package]\nname = {package:?}\nversion = {version:?}\n\n[[bin]]\nname = {package:?}\npath = \"src/main.rs\"\n"
@@ -768,9 +768,7 @@ fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_dr
         br#"{"dl":"https://download.invalid/{lowerprefix}/{crate}/{version}.crate"}"#.to_vec(),
     )]);
     for id in ["left", "right"] {
-        let package = phoxal_cli_core::project::catalog::cargo_package_name(&format!(
-            "phoxal/component-{id}"
-        ));
+        let package = phoxal_cli_catalog::cargo_package_name(&format!("phoxal/component-{id}"));
         let bytes = archive(&package, version)?;
         let checksum = hex::encode(sha2::Sha256::digest(&bytes));
         let index = crate::registry_package::index_path(&package)?;
