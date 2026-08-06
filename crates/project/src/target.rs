@@ -42,7 +42,6 @@ pub(crate) fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<Runtim
     };
     let paths = RuntimePaths::for_root(&root);
     let logical_root = paths.ownership_root.clone();
-    let zenoh_socket = paths.router_socket();
     let authority = if crate::paths::runtime::is_installed_root(&root) {
         ResidentAuthority::SystemdUnit {
             unit: crate::paths::runtime::SYSTEMD_UNIT.to_string(),
@@ -50,13 +49,16 @@ pub(crate) fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<Runtim
     } else {
         ResidentAuthority::DetachedSession
     };
+    // The daemon's Zenoh listen endpoint IS the supervisor socket: one stable
+    // path locates the current execution, and the per-boot identity is learned
+    // from the router behind it.
+    let supervisor_socket = paths.supervisor_socket();
     Ok(RuntimeTarget {
         logical_root,
         requested_entry,
         build_lock: paths.build_lock(),
-        supervisor_socket: paths.supervisor_socket(),
-        zenoh_endpoint: format!("unixsock-stream/{}", zenoh_socket.display()),
-        zenoh_socket,
+        zenoh_endpoint: format!("unixsock-stream/{}", supervisor_socket.display()),
+        supervisor_socket,
         authority,
     })
 }
@@ -86,7 +88,6 @@ mod tests {
             target.supervisor_socket,
             root.join(".phoxal/run/supervisor.sock")
         );
-        assert_eq!(target.zenoh_socket, root.join(".phoxal/run/zenoh.sock"));
         assert_eq!(target.authority, ResidentAuthority::DetachedSession);
         Ok(())
     }
@@ -105,7 +106,6 @@ mod tests {
             target.supervisor_socket,
             Path::new("/run/phoxal/supervisor.sock")
         );
-        assert_eq!(target.zenoh_socket, Path::new("/run/phoxal/zenoh.sock"));
         Ok(())
     }
 }

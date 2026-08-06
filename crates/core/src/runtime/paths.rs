@@ -72,11 +72,6 @@ impl RuntimePaths {
     }
 
     #[must_use]
-    pub fn router_socket(&self) -> PathBuf {
-        self.volatile_root.join("zenoh.sock")
-    }
-
-    #[must_use]
     pub fn supervisor_log(&self) -> PathBuf {
         if self.installed {
             self.state_root.join("supervisor.log")
@@ -112,10 +107,6 @@ mod tests {
         assert_eq!(
             paths.supervisor_socket(),
             Path::new("/tmp/robot/.phoxal/run/supervisor.sock")
-        );
-        assert_eq!(
-            paths.router_socket(),
-            Path::new("/tmp/robot/.phoxal/run/zenoh.sock")
         );
         assert_eq!(
             paths.supervisor_log(),

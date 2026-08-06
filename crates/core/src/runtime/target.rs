@@ -9,7 +9,6 @@ pub struct RuntimeTarget {
     pub requested_entry: Option<PathBuf>,
     pub build_lock: PathBuf,
     pub supervisor_socket: PathBuf,
-    pub zenoh_socket: PathBuf,
     pub zenoh_endpoint: String,
     pub authority: ResidentAuthority,
 }

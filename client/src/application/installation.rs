@@ -25,7 +25,7 @@ use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 fn installed_endpoint(roots: &InstallRoots) -> String {
     format!(
         "unixsock-stream/{}",
-        roots.volatile.join("zenoh.sock").display()
+        roots.volatile.join("supervisor.sock").display()
     )
 }
 

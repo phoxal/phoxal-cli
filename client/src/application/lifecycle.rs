@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn a_live_execution_makes_run_fail_with_the_commands_that_apply() {
         let target = Target::at_endpoint(
-            "unixsock-stream//tmp/rover/.phoxal/run/zenoh.sock".to_string(),
+            "unixsock-stream//tmp/rover/.phoxal/run/supervisor.sock".to_string(),
             PathBuf::from("/tmp/rover"),
         );
         let message = already_live_message(&target);
