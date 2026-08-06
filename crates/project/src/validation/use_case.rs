@@ -416,7 +416,7 @@ services:
             phoxal_cli_core::check::source::SourceParticipantKind::Brain
         );
         assert_eq!(brain.crate_dir, PathBuf::from("/fake/project"));
-        assert_eq!(brain.preferred_binary_name(), "testbot-robot");
+        assert_eq!(brain.bin_target.as_deref(), Some("testbot-robot"));
         assert!(
             participants
                 .iter()

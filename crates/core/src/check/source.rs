@@ -96,15 +96,6 @@ impl SourceParticipant {
         }
     }
 
-    /// The Cargo binary target name to select when building this participant:
-    /// the metadata-derived target where one is known (the root brain), and
-    /// otherwise the canonical identity, which is also the crate's own binary
-    /// name for every other source participant.
-    #[must_use]
-    pub fn preferred_binary_name(&self) -> &str {
-        self.bin_target.as_deref().unwrap_or(&self.name)
-    }
-
     pub fn kind_label(&self) -> &'static str {
         match self.kind {
             SourceParticipantKind::Brain => "root brain",
