@@ -135,6 +135,10 @@ async fn build_publish_and_launch(
     // Re-check under the lock: the window between the probe and the lock is
     // exactly where a concurrent `phoxal run` would have started a daemon.
     refuse_if_live(target).await?;
+    // The handshake above is the friendly message; the supervisor lock is the
+    // authority. A daemon that has taken its lock but has not yet answered
+    // connect is live, and this is what closes that startup window.
+    crate::lock::refuse_while_execution_is_live(&target.project)?;
 
     let runtime_target =
         phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;

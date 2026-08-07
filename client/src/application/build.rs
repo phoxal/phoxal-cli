@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 use crate::cli::AppContext;
-use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
+use crate::lock::{
+    ProjectLock, ProjectLockIdentity, ProjectOperation, refuse_while_execution_is_live,
+};
 
 pub(crate) struct BuildRequest {
     pub(crate) project: Option<PathBuf>,
@@ -26,6 +28,10 @@ pub(crate) async fn build_command(
         ProjectOperation::Build,
     ))
     .context("failed to acquire the project lock for build")?;
+    // Publishing replaces `.phoxal/bundle/` in place, so it is refused while a
+    // daemon is executing out of it. The build lock does not answer this: it
+    // only serializes this tool against itself.
+    refuse_while_execution_is_live(&target.logical_root)?;
     let (reporter, signal_task) =
         crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
     let built = phoxal_cli_project::build_bundle(phoxal_cli_project::BuildBundleRequest {

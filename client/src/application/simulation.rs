@@ -56,6 +56,9 @@ pub(crate) async fn run_command(
         ProjectOperation::Run,
     ))
     .context("failed to acquire the project build lock for simulation")?;
+    // A simulation run finalizes and publishes this project's bundle, so it is
+    // refused while a daemon is executing out of it.
+    crate::lock::refuse_while_execution_is_live(&target.project)?;
 
     // The client finalizes the simulated bundle: `clock: simulated`, driver
     // blocks stripped, simulators staged. The daemon is handed the result and

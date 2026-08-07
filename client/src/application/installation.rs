@@ -245,9 +245,16 @@ async fn install_archive(
         return Err(error);
     }
     let identity = ProjectLockIdentity::resolve(&roots.active, ProjectOperation::Install);
+    // The service was asked to stop above; the supervisor lock is what proves
+    // it actually let go. Activating a release switches the symlink the live
+    // execution resolves its bundle through, so a daemon still holding on is a
+    // refusal rather than a race.
     let _lock = match ProjectLock::acquire_path(&roots.state.join("project.lock"), identity)
         .context("failed to acquire the installed-runtime lock")
-    {
+        .and_then(|lock| {
+            crate::lock::refuse_while_execution_is_live(&roots.active)?;
+            Ok(lock)
+        }) {
         Ok(lock) => lock,
         Err(error) => {
             remove_dir_if_present(&candidate)?;
@@ -297,6 +304,7 @@ async fn rollback_release(
     let identity = ProjectLockIdentity::resolve(&roots.active, ProjectOperation::Install);
     let _lock = ProjectLock::acquire_path(&roots.state.join("project.lock"), identity)
         .context("failed to acquire the installed-runtime lock")?;
+    crate::lock::refuse_while_execution_is_live(&roots.active)?;
     atomic_symlink_switch(&roots.active, &selected)?;
     drop(_lock);
     if let Err(error) = service.start().context("failed to start rollback release") {

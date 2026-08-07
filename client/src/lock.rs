@@ -1,4 +1,11 @@
 //! Stable project-operation authority for execution and artifact mutation.
+//!
+//! Two locks guard a root, and they answer different questions. `build.lock`
+//! ([`ProjectLock`]) serializes *this* tool's own exclusive project
+//! operations against each other. `supervisor.lock` is taken by `phoxald` for
+//! its whole life, so it answers the other question - whether an execution is
+//! running out of the very files a command is about to replace - and
+//! [`refuse_while_execution_is_live`] is the one place that asks it.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -128,6 +135,89 @@ impl ProjectLock {
     }
 }
 
+// ---------------------------------------------------------------------------
+// the live-execution gate
+// ---------------------------------------------------------------------------
+
+/// A live `phoxald` that owns a root's execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionHolder {
+    /// The supervisor lock the daemon holds.
+    pub lock: PathBuf,
+    /// The pid the daemon recorded in it. Diagnostic only - the lock itself is
+    /// the authority, and a lock held with no readable pid is still held.
+    pub pid: Option<u32>,
+}
+
+/// Probe `root`'s supervisor lock and report the daemon holding it, if any.
+///
+/// The lock - not the socket file, and not a completed handshake - is what
+/// "an execution is live" means: `phoxald` takes it before it even reads the
+/// bundle and the kernel releases it when the process ends however it ended.
+/// A socket file survives a killed daemon; an advisory lock does not.
+///
+/// The probe is a non-blocking exclusive try-lock on a second descriptor.
+/// Advisory locks are held per open file description, so this conflicts with
+/// the daemon's hold even when both are in one process, and a free lock is
+/// released again immediately rather than being kept for the caller.
+///
+/// # Errors
+///
+/// Only when the lock exists but cannot be opened at all. A missing lock is
+/// not an error: it means no daemon has ever run here.
+pub fn execution_holder(root: &Path) -> Result<Option<ExecutionHolder>> {
+    let lock = phoxal_cli_core::runtime::paths::RuntimePaths::for_root(root).supervisor_lock();
+    let mut file = match File::open(&lock) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to probe the supervisor lock {}", lock.display())
+            });
+        }
+    };
+    if phoxal_cli_core::advisory::try_advisory_lock(&file, true).is_ok() {
+        // Free. Release the probe at once: holding it would block the very
+        // daemon this command is about to launch.
+        let _ = phoxal_cli_core::advisory::unlock_advisory(&file);
+        return Ok(None);
+    }
+    let mut recorded = String::new();
+    let pid = file
+        .read_to_string(&mut recorded)
+        .ok()
+        .and_then(|_| recorded.trim().parse::<u32>().ok());
+    Ok(Some(ExecutionHolder { lock, pid }))
+}
+
+/// Refuse a bundle-mutating command while an execution owns `root`.
+///
+/// Every command that replaces what a running graph executes from - building
+/// and publishing, `run`/`start`, a simulation run, and installing or rolling
+/// back a release - calls this after taking [`ProjectLock`]. The build lock
+/// serializes this tool against itself; only the supervisor lock can say that
+/// somebody else is *running* the files about to be replaced.
+///
+/// # Errors
+///
+/// When a daemon holds the lock, naming the two commands that apply.
+pub fn refuse_while_execution_is_live(root: &Path) -> Result<()> {
+    let Some(holder) = execution_holder(root)? else {
+        return Ok(());
+    };
+    let display = root.display();
+    let pid = holder
+        .pid
+        .map_or_else(String::new, |pid| format!(" (pid {pid})"));
+    bail!(
+        "an execution is live under {display}: phoxald{pid} holds the supervisor lock {}. This \
+         command replaces the bundle that execution is running from, so it is refused while the \
+         daemon owns it. Attach to it with `phoxal attach {display}`, or end it with `phoxal stop \
+         {display}`, then run this command again",
+        holder.lock.display()
+    );
+}
+
 impl Drop for ProjectLock {
     fn drop(&mut self) {
         // The inode is intentionally permanent. Unlinking a locked file lets a
@@ -229,6 +319,72 @@ mod tests {
         drop((first, second));
         assert!(first_project.join(".phoxal/run/build.lock").is_file());
         assert!(second_project.join(".phoxal/run/build.lock").is_file());
+        Ok(())
+    }
+
+    /// The whole point of the supervisor lock: a running execution prevents
+    /// mutation of the bundle it is running from, and releasing it lets the
+    /// same mutation through unchanged.
+    #[test]
+    fn a_running_execution_prevents_mutation_until_it_releases_the_lock() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project)?;
+
+        // Nothing has ever run here, so there is no lock and nothing to refuse.
+        refuse_while_execution_is_live(&project)?;
+
+        // A daemon-style holder takes the supervisor lock for its whole life
+        // and records its pid, exactly as `phoxald` does.
+        let lock_path =
+            phoxal_cli_core::runtime::paths::RuntimePaths::for_root(&project).supervisor_lock();
+        fs::create_dir_all(lock_path.parent().context("the run directory")?)?;
+        let mut held = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        phoxal_cli_core::advisory::try_advisory_lock(&held, true)
+            .expect("the daemon-style holder takes the supervisor lock");
+        writeln!(held, "4242")?;
+        held.sync_data()?;
+
+        // The build lock is free and stays free: the two locks are
+        // independent, so it is the supervisor lock that refuses the mutation.
+        let build = ProjectLock::acquire(ProjectLockIdentity::resolve(
+            &project,
+            ProjectOperation::Build,
+        ))?;
+        let error = refuse_while_execution_is_live(&project)
+            .expect_err("a live execution refuses a bundle-mutating command");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("an execution is live"), "{rendered}");
+        assert!(rendered.contains("pid 4242"), "{rendered}");
+        assert!(rendered.contains("phoxal attach"), "{rendered}");
+        assert!(rendered.contains("phoxal stop"), "{rendered}");
+        drop(build);
+
+        // Released: the probe finds it free and the mutation proceeds.
+        phoxal_cli_core::advisory::unlock_advisory(&held)
+            .expect("the holder releases the supervisor lock");
+        refuse_while_execution_is_live(&project)?;
+        Ok(())
+    }
+
+    /// A lock that exists but is unheld is not an execution: a daemon that
+    /// exited leaves the file behind, and only the advisory hold is authority.
+    #[test]
+    fn an_abandoned_supervisor_lock_file_never_refuses_a_mutation() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("project");
+        let lock_path =
+            phoxal_cli_core::runtime::paths::RuntimePaths::for_root(&project).supervisor_lock();
+        fs::create_dir_all(lock_path.parent().context("the run directory")?)?;
+        fs::write(&lock_path, "999999\n")?;
+
+        assert_eq!(execution_holder(&project)?, None);
+        refuse_while_execution_is_live(&project)?;
         Ok(())
     }
 
