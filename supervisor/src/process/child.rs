@@ -204,38 +204,62 @@ mod tests {
         }
     }
 
-    /// The kernel-level containment that replaced the guardian. `Command`
-    /// exposes no flag to assert, so this reads the arming back out of the
-    /// child itself: `/proc/self/status` reports the death signal the kernel
-    /// actually recorded for that process.
+    /// The kernel-level containment that replaced the guardian.
+    ///
+    /// The death signal is readable only through `PR_GET_PDEATHSIG` from
+    /// inside the process that carries it - the kernel exposes it nowhere in
+    /// `/proc` - so this registers a second pre-exec hook to read it back.
+    /// Hooks run in registration order, so this one observes exactly what the
+    /// production hook armed, in the real post-fork child rather than a
+    /// simulation of it.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn every_spawned_child_carries_the_parent_death_signal() {
         use std::io::Read as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 
-        let mut command = std::process::Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg("grep -i '^PDeathSig' /proc/self/status")
-            .stdout(std::process::Stdio::piped());
+        let mut fds = [0_i32; 2];
+        // SAFETY: valid pointer to a two-element descriptor array.
+        let created = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(created, 0, "create the readback pipe");
+        // SAFETY: both descriptors come from pipe and transfer ownership once.
+        let (reader, writer) =
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        let readback = writer.as_raw_fd();
+
+        let mut command = std::process::Command::new("/usr/bin/true");
         arm_parent_death_signal(&mut command);
+        // SAFETY: runs post-fork before exec and calls only prctl and write,
+        // both async-signal-safe.
+        unsafe {
+            command.pre_exec(move || {
+                let mut armed: libc::c_int = 0;
+                if libc::prctl(libc::PR_GET_PDEATHSIG, &raw mut armed) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let reported = armed.to_ne_bytes();
+                if libc::write(readback, reported.as_ptr().cast(), reported.len())
+                    != reported.len() as isize
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
         let mut child = command.spawn().expect("spawn the pdeathsig probe");
-        let mut reported = String::new();
-        child
-            .stdout
-            .take()
-            .expect("probe stdout")
-            .read_to_string(&mut reported)
-            .expect("read the probe output");
+        // The parent's copy would hold the pipe open past the child's exit.
+        drop(writer);
+        let mut reported = [0_u8; std::mem::size_of::<libc::c_int>()];
+        std::fs::File::from(reader)
+            .read_exact(&mut reported)
+            .expect("read the armed death signal back from the child");
         child.wait().expect("await the probe");
-        let value = reported
-            .split_whitespace()
-            .last()
-            .expect("PDeathSig line has a value");
+
         assert_eq!(
-            value,
-            libc::SIGKILL.to_string(),
-            "every spawned child must carry PR_SET_PDEATHSIG(SIGKILL): {reported}"
+            libc::c_int::from_ne_bytes(reported),
+            libc::SIGKILL,
+            "every spawned child must carry PR_SET_PDEATHSIG(SIGKILL)"
         );
     }
 
