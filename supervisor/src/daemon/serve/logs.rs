@@ -54,27 +54,35 @@ impl LogHistory {
         }
     }
 
+    /// Retain one record and return what its followers should be told.
+    ///
+    /// `None` means the history has sealed itself: the cursor sequence space
+    /// is exhausted, so a further record could only be given a sequence a
+    /// client has already seen. It is counted as an ingest loss and dropped.
+    /// Failing closed is the point - a diagnostic counter reaching its end
+    /// must never bring a supervised robot down with it.
     pub(crate) fn ingest(
         &mut self,
         participant: &str,
         event: api::logs::Event,
         ingest_dropped: u64,
-    ) -> supervisor::logs::Follow {
+    ) -> Option<supervisor::logs::Follow> {
         self.ingest_dropped = self.ingest_dropped.max(ingest_dropped);
-        self.sequence = self
-            .sequence
-            .checked_add(1)
-            .expect("log ingest sequence exhausted");
+        let Some(sequence) = self.sequence.checked_add(1) else {
+            self.ingest_dropped = self.ingest_dropped.saturating_add(1);
+            return None;
+        };
+        self.sequence = sequence;
         let record = retained_record(self.sequence, participant, event);
         self.records.push_back(record.clone());
         if self.records.len() > RETAINED_LOG_RECORDS {
             self.records.pop_front();
         }
-        supervisor::logs::Follow::V0 {
+        Some(supervisor::logs::Follow::V0 {
             cursor: self.cursor(),
             ingest_dropped: self.ingest_dropped,
             record,
-        }
+        })
     }
 
     fn cursor(&self) -> Cursor {
@@ -271,6 +279,10 @@ pub(crate) async fn run(bus: &Bus, generation: Name) -> Result<()> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .ingest(&participant, received.body, logs.dropped());
+            let Some(item) = item else {
+                tracing::debug!("a log record could not be retained: the history is sealed");
+                continue;
+            };
             if let Err(error) = follow.publish(item) {
                 tracing::debug!("log follow publish failed: {error}");
             }
@@ -383,7 +395,9 @@ mod tests {
     fn retention_keeps_exactly_the_newest_thousand_records() {
         let mut history = history();
         for sequence in 1..=1_005 {
-            history.ingest("drive", event(sequence, "sample"), 0);
+            history
+                .ingest("drive", event(sequence, "sample"), 0)
+                .expect("retained");
         }
         let supervisor::logs::Snapshot::V0 {
             cursor, records, ..
@@ -398,7 +412,9 @@ mod tests {
     fn a_page_walks_backwards_and_stops_when_the_history_runs_out() {
         let mut history = history();
         for sequence in 1..=5 {
-            history.ingest("drive", event(sequence, "sample"), 0);
+            history
+                .ingest("drive", event(sequence, "sample"), 0)
+                .expect("retained");
         }
 
         let supervisor::logs::Snapshot::V0 {
@@ -439,7 +455,9 @@ mod tests {
         let mut history = history();
         for sequence in 1..=6 {
             let participant = if sequence % 2 == 0 { "drive" } else { "brain" };
-            history.ingest(participant, event(sequence, "sample"), 0);
+            history
+                .ingest(participant, event(sequence, "sample"), 0)
+                .expect("retained");
         }
         let supervisor::logs::Snapshot::V0 {
             records,
@@ -482,25 +500,48 @@ mod tests {
     #[test]
     fn the_supervisor_sequence_is_global_while_the_producers_own_is_preserved() {
         let mut history = history();
-        let supervisor::logs::Follow::V0 { cursor, record, .. } =
-            history.ingest("drive", event(41, "one"), 0);
+        let supervisor::logs::Follow::V0 { cursor, record, .. } = history
+            .ingest("drive", event(41, "one"), 0)
+            .expect("retained");
         assert_eq!(cursor.sequence, 1);
         assert_eq!(record.source_sequence, 41);
         let supervisor::logs::Follow::V0 { cursor, record, .. } =
-            history.ingest("map", event(7, "two"), 0);
+            history.ingest("map", event(7, "two"), 0).expect("retained");
         assert_eq!(cursor.sequence, 2);
         assert_eq!(record.source_sequence, 7);
         assert_eq!(record.participant.as_str(), "map");
     }
 
+    /// The cursor sequence space is a diagnostic counter. Reaching its end
+    /// seals the history and counts the record as ingest loss; it never brings
+    /// a supervised robot down.
+    #[test]
+    fn an_exhausted_sequence_space_seals_the_history_instead_of_panicking() {
+        let mut history = history();
+        history.sequence = u64::MAX;
+        assert!(
+            history.ingest("drive", event(1, "one"), 0).is_none(),
+            "a sealed history retains nothing further"
+        );
+        let supervisor::logs::Snapshot::V0 {
+            ingest_dropped,
+            records,
+            ..
+        } = history.page(&request(None, 0, None), 0);
+        assert_eq!(ingest_dropped, 1, "the sealed record is counted as loss");
+        assert!(records.is_empty());
+    }
+
     #[test]
     fn ingest_loss_is_cumulative_and_visible_on_both_follow_and_snapshot() {
         let mut history = history();
-        let supervisor::logs::Follow::V0 { ingest_dropped, .. } =
-            history.ingest("drive", event(1, "one"), 3);
+        let supervisor::logs::Follow::V0 { ingest_dropped, .. } = history
+            .ingest("drive", event(1, "one"), 3)
+            .expect("retained");
         assert_eq!(ingest_dropped, 3);
-        let supervisor::logs::Follow::V0 { ingest_dropped, .. } =
-            history.ingest("drive", event(2, "two"), 7);
+        let supervisor::logs::Follow::V0 { ingest_dropped, .. } = history
+            .ingest("drive", event(2, "two"), 7)
+            .expect("retained");
         assert_eq!(ingest_dropped, 7);
         let supervisor::logs::Snapshot::V0 { ingest_dropped, .. } =
             history.page(&request(None, 0, None), 5);
@@ -594,7 +635,9 @@ mod tests {
         for sequence in 0..RETAINED_LOG_RECORDS {
             let mut event = oversized.clone();
             event.seq = sequence as u64;
-            history.ingest(&"p".repeat(Name::MAX_BYTES), event, 0);
+            history
+                .ingest(&"p".repeat(Name::MAX_BYTES), event, 0)
+                .expect("retained");
         }
         let page = history.page(&request(None, MAX_QUERY_RECORDS as u32, None), 0);
         let encoded = MessagePack::encode(&page).expect("a page encodes");

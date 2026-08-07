@@ -73,10 +73,13 @@ impl TelemetryHistory {
         rollup: api::supervisor::telemetry::Rollup,
     ) -> Result<supervisor::telemetry::Follow> {
         self.prune(now);
-        let sequence = self
-            .sequence
-            .checked_add(1)
-            .expect("telemetry ingest sequence exhausted");
+        // Fail closed rather than panic: the daemon supervises a robot, and a
+        // diagnostic counter reaching its end is a reason to stop retaining
+        // rollups, never a reason to bring the execution down. The caller
+        // already logs a rollup it could not retain.
+        let sequence = self.sequence.checked_add(1).context(
+            "the telemetry sequence space is exhausted; no further rollup can be retained",
+        )?;
         let truncated = u32::from(participant.len() > Name::MAX_BYTES);
         let (topics, overflow) = bounded_rows(rollup.topics, rollup.overflow);
         let record = TelemetryRecord {
