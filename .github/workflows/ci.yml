@@ -16,8 +16,8 @@ jobs:
       !startsWith(github.event.head_commit.message, 'chore(release): release v')
     uses: phoxal/.github/.github/workflows/rust-ci.yml@main
     with:
-      # `gilrs` reads the operator's gamepad through libudev on Linux
-      # (organization#978). This is the CLI's own build dependency now that the
+      # `gilrs` reads the operator's gamepad through libudev on Linux.
+      # This is the CLI's own build dependency now that the
       # joypad is a client concern rather than a robot-side tool.
       system-packages: libudev-dev pkg-config
     secrets: inherit

@@ -10,8 +10,8 @@ homepage.workspace = true
 repository.workspace = true
 publish = false
 
-# The project/build/deploy tool and the disposable attached client
-# (organization#978). It is bin-only: the shipped executable is `phoxal`, and
+# The project/build/deploy tool and the disposable attached client.
+# It is bin-only: the shipped executable is `phoxal`, and
 # nothing links this package as a library, so its unit tests live in
 # `#[cfg(test)]` modules inside the binary crate.
 [[bin]]

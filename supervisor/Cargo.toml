@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 # The durable headless execution supervisor. It takes one finalized bundle root
-# and nothing else (organization#978): no mode flags, no driver flags, and no
+# and nothing else: no mode flags, no driver flags, and no
 # subcommands - `phoxal` builds, `phoxald` validates and executes.
 [[bin]]
 name = "phoxald"
@@ -17,7 +17,7 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 getrandom = { workspace = true }
 libc = { workspace = true }
-# `router` opens the embedded Zenoh router in this process (organization#978).
+# `router` opens the embedded Zenoh router in this process.
 # The supervisor is the only crate in the workspace that enables it.
 phoxal-api = { workspace = true }
 phoxal-bus = { workspace = true, features = ["router"] }

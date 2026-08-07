@@ -17,9 +17,9 @@ pub enum AttachError {
     )]
     NoRouter { endpoint: String },
 
-    /// More than one router is directly connected. For #978 an endpoint means
-    /// exactly one robot-owned router; selecting among several behind a shared
-    /// fabric is deliberately out of scope.
+    /// More than one router is directly connected. An endpoint means exactly
+    /// one robot-owned router; selecting among several behind a shared fabric
+    /// is deliberately out of scope.
     #[error(
         "{count} robot routers are reachable at {endpoint} ({routers}), but an endpoint must \
          name exactly one execution; connect to one robot's own endpoint"

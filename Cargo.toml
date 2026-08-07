@@ -8,8 +8,8 @@ documentation = "https://github.com/phoxal/phoxal-cli#readme"
 homepage = "https://github.com/phoxal/phoxal-cli"
 repository = "https://github.com/phoxal/phoxal-cli"
 
-# Two root applications ship from this workspace and nothing else does
-# (organization#978): `client/` builds the `phoxal` tool, `supervisor/` builds
+# Two root applications ship from this workspace and nothing else does:
+# `client/` builds the `phoxal` tool, `supervisor/` builds
 # the `phoxald` daemon. Everything under `crates/` is a domain-oriented library
 # both of them share. The workspace root itself is virtual - it holds no
 # package, so neither executable can accidentally become "the" root crate.
