@@ -87,7 +87,7 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
         request.reporter.as_ref(),
         crate::PhaseId::new("publish"),
         "Publishing simulation runtime layout",
-        || crate::stage::publish_runtime_layout(candidate, &resolved.resolved),
+        || crate::stage::publish_runtime_layout(candidate),
     )?;
     for participant in &mut participants {
         if let Some(spec) = participant.launch.as_mut() {

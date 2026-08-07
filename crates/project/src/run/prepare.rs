@@ -338,7 +338,7 @@ pub(crate) fn refresh_staging_resolved(
         crate::PhaseId::new("publish"),
         "Publishing runtime layout",
         || {
-            crate::stage::publish_runtime_layout(candidate, &resolved)
+            crate::stage::publish_runtime_layout(candidate)
                 .context("failed to publish the staged runtime layout")
         },
     )?;
