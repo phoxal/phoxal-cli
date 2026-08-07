@@ -5,18 +5,17 @@
 //! restarts the unit - all of which mutate a bundle a daemon may be executing.
 
 use std::future::Future;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
 
 use phoxal_supervisor_api::Lifecycle;
 
 use crate::cli::AppContext;
+use crate::digest::sha256_file;
 use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
 /// The Zenoh endpoint an installed `phoxald` binds. It is derived from the
@@ -474,20 +473,6 @@ fn valid_release_name(name: &str) -> bool {
         && bytes[9..15].iter().all(u8::is_ascii_digit)
         && bytes[16..19].iter().all(u8::is_ascii_digit)
         && bytes[21..].iter().all(u8::is_ascii_hexdigit)
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
 }
 
 fn sortable_utc_timestamp(now: SystemTime) -> Result<String> {

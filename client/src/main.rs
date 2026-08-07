@@ -27,6 +27,7 @@ mod attach;
 mod bootstrap;
 mod cli;
 mod cutover;
+mod digest;
 mod joypad;
 mod lock;
 mod pair;

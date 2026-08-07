@@ -8,7 +8,6 @@
 //! it is an outcome this module must make impossible.
 
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -19,6 +18,7 @@ use semver::Version;
 use serde::Serialize;
 
 use crate::cli::{AppContext, Ui};
+use crate::digest::sha256_file;
 
 const LATEST_RELEASE_URL: &str = "https://github.com/phoxal/phoxal-cli/releases/latest";
 const DOWNLOAD_BASE_URL: &str = "https://github.com/phoxal/phoxal-cli/releases/download";
@@ -94,18 +94,22 @@ fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<UpgradeOutcome> {
     let download_client = build_client(true)?;
 
     ui.info(format!("downloading {}", asset.archive_url));
-    download_asset(&download_client, &asset.archive_url, &archive_path)?
-        .context("release archive was not found")?;
+    if download_asset(&download_client, &asset.archive_url, &archive_path)? == AssetDownload::Absent
+    {
+        bail!("release archive {} was not found", asset.archive_url);
+    }
 
     ui.info(format!("downloading {}", asset.checksum_url));
     match download_asset(&download_client, &asset.checksum_url, &checksum_path)? {
-        Some(()) => verify_checksum(&archive_path, &checksum_path, &asset.archive_name)?,
-        None if options.force && pinned && requested_version < current_version => {
+        AssetDownload::Written => {
+            verify_checksum(&archive_path, &checksum_path, &asset.archive_name)?;
+        }
+        AssetDownload::Absent if options.force && pinned && requested_version < current_version => {
             ui.warn(format!(
                 "release v{requested_version} has no checksum; continuing because --force pinned an older version"
             ));
         }
-        None => bail!(
+        AssetDownload::Absent => bail!(
             "release v{requested_version} has no checksum asset {}; refusing to self-upgrade",
             asset.checksum_name
         ),
@@ -203,14 +207,27 @@ fn parse_version_tag(tag: &str) -> Result<Version> {
     Version::parse(normalized).with_context(|| format!("invalid version tag '{tag}'"))
 }
 
-fn download_asset(client: &Client, url: &str, destination: &Path) -> Result<Option<()>> {
+/// What asking a release for one asset produced.
+///
+/// "Absent" is a real answer, not a failure: a release genuinely may not carry
+/// a checksum asset, and the caller decides what that means. Anything else -
+/// a refusal, a truncated body, an unwritable destination - is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetDownload {
+    /// The asset was fetched and written to the destination.
+    Written,
+    /// The release does not carry this asset.
+    Absent,
+}
+
+fn download_asset(client: &Client, url: &str, destination: &Path) -> Result<AssetDownload> {
     let mut response = client
         .get(url)
         .send()
         .with_context(|| format!("failed to download {url}"))?;
     let status = response.status();
     if status == StatusCode::NOT_FOUND {
-        return Ok(None);
+        return Ok(AssetDownload::Absent);
     }
     if !status.is_success() {
         bail!("download {url} returned {status}");
@@ -220,7 +237,7 @@ fn download_asset(client: &Client, url: &str, destination: &Path) -> Result<Opti
     response
         .copy_to(&mut file)
         .with_context(|| format!("failed to write {}", destination.display()))?;
-    Ok(Some(()))
+    Ok(AssetDownload::Written)
 }
 
 fn verify_checksum(archive_path: &Path, checksum_path: &Path, archive_name: &str) -> Result<()> {
@@ -250,25 +267,6 @@ fn parse_checksum(contents: &str, archive_name: &str) -> Result<String> {
         bail!("checksum asset contains invalid SHA256 digest {hex}");
     }
     Ok(hex.to_ascii_lowercase())
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
-
-    let mut file =
-        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Both halves of the pair, extracted and not yet installed.

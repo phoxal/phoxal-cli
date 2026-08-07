@@ -472,20 +472,46 @@ pub(crate) async fn logs_command(
         println!("{}", render_log(record));
     }
     if follow {
-        let stream = session.follow_logs().await?;
-        loop {
-            let observed = stream.recv().await?;
-            let phoxal_supervisor_api::supervisor::logs::Follow::V0 { record, .. } = observed.body;
-            if participant
-                .as_ref()
-                .is_none_or(|wanted| &record.participant == wanted)
-            {
-                println!("{}", render_log(&record));
-            }
-        }
+        follow_logs(&session, participant.as_ref()).await;
     }
     session.shutdown().await;
     Ok(())
+}
+
+/// Print the live log stream until the daemon stops or the operator does.
+///
+/// Both endings are clean. The stream closing means the execution ended, which
+/// is what following it was for; Ctrl+C is the operator saying they have seen
+/// enough. Neither is an error, and both leave through the same return so the
+/// session is shut down rather than abandoned at process exit.
+async fn follow_logs(session: &Session, participant: Option<&phoxal_supervisor_api::Name>) {
+    let stream = match session.follow_logs().await {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("failed to follow the log stream: {error:#}");
+            return;
+        }
+    };
+    loop {
+        let observed = tokio::select! {
+            observed = stream.recv() => observed,
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::debug!("failed to watch for Ctrl+C: {error}");
+                }
+                return;
+            }
+        };
+        let Ok(observed) = observed else {
+            // The daemon's stream ended: the execution is over, which is the
+            // end of the log, not a failure to read it.
+            return;
+        };
+        let phoxal_supervisor_api::supervisor::logs::Follow::V0 { record, .. } = observed.body;
+        if participant.is_none_or(|wanted| &record.participant == wanted) {
+            println!("{}", render_log(&record));
+        }
+    }
 }
 
 fn render_log(record: &phoxal_supervisor_api::LogRecord) -> String {

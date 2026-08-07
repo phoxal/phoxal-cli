@@ -167,16 +167,20 @@ impl Session {
         let (events_tx, events_rx) = mpsc::channel(EVENT_CAPACITY);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CAPACITY);
 
-        events_tx
-            .send(AttachmentEvent::EpochChanged(epoch))
-            .await
-            .expect("the event receiver is alive");
-        events_tx
-            .send(AttachmentEvent::ConnectionChanged(
-                ConnectionObservation::Connected,
-            ))
-            .await
-            .expect("the event receiver is alive");
+        // The opening events: the epoch this attachment observes, and the fact
+        // that it is connected. They are queued before any feed starts, so the
+        // channel is empty and `try_send` cannot block; a failure here means
+        // the channel was built too small to hold them, which is this module's
+        // bug and is reported rather than panicked on.
+        for event in [
+            AttachmentEvent::EpochChanged(epoch),
+            AttachmentEvent::ConnectionChanged(ConnectionObservation::Connected),
+        ] {
+            events_tx.try_send(event).context(
+                "the attachment event channel could not accept the opening events; \
+                 EVENT_CAPACITY is too small",
+            )?;
+        }
 
         let cancellation = CancellationToken::new();
         let mut tasks = JoinSet::new();
