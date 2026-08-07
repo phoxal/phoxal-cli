@@ -49,6 +49,10 @@ struct Inner {
     failure: Mutex<Option<DaemonFailure>>,
     revision: AtomicU64,
     published: watch::Sender<Snapshot>,
+    /// Held across "take the next revision" *and* "publish it", so two
+    /// concurrent republications can never interleave into a watch channel
+    /// that ends on the lower of the two revisions.
+    publication: Mutex<()>,
 }
 
 impl ExecutionState {
@@ -76,6 +80,7 @@ impl ExecutionState {
                 failure: Mutex::new(None),
                 revision: AtomicU64::new(0),
                 published,
+                publication: Mutex::new(()),
             }),
         }
     }
@@ -208,7 +213,17 @@ impl ExecutionState {
     }
 
     /// Rebuild and publish one complete snapshot at the next revision.
+    ///
+    /// Assigning the revision and installing the snapshot are one critical
+    /// section. Split, two callers can take revisions 4 and 5 and then publish
+    /// them in the other order, leaving the watch channel - and therefore every
+    /// attached client's `current` answer - resting on revision 4 forever.
     pub(crate) fn republish(&self) {
+        let _publication = self
+            .inner
+            .publication
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let revision = self.inner.revision.fetch_add(1, Ordering::SeqCst) + 1;
         let snapshot = project(
             revision,
