@@ -161,12 +161,18 @@ pub(crate) async fn run_command(
     });
 
     let outcome = session::drive(app, &target.project, session, Detachable::No).await;
+    // Aborting only *requests* cancellation: until the task has actually been
+    // joined it may still be holding its clones of the two Arcs, and
+    // reclaiming them would then yield `None`. Awaiting the aborted handle is
+    // what turns the reclaim below into a real invariant - and it is what
+    // keeps the graceful Webots stop on the path at all.
     watcher.abort();
+    let _ = watcher.await;
     let webots = std::sync::Arc::into_inner(webots)
-        .expect("the Webots watcher is aborted before the handle is reclaimed")
+        .expect("the Webots watcher is joined before the handle is reclaimed")
         .into_inner();
     let webots_exit = std::sync::Arc::into_inner(webots_exit)
-        .expect("the Webots watcher is aborted before its observation is reclaimed")
+        .expect("the Webots watcher is joined before its observation is reclaimed")
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
