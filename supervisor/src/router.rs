@@ -1,7 +1,7 @@
 //! The embedded Zenoh router.
 //!
 //! The comms fabric is infrastructure the supervisor firsthand owns, so it runs
-//! in this process rather than as a supervised child (organization#978). What
+//! in this process rather than as a supervised child. What
 //! that deletes is the point: there is no router binary to stage or resolve, no
 //! spawn, no readiness probe polling a socket, and no full-graph recovery epoch
 //! driven by a child exit. [`phoxal_bus::Router::open`] returning means the

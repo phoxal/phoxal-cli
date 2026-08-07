@@ -47,7 +47,7 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
 ///
 /// In a simulation session there is nothing to leave behind: the client owns
 /// Webots, so detaching would strand a simulator with no operator
-/// (organization#978). `q` there means "end the session", which is a stop.
+///. `q` there means "end the session", which is a stop.
 fn detach(model: &mut AppModel) -> Vec<Effect> {
     if !model.detachable {
         return request_stop(model);
@@ -275,7 +275,7 @@ fn log_matches_source(source: LogSourceFilter, row: &LogRow, processes: &Process
     }
     // Every row in the snapshot is a supervised participant, so a log whose
     // participant matches one came from the graph; anything else came from the
-    // supervisor itself (organization#978).
+    // supervisor itself.
     let runtime = processes
         .keys()
         .any(|key| participant_id(key) == row.participant);
@@ -365,7 +365,7 @@ fn update_navigation(model: &mut AppModel, message: NavigationMsg) -> Vec<Effect
 
 fn handle_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
     // Ctrl+C is the stop gesture, and it takes two: the first opens the
-    // confirmation and sends nothing, the second confirms (organization#978).
+    // confirmation and sends nothing, the second confirms.
     // It is handled before the modal branch so the second one is not consumed
     // as an ordinary modal key.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == Key::Char('c') {
@@ -977,7 +977,7 @@ mod tests {
 
     /// Every row in the snapshot is a supervised participant, so the split is
     /// "came from the graph" versus "came from the supervisor or this client"
-    /// (organization#978).
+    ///.
     #[test]
     fn log_source_filter_separates_supervised_participants_from_everything_else() {
         let runtime_key = ProcessKey::Service {
@@ -1071,7 +1071,7 @@ mod tests {
 
     /// `q` detaches and leaves the daemon running; Ctrl+C takes two presses to
     /// stop, and the session keeps rendering until the supervisor's own
-    /// terminal snapshot arrives (organization#978).
+    /// terminal snapshot arrives.
     #[test]
     fn q_detaches_while_stopping_takes_two_interrupts_and_then_waits() {
         let mut model = AppModel::default();

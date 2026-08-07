@@ -5,7 +5,7 @@
 //! through `bundle/get` to verify identity and derive the client's own manual
 //! drive parameters, and runs the feeds the terminal application renders.
 //!
-//! There is no private IPC anywhere below (organization#978). Every fact this
+//! There is no private IPC anywhere below. Every fact this
 //! session has comes off the execution-scoped Zenoh supervisor API or out of
 //! hardware attached to this machine; nothing is read from a socket the daemon
 //! and the client agreed on privately, and there is no snapshot, command, or

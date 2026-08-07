@@ -3,7 +3,7 @@
 //! The endpoint is the supervisor's own (`supervisor/logs/...`), not a
 //! robot-domain tool's: the daemon is the collector now, so there is one
 //! retention and one cursor rather than a tool's history duplicated beside the
-//! supervisor's (organization#978).
+//! supervisor's.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

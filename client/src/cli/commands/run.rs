@@ -70,7 +70,7 @@ mod tests {
 
     /// `run` always creates a fresh execution, so there is no detach flag: an
     /// operator who wants a launched execution and their terminal back runs
-    /// `start` (organization#978).
+    /// `start`.
     #[test]
     fn run_takes_driver_selection_and_no_detach_flag() {
         let cli = Cli::try_parse_from(["phoxal", "run", "--drivers", "off"]).expect("run parses");

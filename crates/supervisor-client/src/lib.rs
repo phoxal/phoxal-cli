@@ -31,9 +31,9 @@
 //!                             new execution  → a NEW attachment, surfaced as such
 //! ```
 //!
-//! Steps 1-2 are the whole of "direct attachment" for organization#978: an
+//! Steps 1-2 are the whole of "direct attachment" for an
 //! endpoint means one robot-owned router. Selecting among several behind a
-//! shared fabric is organization#989.
+//! shared fabric is deliberately deferred work, not this client's.
 //!
 //! Step 5 is not a check this client performs - it is one it *cannot skip*.
 //! Every version on the connect reply is a serde enum, so a supervisor on a

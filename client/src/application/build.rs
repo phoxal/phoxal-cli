@@ -1,7 +1,7 @@
 //! Building and validating a project.
 //!
 //! Both are the client's: the daemon never invokes Cargo, resolves a registry,
-//! compiles source, or mutates a project (organization#978).
+//! compiles source, or mutates a project.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;

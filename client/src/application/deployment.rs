@@ -122,7 +122,7 @@ pub(crate) fn validate_ssh_target(target: &str) -> Result<()> {
 /// Require the remote host to carry the exact CLI pair.
 ///
 /// The unit executes `phoxald`, so a host with only `phoxal` installed accepts
-/// an install and then cannot execute it (organization#978). Both halves are
+/// an install and then cannot execute it. Both halves are
 /// checked here, before anything is built or copied.
 pub(crate) fn require_remote_phoxal(target: &str) -> Result<()> {
     let output = remote_output(

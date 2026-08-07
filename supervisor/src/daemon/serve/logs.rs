@@ -3,7 +3,7 @@
 //! The supervisor already supervises every participant, so it collects their
 //! structured logs itself and answers `supervisor/logs/{snapshot,follow}` from
 //! its own bounded history - there is no log tool to run, and no second process
-//! to keep alive (organization#978).
+//! to keep alive.
 //!
 //! The retention is the one the tool had: a 1,000-record ring, a per-record
 //! shared text budget, and a cursor whose generation is opaque. What the wire

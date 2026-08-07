@@ -11,7 +11,7 @@ impl Doctor {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         // The pair first: a host whose `phoxald` is missing or mismatched
         // cannot execute anything this CLI builds, whatever else is right
-        // (organization#978).
+        //.
         let pair = crate::pair::status();
         if pair.is_exact() {
             app.ui.success(pair.summary());

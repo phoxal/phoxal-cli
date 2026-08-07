@@ -4,7 +4,7 @@
 //! composes `extends`, resolves components and Cargo targets, invokes Cargo,
 //! validates every selected binary's embedded compatibility metadata, and
 //! publishes a finalized bundle. It then launches `phoxald` on that bundle and
-//! attaches to it over the supervisor API (organization#978).
+//! attaches to it over the supervisor API.
 //!
 //! It never supervises a graph itself. There is no in-process daemon path and
 //! no private IPC: the daemon is a sibling executable, and the only channel to

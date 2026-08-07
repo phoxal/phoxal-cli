@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         |snapshot| {
             // The clock IS the mode: `clock: simulated` in the finalized
             // manifest is what selects the simulator, and the daemon passes it
-            // through untouched (organization#978).
+            // through untouched.
             let mode = match snapshot.mode {
                 phoxal_supervisor_api::ExecutionMode::Real => "real",
                 phoxal_supervisor_api::ExecutionMode::Simulated => "simulated",
@@ -293,7 +293,7 @@ mod startup_timeline_tests {
     use phoxal_supervisor_api::Detail;
 
     /// The daemon's own sequence, mid-flight: three steps behind it and two to
-    /// go (organization#978).
+    /// go.
     fn timeline() -> Vec<StartupStep> {
         vec![
             StartupStep {

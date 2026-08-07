@@ -60,7 +60,7 @@ pub(super) struct Registry {
     pub enabled: bool,
     pub last_error: Option<String>,
     /// Why this robot cannot be driven manually at all, as a closed reason the
-    /// renderer matches on (organization#978).
+    /// renderer matches on.
     pub unsupported: Option<ManualDriveUnsupported>,
 }
 
@@ -645,7 +645,7 @@ mod tests {
     }
 
     /// A robot that cannot be driven manually is a structural fact carried as
-    /// a typed reason, not a rejected user action (organization#978).
+    /// a typed reason, not a rejected user action.
     #[test]
     fn structural_unavailability_is_separate_from_a_transient_rejection() {
         let mut registry = Registry {

@@ -24,7 +24,7 @@ pub struct JoypadDevicesSample {
     /// Why this robot cannot be driven manually at all. It is a property of
     /// the robot model, not of the operator's hardware, so it is a closed set
     /// the renderer matches on rather than a sentence the daemon composed
-    /// (organization#978).
+    ///.
     pub unsupported: Option<ManualDriveUnsupported>,
     pub last_error: Option<String>,
 }

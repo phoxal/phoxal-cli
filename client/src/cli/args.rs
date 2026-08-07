@@ -148,7 +148,7 @@ mod tests {
     }
 
     /// The whole private-IPC and resident vocabulary is gone: no verb, flag, or
-    /// environment variable may reintroduce it (organization#978).
+    /// environment variable may reintroduce it.
     #[test]
     fn no_resident_or_private_bootstrap_surface_survives() {
         use clap::Parser;

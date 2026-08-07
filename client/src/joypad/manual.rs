@@ -1,8 +1,8 @@
 //! Turning a robot's authored model into manual-drive parameters.
 //!
 //! This used to travel on the supervisor snapshot: the daemon derived it and
-//! republished a derived copy on every revision. It does not any more
-//! (organization#978). The pad is attached to the machine running this client,
+//! republished a derived copy on every revision. It does not any more.
+//! The pad is attached to the machine running this client,
 //! so the client is the only consumer, and the kinematics it scales against
 //! come from the finalized `robot.yaml` this client fetches once through
 //! `bundle/get` after attaching - the one document that owns them.
@@ -65,7 +65,7 @@ mod tests {
 
     /// A finalized `robot.yaml`, exactly as the daemon serves it through
     /// `bundle/get` - which is where these parameters come from now
-    /// (organization#978).
+    ///.
     fn manifest(kinematic: &str, motion: &str) -> phoxal_manifest::source::robot::v0::Manifest {
         let text = format!(
             "schema: phoxal/robot/v0\n\

@@ -4,8 +4,8 @@
 //! process machinery writes to on every spawn, exit, and liveliness token, so
 //! typing it on a published DTO would make every such write a protocol edit -
 //! and would drag a supervisor generation, a router endpoint, a framework
-//! train, and a manual-input capability into a value none of them belong to
-//! (organization#978). [`crate::daemon::projection`] is the one place this
+//! train, and a manual-input capability into a value none of them belong to.
+//! [`crate::daemon::projection`] is the one place this
 //! becomes a snapshot a client is told about.
 
 use std::collections::BTreeMap;

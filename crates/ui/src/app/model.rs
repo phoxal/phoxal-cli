@@ -15,7 +15,7 @@ pub struct AppModel {
     pub epoch: Option<AttachmentEpoch>,
     /// Whether leaving this session is allowed to leave the execution running.
     /// A simulation session is not detachable: the client owns Webots, so `q`
-    /// there ends the whole session (organization#978).
+    /// there ends the whole session.
     pub detachable: bool,
     /// Whether a stop has already been sent. The session keeps rendering until
     /// the supervisor's own terminal snapshot arrives.

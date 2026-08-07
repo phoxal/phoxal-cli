@@ -44,7 +44,7 @@ pub struct UiOptions {
     pub theme: Theme,
     /// Whether `q` may leave the execution running. A simulation session is
     /// not detachable: the client owns Webots, so leaving would strand a
-    /// simulator with no operator (organization#978).
+    /// simulator with no operator.
     pub detachable: bool,
 }
 

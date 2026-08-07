@@ -2,7 +2,7 @@
 //!
 //! Participants publish periodic runtime rollups; the supervisor retains a
 //! bounded five-minute history of them and answers
-//! `supervisor/telemetry/{snapshot,follow}` from it (organization#978).
+//! `supervisor/telemetry/{snapshot,follow}` from it.
 //!
 //! Three independent bounds, all of which must hold at once: an age horizon, a
 //! record count, and an absolute retained-byte cap. The last one is what makes

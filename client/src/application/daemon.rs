@@ -1,7 +1,7 @@
 //! Launching `phoxald` and watching it until a client can attach.
 //!
 //! The daemon is a sibling executable, never a mode of this one: `phoxal` can
-//! never run the supervision loop in process (organization#978). Everything
+//! never run the supervision loop in process. Everything
 //! this module knows about the child is process facts and stderr - the
 //! completed Zenoh handshake is readiness, and a socket file's existence
 //! proves nothing.
@@ -130,7 +130,7 @@ mod tests {
 
     /// The daemon must not be in this client's process group, or a terminal
     /// Ctrl+C would stop the robot the client only meant to detach from
-    /// (organization#978).
+    ///.
     #[test]
     fn a_launched_daemon_leaves_this_clients_process_group() {
         let script = tempfile::tempdir().expect("temp dir");

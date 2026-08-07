@@ -100,7 +100,7 @@ pub(crate) fn validate_runtime_bounds(plan: &LaunchPlan) -> Result<()> {
         .map(|robot| robot.participants.len())
         .sum::<usize>()
         // Bounded supervisor-owned helpers. The comms router is not counted:
-        // it runs inside the supervisor process (organization#978).
+        // it runs inside the supervisor process.
         .saturating_add(3);
     anyhow::ensure!(
         process_count <= crate::runtime::MAX_SUPERVISED_PROCESSES,

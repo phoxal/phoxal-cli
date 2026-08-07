@@ -368,7 +368,7 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
     // Anything the supervisor absorbed - or that became a local CLI concern -
     // must never resolve as an artifact: a stale catalog entry here is not a
     // compile error, it is a `cargo install` failure at run time for a package
-    // the train no longer publishes (organization#978).
+    // the train no longer publishes.
     for absorbed in [
         "router",
         "asset",

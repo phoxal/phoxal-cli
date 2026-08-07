@@ -2,7 +2,7 @@
 //!
 //! The joypad used to be a framework tool: a robot-side process that read HID,
 //! published its device inventory on the bus, and took selection commands back
-//! over the bus so this client could drive it (organization#978). The pad is
+//! over the bus so this client could drive it. The pad is
 //! physically attached to the machine running this client, so that round trip
 //! only moved local state away from its only reader. The client now reads the
 //! pad directly and publishes `motion::ManualCommand` - the one thing that
@@ -210,7 +210,7 @@ mod tests {
 
     /// A user whose robot cannot be driven manually still needs to see whether
     /// their pad is even detected, and to be told why in a reason the renderer
-    /// matched on rather than a sentence composed elsewhere (organization#978).
+    /// matched on rather than a sentence composed elsewhere.
     #[test]
     fn a_robot_without_manual_drive_still_enumerates_pads_and_names_the_reason() {
         let joypad = Joypad::open(None, Some(ManualDriveUnsupported::NoDifferentialBase));

@@ -317,7 +317,7 @@ fn discover_workspace_runtimes(
         };
         // Only `services/` carries workspace runtime crates: components have
         // their own resolution path, and the tool concept is gone
-        // (organization#978).
+        //.
         if directory != "services" {
             continue;
         }
@@ -565,7 +565,7 @@ mod tests {
         );
         assert_eq!(runtimes[0].package, "mission");
         assert_eq!(runtimes[0].binary_names, ["mission"]);
-        // `tools/` is no longer a runtime family (organization#978), and
+        // `tools/` is no longer a runtime family, and
         // `components/` never was one.
         for ignored in ["operator", "passive", "wrapped"] {
             assert!(

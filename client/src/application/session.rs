@@ -3,7 +3,7 @@
 //! `run`, `attach`, and `simulation webots run` all end here: one attachment,
 //! one terminal application, one set of effects routed back to the supervisor
 //! API. The commands differ in how they *get* an execution to attach to, never
-//! in how they attach (organization#978).
+//! in how they attach.
 
 use std::path::Path;
 

@@ -3,7 +3,7 @@
 //! The whole surface is two commands and one fence. There is no command
 //! session, sequence, watermark, or resume: a query is already one request with
 //! one answer, and the supervisor-generation the old socket protocol needed to
-//! scope those is gone with it (organization#978).
+//! scope those is gone with it.
 //!
 //! # The fence
 //!

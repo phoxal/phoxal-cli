@@ -10,9 +10,9 @@
 //! ```
 //!
 //! `run` creates a fresh execution and never silently attaches to one that is
-//! already live; `attach` is the explicit existing-execution path
-//! (organization#978). Nothing here can supervise a graph: the daemon is a
-//! separate executable and the only channel to it is the supervisor API.
+//! already live; `attach` is the explicit existing-execution path. Nothing
+//! here can supervise a graph: the daemon is a separate executable and the
+//! only channel to it is the supervisor API.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -115,7 +115,7 @@ pub(crate) async fn start_command(
 /// Both callers confirm the exact `phoxal` + `phoxald` pair before they even
 /// resolve a project: a build no matching daemon can execute is wasted work,
 /// and the operator's real problem is a broken installation rather than their
-/// robot (organization#978).
+/// robot.
 ///
 /// The live check is a real handshake, not a socket-file probe: an execution
 /// that answers connect is live, and `run` refuses rather than silently
@@ -177,7 +177,7 @@ async fn refuse_if_live(target: &Target) -> Result<()> {
 ///
 /// It names both commands that actually apply. Silently attaching would be the
 /// one behavior `run` must never have: the operator asked for a fresh
-/// execution of the code they just changed (organization#978).
+/// execution of the code they just changed.
 fn already_live_message(target: &Target) -> String {
     let display = target.project.display();
     format!(
@@ -202,7 +202,7 @@ async fn probe(endpoint: &str) -> Option<Attachment> {
 ///
 /// Before the handshake completes there is nothing but process facts and
 /// stderr to go on, so an early exit is reported with the daemon's own
-/// diagnostics rather than as a timeout (organization#978).
+/// diagnostics rather than as a timeout.
 async fn await_attachment(
     target: &Target,
     mut launched: LaunchedDaemon,
@@ -392,7 +392,7 @@ pub(crate) async fn status_command(
 ///
 /// It is a pure function of the snapshot on purpose: the whole status surface
 /// is the authoritative document, so there is nothing to fetch and nothing to
-/// derive from local state (organization#978).
+/// derive from local state.
 pub(crate) fn render_status(snapshot: &Snapshot) -> Vec<String> {
     let mut lines = vec![
         format!(
@@ -545,7 +545,7 @@ mod tests {
     }
 
     /// `status` renders the authoritative snapshot and nothing else - there is
-    /// no second source to reconcile it against (organization#978).
+    /// no second source to reconcile it against.
     #[test]
     fn status_renders_the_snapshot_including_every_process_row() {
         let rendered = render_status(&snapshot(Lifecycle::Ready)).join("\n");
@@ -560,7 +560,7 @@ mod tests {
     }
 
     /// `run` never silently attaches: the refusal names attach and stop, which
-    /// are the two things the operator can actually do (organization#978).
+    /// are the two things the operator can actually do.
     #[test]
     fn a_live_execution_makes_run_fail_with_the_commands_that_apply() {
         let target = Target::at_endpoint(
@@ -611,7 +611,7 @@ mod tests {
     /// The pair is confirmed before a project is even resolved, let alone
     /// built: `run` and `start` are the two commands that need a `phoxald`, and
     /// a missing or mismatched one is an installation problem the operator must
-    /// hear about first (organization#978).
+    /// hear about first.
     #[test]
     fn run_and_start_confirm_the_exact_pair_before_resolving_anything() {
         let source = std::fs::read_to_string(

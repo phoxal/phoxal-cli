@@ -37,7 +37,7 @@ mod tests {
 
     /// `status` reports one execution's snapshot. The old robot-domain
     /// subcommands went with the finite bus client they were built on
-    /// (organization#978).
+    ///.
     #[test]
     fn status_takes_a_target_or_an_endpoint_and_no_domain_subcommand() {
         assert!(matches!(

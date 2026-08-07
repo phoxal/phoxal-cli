@@ -146,7 +146,7 @@ mod tests {
     }
 
     /// One execution has one collector, so a reconciled page IS the retained
-    /// history rather than one robot's slice of it (organization#978).
+    /// history rather than one robot's slice of it.
     #[test]
     fn a_reconciled_page_replaces_the_history_and_follows_extend_it() {
         let epoch = AttachmentEpoch::new(ExecutionId::mint());

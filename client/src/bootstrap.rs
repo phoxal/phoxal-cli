@@ -1,7 +1,7 @@
 //! Process bootstrap is owned by the binary entry point.
 //!
 //! `self upgrade` moves the whole CLI pair. `phoxal` and `phoxald` are one
-//! product released under one version (organization#978), so the archive
+//! product released under one version, so the archive
 //! carries both, both are extracted before anything is touched, and the swap
 //! either lands both or leaves the installation exactly as it was. A successful
 //! upgrade that produced a mixed pair is not a degraded outcome to warn about -
@@ -282,7 +282,7 @@ struct StagedPair {
 ///
 /// An archive missing either half is rejected outright rather than half
 /// applied: the pair is the unit of release, so half of one is not a partial
-/// success (organization#978).
+/// success.
 fn extract_pair(archive_path: &Path, asset: &ReleaseAsset, temp_root: &Path) -> Result<StagedPair> {
     let archive_file = fs::File::open(archive_path)
         .with_context(|| format!("failed to open {}", archive_path.display()))?;
@@ -700,7 +700,7 @@ mod tests {
 
     /// A mixed pair must be impossible: if the irreversible half fails, the
     /// recoverable half is put back and the installation is unchanged
-    /// (organization#978).
+    ///.
     #[test]
     fn a_failed_client_replacement_restores_the_previous_daemon() {
         let temp = tempfile::tempdir().expect("temp dir");

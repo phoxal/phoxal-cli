@@ -86,7 +86,7 @@ pub struct PreparedParticipant {
 }
 
 /// The embedded router's inputs. There is no binary: the router runs inside the
-/// supervisor process (organization#978), so only the authored Zenoh config and
+/// supervisor process, so only the authored Zenoh config and
 /// the endpoint participants dial survive staging.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRouter {

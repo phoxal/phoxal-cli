@@ -1,7 +1,7 @@
 //! The daemon's one input: a finalized bundle root.
 //!
 //! `phoxald <BUNDLE_ROOT>` takes a canonical finalized bundle root and nothing
-//! else (organization#978). Everything a source project needs - discovery,
+//! else. Everything a source project needs - discovery,
 //! `extends` composition, Cargo, registries, staging - happened in `phoxal`
 //! before the bundle existed, so the daemon's job here is to refuse anything
 //! that is not already a bundle, and to say precisely what it was handed

@@ -47,7 +47,7 @@ impl LogStore {
     ///
     /// There is exactly one collector - the supervisor - and one execution, so
     /// a page replaces the history rather than one robot's slice of it
-    /// (organization#978).
+    ///.
     pub fn install_snapshot(
         &mut self,
         epoch: AttachmentEpoch,
@@ -160,7 +160,7 @@ mod tests {
     }
 
     /// A new execution is a new attachment, so a row stamped with the previous
-    /// one belongs to a run that has ended (organization#978).
+    /// one belongs to a run that has ended.
     #[test]
     fn a_row_from_a_previous_execution_is_rejected() {
         let old = epoch();

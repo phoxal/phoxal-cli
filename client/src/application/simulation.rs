@@ -1,7 +1,7 @@
 //! The client-owned simulation session.
 //!
 //! `phoxal simulation webots run <ROBOT_YAML> <WORLD>` owns the whole session.
-//! The daemon has no simulation concept at all (organization#978): the bundle
+//! The daemon has no simulation concept at all: the bundle
 //! this command finalizes says `clock: simulated`, has its driver blocks
 //! stripped, and stages the simulator, and `phoxald` derives the participant
 //! set and the clock source from that manifest exactly as it does for any other
@@ -115,7 +115,7 @@ pub(crate) async fn run_command(
     // Either exit order: if Webots goes first, the execution it was the world
     // clock for has nothing left to run on, so the daemon is asked to stop and
     // the session ends on its terminal snapshot exactly as a confirmed stop
-    // would (organization#978).
+    // would.
     let supervisor = session.ports.supervisor.clone();
     let mut snapshots = session.snapshots();
     let webots = std::sync::Arc::new(tokio::sync::Mutex::new(webots));
@@ -350,7 +350,7 @@ mod tests {
     use super::*;
 
     /// A simulation session is never detachable: this client owns Webots, so
-    /// leaving would strand a simulator with no operator (organization#978).
+    /// leaving would strand a simulator with no operator.
     #[test]
     fn a_simulation_session_is_never_detachable() {
         assert_ne!(Detachable::No, Detachable::Yes);
@@ -380,7 +380,7 @@ mod tests {
 
     /// Order one: Webots dies first. Its execution has no world clock left, so
     /// the daemon is asked to stop, awaited within a bound, and the operator is
-    /// told why the session ended (organization#978).
+    /// told why the session ended.
     #[test]
     fn webots_exiting_first_stops_the_execution_and_reports_it() {
         let end = SessionEnd::observe(

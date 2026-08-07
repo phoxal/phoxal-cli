@@ -3,7 +3,7 @@
 //! Step 2 of direct attachment is a rule, not a preference: zero routers means
 //! there is nothing to attach to, and more than one means the endpoint does not
 //! identify a robot. Selecting among several routers behind a shared fabric is
-//! deliberately a separate problem (organization#989).
+//! deliberately a separate problem.
 //!
 //! Cardinality is all this module decides. Whether a connected router *is* a
 //! Phoxal execution is settled one layer down, by

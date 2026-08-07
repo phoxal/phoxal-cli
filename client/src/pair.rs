@@ -1,7 +1,7 @@
 //! The exact `phoxal` + `phoxald` pair.
 //!
-//! The two binaries ship in one archive, install together, and upgrade together
-//! (organization#978). Nothing negotiates between them: the client resolves the
+//! The two binaries ship in one archive, install together, and upgrade together.
+//! Nothing negotiates between them: the client resolves the
 //! daemon as its own sibling, confirms the two report the same version, and
 //! refuses to do project work for a pair that is missing a half or mixed.
 //!
@@ -218,7 +218,7 @@ mod tests {
     }
 
     /// Every non-exact status is a refusal with a fix in it - a mixed pair is
-    /// never something a command quietly proceeds through (organization#978).
+    /// never something a command quietly proceeds through.
     #[test]
     fn only_an_exact_pair_has_no_failure_and_every_failure_names_the_fix() {
         assert_eq!(

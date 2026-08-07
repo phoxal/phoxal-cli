@@ -26,7 +26,7 @@ pub enum SessionInput {
     Runtimes(RuntimeWindow),
     Diagnostic(String),
     /// The operator pressed Ctrl+C. The UI decides what it means; the host
-    /// only reports that it happened (organization#978).
+    /// only reports that it happened.
     Interrupt,
     Terminate,
 }

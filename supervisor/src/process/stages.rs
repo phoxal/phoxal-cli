@@ -37,7 +37,7 @@ pub fn stages_for_run(
 ///
 /// The store is not that owner: the startup sequence a client renders is the
 /// daemon's own (bundle, requirements, binaries, router, participants), and
-/// this loop only ever advances its last step (organization#978). Keeping it
+/// this loop only ever advances its last step. Keeping it
 /// behind this handle is what lets the process machinery stay ignorant of the
 /// wire contract.
 pub(crate) trait StageProgress: Send + Sync {
@@ -84,7 +84,7 @@ pub struct SupervisionStage {
     /// Board ids that must be observed `Ready` before the next stage spawns:
     /// every spawned spec's own id that is a bus participant (see
     /// [`Self::new`]). There are no wait-only ids - the embedded router is the
-    /// supervisor's own state, not a board row to wait on (organization#978).
+    /// supervisor's own state, not a board row to wait on.
     pub ready_ids: Vec<ProcessKey>,
     /// Spawned processes whose terminal failure aborts this stage.
     pub failure_ids: Vec<ProcessKey>,
@@ -336,7 +336,7 @@ mod tests {
 
     /// The stage split is by kind: a host process is project infrastructure
     /// and every graph participant - the mandatory root brain included
-    /// (organization#973) - waits behind it.
+    /// - waits behind it.
     #[test]
     fn run_assigns_host_processes_to_infrastructure_and_every_participant_to_the_graph() {
         let stages = stages_for_run(

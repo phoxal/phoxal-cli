@@ -5,8 +5,7 @@
 
 //! Every path below is derived from the project root the caller passes in.
 //! Nothing here reads an environment variable: the root is a fact the command
-//! resolved, not a process global two call sites could disagree about
-//! (organization#978).
+//! resolved, not a process global two call sites could disagree about.
 
 use std::path::{Path, PathBuf};
 

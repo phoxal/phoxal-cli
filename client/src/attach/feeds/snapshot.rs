@@ -2,7 +2,7 @@
 //!
 //! It is also the disconnection feed: losing the supervisor's identity
 //! liveliness token is what "the execution is gone" means, and a socket that
-//! still exists proves nothing (organization#978).
+//! still exists proves nothing.
 
 use std::sync::Arc;
 

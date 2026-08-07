@@ -9,8 +9,8 @@
 //!
 //! There used to be an out-of-process `__graph-guardian` re-exec here: a second
 //! copy of the binary holding a pipe, registering each spawned process group,
-//! and killing every registered group when the pipe hit EOF. It is gone
-//! (organization#978). What replaces it is what the kernel already offers:
+//! and killing every registered group when the pipe hit EOF. It is gone.
+//! What replaces it is what the kernel already offers:
 //!
 //! - **Linux:** `PR_SET_PDEATHSIG(SIGKILL)` in `pre_exec`, so the kernel kills
 //!   the child the moment this process dies, with no helper process, no pipe

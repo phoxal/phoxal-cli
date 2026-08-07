@@ -2,8 +2,8 @@
 //!
 //! Unlike its sibling sources this one does not ingest from the bus - the pad
 //! is attached to the machine running this client, so the device state is
-//! produced here and only the resulting command goes out (organization#978,
-//! and [`crate::joypad`] for why the old robot-side tool went away).
+//! produced here and only the resulting command goes out (see
+//! [`crate::joypad`] for why the old robot-side tool went away).
 
 use std::sync::Arc;
 use std::time::Duration;

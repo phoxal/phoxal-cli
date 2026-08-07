@@ -4,7 +4,7 @@
 //! phoxald <BUNDLE_ROOT>
 //! ```
 //!
-//! That is the entire command line, and deliberately so (organization#978).
+//! That is the entire command line, and deliberately so.
 //! There is no `run`, `start`, `attach`, `stop`, `status`, `log`, `build`,
 //! `install`, `deploy`, `doctor`, or `upgrade` subcommand; no `--drivers`,
 //! `--driver`, or simulation flag; and no execution options of any kind. Clock
@@ -12,7 +12,7 @@
 //! whoever built the bundle, so the bundle root is the daemon's complete input.
 //!
 //! The one non-executing invocation is `--version`. It exists because `phoxal`
-//! and `phoxald` ship as one exact pair (organization#978): the client probes
+//! and `phoxald` ship as one exact pair: the client probes
 //! its sibling with it and refuses to build anything for a missing or
 //! mismatched daemon. It is a pair check, not an execution option.
 //!
@@ -226,7 +226,7 @@ mod tests {
 
     /// `phoxal` parses this exact line to decide whether the installed pair is
     /// exact, so its shape is a contract between the two binaries
-    /// (organization#978).
+    ///.
     #[test]
     fn the_version_line_is_the_pair_probes_contract() {
         assert_eq!(

@@ -3,7 +3,7 @@
 //! Every symbol below named a piece of the private resident IPC, the
 //! in-process daemon, or the supervisor-generation identity axis. They are not
 //! deprecated, shimmed, or feature-gated: they are gone, and this crate must
-//! not grow them back (organization#978).
+//! not grow them back.
 
 #![cfg(test)]
 
@@ -90,7 +90,7 @@ fn no_deleted_resident_or_generation_symbol_survives() {
             .collect();
         assert!(
             offenders.is_empty(),
-            "`{symbol}` was deleted by the phoxal/phoxald split (organization#978) but appears in: {offenders:?}"
+            "`{symbol}` was deleted by the phoxal/phoxald split but appears in: {offenders:?}"
         );
     }
 }

@@ -4,7 +4,7 @@
 //! in what it does once the daemon answers. It never mounts the TUI, and it
 //! never becomes the supervisor: `phoxald` is a separate executable and the
 //! systemd unit starts it directly, so readiness and the watchdog belong to
-//! the daemon, not to this command (organization#978).
+//! the daemon, not to this command.
 
 use std::path::PathBuf;
 

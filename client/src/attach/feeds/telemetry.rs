@@ -1,8 +1,7 @@
 //! The supervisor's retained runtime rollups, reconciled with its live feed.
 //!
 //! Same shape as the log feed and for the same reason: the daemon is the one
-//! collector, so there is one cursor and one retention to reconcile against
-//! (organization#978).
+//! collector, so there is one cursor and one retention to reconcile against.
 
 use std::sync::Arc;
 use std::time::Duration;

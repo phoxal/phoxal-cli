@@ -1,7 +1,7 @@
 //! The client-owned Webots application process.
 //!
-//! Webots is launched, watched, and stopped by this client and by nothing else
-//! (organization#978). The daemon has no Webots knowledge at all: the simulator
+//! Webots is launched, watched, and stopped by this client and by nothing else.
+//! The daemon has no Webots knowledge at all: the simulator
 //! *participant* it launches is an ordinary staged binary from the bundle, and
 //! the simulator *application* - the GUI, the world - is this process's.
 

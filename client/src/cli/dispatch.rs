@@ -12,7 +12,7 @@ impl RootCommand {
     ///
     /// There is no headless fallback any more: a command that attaches has
     /// nothing to drive but the TUI, because the supervision loop it used to
-    /// fall back to now lives in a separate executable (organization#978).
+    /// fall back to now lives in a separate executable.
     /// `start` is the headless verb - it launches, waits for readiness, and
     /// returns without ever attaching.
     fn requires_terminal(&self) -> bool {

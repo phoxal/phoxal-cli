@@ -3,7 +3,7 @@
 //! The daemon validates and executes. It never builds: no Cargo, no registry,
 //! no build script, no source discovery, no project mutation. An installed
 //! robot must start with no toolchain and no network, so acquiring any of those
-//! responsibilities here would make that impossible (organization#978).
+//! responsibilities here would make that impossible.
 //!
 //! # The startup sequence
 //!
@@ -292,7 +292,7 @@ async fn execute(requested_root: &Path, state: &ExecutionState) -> Result<()> {
     let liveliness = observe_participants(&bus, state.board(), &robot_key).await?;
 
     // Under systemd this unit is `Type=notify`, and this daemon is what the
-    // unit starts (organization#978): readiness and the watchdog are the
+    // unit starts: readiness and the watchdog are the
     // daemon's to signal, because it is the only process that knows when the
     // graph became ready. A graph that never reaches readiness never signals,
     // which is exactly what makes systemd time the start out and mark the unit

@@ -4,7 +4,7 @@
 //! lifecycle, the terminal session, the simulation session, project builds,
 //! host installation, remote deployment, the systemd unit, host checks, and
 //! schema generation. They used to share one file, which is why they used to
-//! share nothing else (organization#978).
+//! share nothing else.
 
 pub(crate) mod build;
 pub(crate) mod daemon;

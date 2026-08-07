@@ -1,6 +1,6 @@
 //! Installing and rolling back a runtime release on a systemd host.
 //!
-//! Installation is the client's, never the daemon's (organization#978): it
+//! Installation is the client's, never the daemon's: it
 //! validates an archive, swaps the active-release symlink atomically, and
 //! restarts the unit - all of which mutate a bundle a daemon may be executing.
 
@@ -83,7 +83,7 @@ impl ServiceManager for SystemdService {
                 }
                 // The completed handshake plus a snapshot is the readiness
                 // signal, exactly as it is for an interactive `run`
-                // (organization#978). A unit that is up but whose graph never
+                //. A unit that is up but whose graph never
                 // came together answers connect and reports why.
                 if let Ok(attachment) = phoxal_supervisor_client::Attachment::open(
                     &phoxal_supervisor_client::AttachmentConfig::new(
@@ -348,7 +348,7 @@ pub(crate) const SIMULATION_BUNDLE_REJECTED: &str = "PHOXAL-E-INSTALL-SIMULATION
 /// Refuse to install a simulation bundle.
 ///
 /// Keeping simulation off systemd is an install-path rule, not a daemon rule
-/// (organization#978): `phoxald` reads `clock` from the manifest like any other
+///: `phoxald` reads `clock` from the manifest like any other
 /// bundle and would come up waiting for a world clock only the client-owned
 /// Webots can produce - forever, on a `Restart=on-failure` unit. So the refusal
 /// is here, where the durable install is being made.
@@ -727,7 +727,7 @@ mod tests {
     }
 
     /// A simulation bundle is never installed, and the refusal says why and
-    /// what to run instead (organization#978).
+    /// what to run instead.
     #[test]
     fn a_simulation_bundle_is_rejected_at_the_installer_with_a_named_error() {
         use phoxal_manifest::source::robot::v0::Clock;

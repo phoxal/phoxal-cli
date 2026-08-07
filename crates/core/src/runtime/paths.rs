@@ -9,7 +9,7 @@ pub const INSTALLED_STATE_ROOT: &str = "/var/lib/phoxal/state";
 pub const INSTALLED_VOLATILE_ROOT: &str = "/run/phoxal";
 /// Where the exact `phoxal` + `phoxald` pair is installed on a managed host.
 /// The verified release archive carries both binaries and they are placed here
-/// together (organization#978), so the unit and the client resolve the daemon
+/// together, so the unit and the client resolve the daemon
 /// from one place rather than from `PATH`.
 pub const INSTALLED_BINARY_ROOT: &str = "/usr/local/bin";
 /// The installed interactive client. It is never the daemon.

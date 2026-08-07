@@ -42,7 +42,7 @@ fn normalize_existing_path(path: &Path) -> Result<PathBuf> {
 /// It is a pure function of the compiled host, with no environment override:
 /// a caller that wants a *different* target passes one - that is what
 /// `phoxal build --target` is - and this is only ever the fallback when none
-/// was named (organization#978).
+/// was named.
 #[must_use]
 pub fn host_target_triple() -> String {
     let arch = std::env::consts::ARCH;

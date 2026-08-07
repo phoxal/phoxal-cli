@@ -3,7 +3,7 @@
 //! This is the one feed that reads a robot-domain topic rather than the
 //! supervisor contract. It opens on the attachment's own session, so its key
 //! is already rooted at this execution - there is no second bus to open and no
-//! namespace to resolve (organization#978).
+//! namespace to resolve.
 
 use std::sync::Arc;
 

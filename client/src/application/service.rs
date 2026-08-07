@@ -20,7 +20,7 @@ const LEGACY_INSTALL_ROOT: &str = "/opt/phoxal";
 /// The managed unit.
 ///
 /// `ExecStart` is the daemon and its bundle root, and nothing else
-/// (organization#978): `phoxald <INSTALLED_BUNDLE_ROOT>`. The interactive
+///: `phoxald <INSTALLED_BUNDLE_ROOT>`. The interactive
 /// client is never run as the daemon - it builds, and a durable systemd-owned
 /// service must never acquire Cargo, registries, a toolchain, or a terminal.
 /// `Type=notify` because the daemon owns READY and the watchdog itself.
@@ -445,7 +445,7 @@ mod unit_tests {
 
     /// The unit runs the daemon on the installed bundle root and nothing else.
     /// The interactive client is never the daemon: it builds, and no `phoxal`
-    /// invocation may appear in `ExecStart` (organization#978).
+    /// invocation may appear in `ExecStart`.
     #[test]
     fn managed_service_executes_the_daemon_on_the_installed_bundle_root() {
         let unit = unit_contents();

@@ -294,7 +294,7 @@ mod tests {
         let pending = PendingInputs::default();
         let old = changed_epoch();
         // A new execution is a new attachment, so a different execution id is
-        // exactly what an epoch change is (organization#978).
+        // exactly what an epoch change is.
         let new = AttachmentEpoch::new(ExecutionId::mint());
         pending.push(SessionInput::Client(AttachmentEvent::EpochChanged(old)));
         pending.push(changed(1));
@@ -333,7 +333,7 @@ mod tests {
         let pending = PendingInputs::default();
         let old = changed_epoch();
         // A new execution is a new attachment, so a different execution id is
-        // exactly what an epoch change is (organization#978).
+        // exactly what an epoch change is.
         let new = AttachmentEpoch::new(ExecutionId::mint());
         pending.push(SessionInput::Client(AttachmentEvent::EpochChanged(new)));
         pending.push(SessionInput::Logs(LogWindow {
