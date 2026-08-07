@@ -334,22 +334,44 @@ pub(crate) async fn stop_command(
     endpoint: Option<String>,
 ) -> Result<()> {
     let (target, session) = open_existing(app, requested_target, endpoint).await?;
-    match session.stop().await? {
-        phoxal_supervisor_api::CommandOutcome::Accepted => {}
-        phoxal_supervisor_api::CommandOutcome::Rejected { reason } => {
+    let outcome = match session.ports.supervisor.stop().await {
+        Ok(phoxal_supervisor_api::CommandOutcome::Accepted) => await_terminal(&session).await,
+        Ok(phoxal_supervisor_api::CommandOutcome::Rejected { reason }) => {
+            session.shutdown().await;
             bail!("the supervisor rejected the stop: {reason:?}")
         }
-    }
-    let outcome = await_terminal(&session).await;
-    session.shutdown().await;
-    match outcome {
-        Ok(()) => {
-            app.ui
-                .info(format!("execution stopped at {}", target.endpoint));
-            Ok(())
+        // The daemon answers `Stop` before it tears down, but the answer still
+        // has to cross a session the teardown is closing. A stop that ends the
+        // execution it was aimed at is the outcome that was asked for, not an
+        // error to print at the operator.
+        Err(error) if ended_before_answering(&error) => Ok(()),
+        Err(error) => {
+            session.shutdown().await;
+            return Err(error);
         }
-        Err(error) => Err(error),
-    }
+    };
+    session.shutdown().await;
+    outcome?;
+    app.ui
+        .info(format!("execution stopped at {}", target.endpoint));
+    Ok(())
+}
+
+/// Whether a failed command means the execution ended rather than that the
+/// command failed.
+///
+/// Only the two shapes that say exactly that: the reply stream closed with no
+/// reply at all, and the bus session itself closed. A timeout is deliberately
+/// not one of them - a daemon that never answered may still be wedged and
+/// running, and reporting that as a clean stop would be a lie.
+fn ended_before_answering(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<AttachError>(),
+        Some(
+            AttachError::Query(phoxal_bus::QueryError::Unavailable)
+                | AttachError::Bus(phoxal_bus::BusError::Closed)
+        )
+    )
 }
 
 /// Wait for the execution to reach a terminal snapshot, or for its identity
@@ -635,6 +657,33 @@ mod tests {
                 "{command} must confirm the pair before it resolves a project"
             );
         }
+    }
+
+    /// The client half of the stop contract: a stop whose answer was lost to
+    /// the daemon's own teardown is the outcome that was asked for, and a
+    /// command that failed for any other reason still is a failure.
+    #[test]
+    fn a_stop_answer_lost_to_teardown_is_the_execution_ending_not_a_failure() {
+        for ended in [
+            AttachError::Query(phoxal_bus::QueryError::Unavailable),
+            AttachError::Bus(phoxal_bus::BusError::Closed),
+        ] {
+            let rendered = ended.to_string();
+            assert!(
+                ended_before_answering(&anyhow::Error::new(ended)),
+                "{rendered} means the execution ended"
+            );
+        }
+
+        // A wedged daemon that never answered may still be running: reporting
+        // that as a clean stop would be a lie, so it stays an error.
+        assert!(!ended_before_answering(&anyhow::Error::new(
+            AttachError::Query(phoxal_bus::QueryError::Timeout(
+                phoxal_bus::QueryFailure::deadline_exceeded("query deadline exceeded")
+            ))
+        )));
+        // So does a failure that is not an attachment error at all.
+        assert!(!ended_before_answering(&anyhow::anyhow!("something else")));
     }
 
     #[test]

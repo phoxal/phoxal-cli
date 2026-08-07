@@ -124,6 +124,11 @@ impl SupervisorCommands {
     }
 
     /// End the execution.
+    ///
+    /// The one place this client ends an execution: `phoxal stop`, the TUI's
+    /// stop effect, and the simulation session's "the world clock is gone"
+    /// path all go through here, so there is exactly one stop contract to
+    /// reason about.
     pub(crate) async fn stop(&self) -> Result<CommandOutcome> {
         Ok(self.attachment.command(Command::Stop).await?)
     }
@@ -217,11 +222,6 @@ impl Session {
     /// Resolve when the supervisor's identity token is lost.
     pub(crate) async fn disconnected(&self) {
         self.attachment.disconnected().await;
-    }
-
-    /// End the execution.
-    pub(crate) async fn stop(&self) -> Result<CommandOutcome> {
-        Ok(self.attachment.command(Command::Stop).await?)
     }
 
     /// One backward page of the supervisor's bounded log history.

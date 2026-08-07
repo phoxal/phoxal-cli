@@ -21,6 +21,16 @@
 //! The second is the one worth stating: "no session yet" is a fact the snapshot
 //! reports, and a command fenced on a fact the supervisor does not have is a
 //! command it cannot safely apply.
+//!
+//! # Stopping answers first
+//!
+//! An accepted `Stop` is *answered before teardown begins*. Cancelling the
+//! execution ends the session that serves this very query, so cancelling first
+//! would drop the acceptance in flight and the client would read a successful
+//! stop as "no responder is available for this query topic". The acceptance is
+//! the client's evidence that the daemon took the command; what follows it -
+//! the terminal snapshot, then the loss of the identity token - is the client's
+//! evidence that the execution ended.
 
 use crate::state::Board;
 use phoxal_bus::{Bus, ServerQueryable};
@@ -90,12 +100,17 @@ pub(crate) async fn serve(
     state: &ExecutionState,
     control: &Control,
 ) {
-    super::answer(
+    super::answer_then(
         bus,
         queryable,
         "command",
         |request: supervisor::command::Request| {
             let supervisor::command::Request::V0 { command } = request;
+            // Cancelling ends this serving session, so an accepted stop is
+            // deferred until the acceptance has actually been sent. Doing it
+            // here would tear the queryable down under the in-flight reply and
+            // the client would see "no responder" for a stop that worked.
+            let mut after: super::AfterReply = None;
             let outcome = match decide(&command, &state.roster(), &state.board().snapshot()) {
                 Decision::Rejected(reason) => {
                     tracing::debug!(?reason, "rejected a supervisor command");
@@ -103,7 +118,8 @@ pub(crate) async fn serve(
                 }
                 Decision::Stop => {
                     tracing::info!("stopping the execution on a supervisor command");
-                    control.stop.cancel();
+                    let stop = control.stop.clone();
+                    after = Some(Box::new(move || stop.cancel()));
                     CommandOutcome::Accepted
                 }
                 Decision::Restart(key) => {
@@ -120,7 +136,7 @@ pub(crate) async fn serve(
                     }
                 }
             };
-            supervisor::command::Reply::V0 { outcome }
+            (supervisor::command::Reply::V0 { outcome }, after)
         },
     )
     .await;

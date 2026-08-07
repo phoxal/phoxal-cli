@@ -300,15 +300,26 @@ async fn a_restart_is_fenced_on_the_producer_the_client_saw() {
     attachment.close().await.expect("detach");
 }
 
-/// `Stop` ends the execution rather than merely being acknowledged.
+/// `Stop` is answered *before* the execution is cancelled, and then it really
+/// is cancelled.
+///
+/// Both halves matter and the order between them is the contract. Cancelling
+/// ends the very session serving this query, so a daemon that cancelled first
+/// would drop the acceptance in flight and the client would read a stop that
+/// worked as "no responder is available for this query topic". The client has
+/// nothing else to go on: the acceptance is its only evidence that the daemon
+/// took the command at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stop_cancels_the_execution() {
+async fn stop_is_answered_before_the_execution_is_cancelled() {
     let fixture = Fixture::start().await;
     let attachment = fixture.attach().await;
     assert!(!fixture.stop.is_cancelled());
 
     assert_eq!(
-        attachment.command(Command::Stop).await.expect("answered"),
+        attachment
+            .command(Command::Stop)
+            .await
+            .expect("the daemon answers Stop before it begins teardown"),
         CommandOutcome::Accepted
     );
     tokio::time::timeout(std::time::Duration::from_secs(5), fixture.stop.cancelled())

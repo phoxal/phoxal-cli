@@ -172,6 +172,32 @@ pub(crate) async fn answer<Request, Reply>(
     Request: DeserializeOwned,
     Reply: Serialize,
 {
+    answer_then(bus, queryable, label, move |request| {
+        (handle(request), None)
+    })
+    .await;
+}
+
+/// What a handler asks to happen *after* its reply has left this daemon.
+///
+/// It exists for exactly one case: an accepted `Stop`. Cancelling the
+/// execution tears this serving session down, so doing it inside the handler
+/// destroys the queryable while the reply is still in flight and the client
+/// sees its query stream close with no responder instead of the acceptance it
+/// was promised. The effect runs once the reply has been attempted, in either
+/// direction: a client that could not be told still asked for a stop.
+pub(crate) type AfterReply = Option<Box<dyn FnOnce() + Send>>;
+
+/// [`answer`], plus a post-reply effect the handler chooses per request.
+pub(crate) async fn answer_then<Request, Reply>(
+    bus: &Bus,
+    queryable: &ServerQueryable,
+    label: &str,
+    handle: impl Fn(Request) -> (Reply, AfterReply),
+) where
+    Request: DeserializeOwned,
+    Reply: Serialize,
+{
     loop {
         let query = match queryable.recv().await {
             Ok(query) => query,
@@ -198,7 +224,8 @@ pub(crate) async fn answer<Request, Reply>(
                 continue;
             }
         };
-        match MessagePack::encode(&handle(request)) {
+        let (reply, after) = handle(request);
+        match MessagePack::encode(&reply) {
             Ok(payload) => {
                 if let Err(error) = query.reply(bus, payload).await {
                     tracing::debug!("failed to answer a supervisor {label} query: {error}");
@@ -209,6 +236,9 @@ pub(crate) async fn answer<Request, Reply>(
                     QueryFailure::internal(format!("failed to encode the {label} reply: {error}"));
                 let _ = query.reply_err(&failure).await;
             }
+        }
+        if let Some(after) = after {
+            after();
         }
     }
 }
