@@ -205,10 +205,8 @@ impl Worker {
                 .prefix("phoxal-ssh-layout-")
                 .tempdir()?;
             crate::bundle::archive::extract_build_archive(pulled.path(), extracted.path())?;
-            crate::load::header::RuntimeHeader::read_and_validate(extracted.path())?;
             crate::load::layout::validate_layout_plan(
                 extracted.path(),
-                &phoxal_cli_core::project::layout::PlanOptions::default(),
                 LayoutInspection::Target(expected_target_for_triple(&target)?),
                 RunIdentity::default(),
             )?;
@@ -612,7 +610,7 @@ fn component_driver_officials(
         .into_values()
         .filter(|runtime| seen_packages.insert(runtime.package.clone()))
         .map(|runtime| ContainerOfficial {
-            package: phoxal_cli_core::project::catalog::cargo_package_name(&runtime.package),
+            package: phoxal_cli_catalog::cargo_package_name(&runtime.package),
             train: runtime.train.clone(),
         })
         .collect()
@@ -630,10 +628,11 @@ fn selected_registry_officials(
         .filter(|runtime| runtime.path_override.is_some())
         .map(|runtime| runtime.package.clone())
         .collect::<BTreeSet<_>>();
-    let mut officials = phoxal_cli_core::project::catalog::for_webots(false)
+    let mut officials = phoxal_cli_catalog::Catalog::official()
+        .native()
         .filter(|official| !overridden.contains(official.package))
         .map(|official| ContainerOfficial {
-            package: phoxal_cli_core::project::catalog::cargo_package_name(official.package),
+            package: phoxal_cli_catalog::cargo_package_name(official.package),
             train: resolved.train.clone(),
         })
         .collect::<Vec<_>>();
@@ -1117,13 +1116,13 @@ fn symlink_verbatim(_link_target: &Path, at: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_cli_core::project::catalog::ArtifactKind;
+    use phoxal_cli_catalog::ArtifactKind;
     use phoxal_cli_core::project::resolver::{
         BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
     };
 
     fn minimal_bundle_plan() -> BundlePlan {
-        let yaml = r#"schema: robot/v0
+        let yaml = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -1139,7 +1138,11 @@ robot:
         BundlePlan {
             source_manifest: phoxal_cli_core::project::resolver::parse_robot_from_string(yaml)
                 .expect("minimal fixture robot.yaml parses"),
-            compiled: Default::default(),
+            compiled: crate::stage::compile_test_bundle(
+                &phoxal_cli_core::project::resolver::parse_robot_from_string(yaml)
+                    .expect("minimal fixture robot.yaml parses"),
+            )
+            .expect("the fixture project compiles"),
             train: "0.36.0".to_string(),
             target: "aarch64-unknown-linux-gnu".to_string(),
             brain: phoxal_cli_core::project::resolver::ResolvedBrain {

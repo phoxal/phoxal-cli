@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub mod catalog;
+pub mod intent;
 pub mod launch_plan;
 pub mod layout;
+pub mod requirements;
 pub mod resolver;
 pub mod tooling;
 pub mod train;
@@ -36,17 +37,20 @@ fn normalize_existing_path(path: &Path) -> Result<PathBuf> {
 }
 
 /// The host's target triple, in the shape official Cargo packages are
-/// compiled for. Overridable for tests via `PHOXAL_HOST_TARGET_TRIPLE`.
+/// compiled for.
+///
+/// It is a pure function of the compiled host, with no environment override:
+/// a caller that wants a *different* target passes one - that is what
+/// `phoxal build --target` is - and this is only ever the fallback when none
+/// was named.
 #[must_use]
 pub fn host_target_triple() -> String {
-    std::env::var("PHOXAL_HOST_TARGET_TRIPLE").unwrap_or_else(|_| {
-        let arch = std::env::consts::ARCH;
-        let os = match std::env::consts::OS {
-            "macos" => "apple-darwin",
-            "linux" => "unknown-linux-gnu",
-            "windows" => "pc-windows-msvc",
-            other => other,
-        };
-        format!("{arch}-{os}")
-    })
+    let arch = std::env::consts::ARCH;
+    let os = match std::env::consts::OS {
+        "macos" => "apple-darwin",
+        "linux" => "unknown-linux-gnu",
+        "windows" => "pc-windows-msvc",
+        other => other,
+    };
+    format!("{arch}-{os}")
 }

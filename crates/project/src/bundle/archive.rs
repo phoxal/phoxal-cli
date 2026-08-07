@@ -1,7 +1,7 @@
 //! Deterministic `build.phoxal` archiving of a staged runtime layout (#936).
 //!
 //! `build.phoxal` is a gzipped tar of a staged runtime layout - the compiled
-//! canonical `robot.json`, `assets/`, and the flat `bin/` store - written so that
+//! canonical `robot.yaml`, `assets/`, and the flat `bin/` store - written so that
 //! identical staged contents always produce byte-identical archives. That is
 //! what lets a rebuild or a relink of unchanged content re-produce the same
 //! digest, so a bundle is content-addressable and independently attestable.
@@ -100,6 +100,11 @@ struct Entry {
     executable: bool,
 }
 
+/// The bookkeeping files `cargo install --root` leaves in the candidate root.
+/// They embed absolute host paths, so a bundle containing them is not
+/// reproducible - and nothing at runtime reads them.
+const CARGO_INSTALL_BOOKKEEPING: [&str; 2] = [".crates.toml", ".crates2.json"];
+
 /// Recursively collect every directory and regular file under `root`, sorted by
 /// relative path so the archive's entry order is stable regardless of the
 /// filesystem's directory iteration order.
@@ -121,6 +126,17 @@ fn collect_into(root: &Path, dir: &Path, out: &mut Vec<Entry>) -> Result<()> {
         // installed runtime redirects all state outside its immutable release.
         // Never fold state from a prior ordinary run into a bundle.
         if dir == root && path.file_name() == Some(std::ffi::OsStr::new(".phoxal")) {
+            continue;
+        }
+        // `cargo install --root <candidate>` writes its own bookkeeping beside
+        // `bin/`. Those files record absolute host paths, so they are neither
+        // bundle content nor deterministic across machines.
+        if dir == root
+            && path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| CARGO_INSTALL_BOOKKEEPING.contains(&name))
+        {
             continue;
         }
         let metadata = fs::symlink_metadata(&path)
@@ -489,12 +505,16 @@ mod tests {
         fs::set_permissions(path, perms).unwrap();
     }
 
-    /// Stage a minimal layout: `robot.json`, an executable `bin/mission`, and a
+    /// Stage a minimal layout: `robot.yaml`, an executable `bin/mission`, and a
     /// non-executable asset. Returns the layout root.
     fn stage_layout(root: &Path) {
         fs::create_dir_all(root.join("bin")).unwrap();
         fs::create_dir_all(root.join("assets")).unwrap();
-        fs::write(root.join("robot.json"), br#"{"schema":"phoxal/robot/v0"}"#).unwrap();
+        fs::write(
+            root.join("robot.yaml"),
+            b"schema: phoxal/robot/v0\nclock: real\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         write_executable(&root.join("bin/mission"), b"\x7fELF-ish-binary");
         #[cfg(not(unix))]
@@ -514,7 +534,7 @@ mod tests {
         // Touch every file's mtime to a different time; determinism must ignore
         // it. Re-archive to a second path.
         let later = std::time::SystemTime::now();
-        filetime_touch(&layout.join("robot.json"), later);
+        filetime_touch(&layout.join("robot.yaml"), later);
         filetime_touch(&layout.join("bin/mission"), later);
         filetime_touch(&layout.join("assets/fixture.bin"), later);
 
@@ -555,8 +575,8 @@ mod tests {
         let layout = dir.path().join("build/triple");
         stage_layout(&layout);
         // A runtime-state directory the archive must never capture.
-        fs::create_dir_all(layout.join(".phoxal")).unwrap();
-        fs::write(layout.join(".phoxal/project.lock"), b"lock").unwrap();
+        fs::create_dir_all(layout.join(".phoxal/run")).unwrap();
+        fs::write(layout.join(".phoxal/run/build.lock"), b"lock").unwrap();
 
         let out = dir.path().join("bundle.build.phoxal");
         write_build_archive(&layout, &out).unwrap();
@@ -566,7 +586,7 @@ mod tests {
 
         let mut names = BTreeSet::new();
         collect_names(&extracted, &extracted, &mut names);
-        assert!(names.contains("robot.json"));
+        assert!(names.contains("robot.yaml"));
         assert!(names.contains("bin/mission"));
         assert!(names.contains("assets/fixture.bin"));
         // The archive is pure runtime content: a top-level `.phoxal` (lock/socket
@@ -658,8 +678,8 @@ mod tests {
         fs::write(
             &duplicate,
             raw_tar_gz_entries(&[
-                ("robot.json", b"first", b'0'),
-                ("robot.json", b"second", b'0'),
+                ("robot.yaml", b"first", b'0'),
+                ("robot.yaml", b"second", b'0'),
             ]),
         )
         .unwrap();
@@ -731,28 +751,28 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlinked_final_target_is_rejected() {
-        // A single-entry archive writing `robot.json`.
+        // A single-entry archive writing `robot.yaml`.
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("one.tar.gz");
         fs::write(
             &archive,
-            raw_tar_gz("robot.json", br#"{"schema":"phoxal/robot/v0"}"#),
+            raw_tar_gz("robot.yaml", br#"{"schema":"phoxal/robot/v0"}"#),
         )
         .unwrap();
 
         // Extract once into a fresh dest to establish a normal baseline.
         let good = dir.path().join("good");
         extract_build_archive(&archive, &good).unwrap();
-        assert!(good.join("robot.json").is_file());
+        assert!(good.join("robot.yaml").is_file());
 
-        // Now a dest that is non-empty because `robot.json` is a symlink to an
+        // Now a dest that is non-empty because `robot.yaml` is a symlink to an
         // outside file: extraction refuses the non-empty/symlinked destination
         // and never writes through the link.
         let outside = dir.path().join("outside.txt");
         fs::write(&outside, b"original").unwrap();
         let dest = dir.path().join("evil");
         fs::create_dir_all(&dest).unwrap();
-        std::os::unix::fs::symlink(&outside, dest.join("robot.json")).unwrap();
+        std::os::unix::fs::symlink(&outside, dest.join("robot.yaml")).unwrap();
 
         let error = extract_build_archive(&archive, &dest)
             .expect_err("a symlinked final target must be rejected");
@@ -784,7 +804,7 @@ mod tests {
         // A fresh, never-created destination extracts fine.
         let fresh = dir.path().join("fresh");
         extract_build_archive(&out, &fresh).unwrap();
-        assert!(fresh.join("robot.json").is_file());
+        assert!(fresh.join("robot.yaml").is_file());
     }
 
     #[test]
@@ -821,5 +841,50 @@ mod tests {
                 out.insert(rel);
             }
         }
+    }
+
+    /// The archive is the bundle: `robot.yaml`, `assets/`, and `bin/`, and
+    /// nothing else. The cargo-install bookkeeping that `cargo install --root`
+    /// leaves beside `bin/` embeds absolute host paths, so a bundle carrying it
+    /// would not be reproducible across machines - and nothing at runtime reads
+    /// it. This pins the exact file set rather than asserting an absence, so a
+    /// future addition has to be made deliberately.
+    #[test]
+    fn the_archive_contains_the_exact_bundle_file_set_and_no_host_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = dir.path().join("bundle");
+        stage_layout(&layout);
+        // Exactly what a real `cargo install --root <candidate>` leaves behind,
+        // plus the local runtime state an ordinary extracted bundle may grow.
+        fs::write(layout.join(".crates.toml"), b"[v1]\n").unwrap();
+        fs::write(layout.join(".crates2.json"), b"{}").unwrap();
+        fs::create_dir_all(layout.join(".phoxal/run")).unwrap();
+        fs::write(layout.join(".phoxal/run/supervisor.log"), b"stale").unwrap();
+
+        let archive = dir.path().join("build.phoxal");
+        write_build_archive(&layout, &archive).unwrap();
+        let extracted = dir.path().join("extracted");
+        extract_build_archive(&archive, &extracted).unwrap();
+
+        let mut files = BTreeSet::new();
+        fn walk(root: &Path, dir: &Path, files: &mut BTreeSet<String>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(root, &path, files);
+                } else {
+                    files.insert(relative_slash_path(root, &path).unwrap());
+                }
+            }
+        }
+        walk(&extracted, &extracted, &mut files);
+        assert_eq!(
+            files,
+            BTreeSet::from([
+                "assets/fixture.bin".to_string(),
+                "bin/mission".to_string(),
+                "robot.yaml".to_string(),
+            ])
+        );
     }
 }

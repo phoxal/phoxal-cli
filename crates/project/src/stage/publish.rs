@@ -5,17 +5,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use phoxal_cli_core::project::launch_plan::runtime_layout_dir;
-use phoxal_cli_core::project::resolver::BundlePlan;
 
 use super::candidate::StagedCandidate;
 
 const PREVIOUS_LAYOUT_SUFFIX: &str = ".previous";
 
-/// The staged runtime layout directory for this resolved robot under
-/// `project_root`. `run`, live simulation, and `build` all stage and execute
-/// this one root.
+/// The staged runtime layout directory under `project_root`. `run`, live
+/// simulation, and `build` all stage and execute this one root - it is a
+/// function of the project alone, not of what was resolved into it.
 #[must_use]
-pub(crate) fn layout_path(project_root: &Path, _resolved: &BundlePlan) -> PathBuf {
+pub(crate) fn layout_path(project_root: &Path) -> PathBuf {
     runtime_layout_dir(project_root)
 }
 
@@ -24,15 +23,12 @@ pub(crate) fn layout_path(project_root: &Path, _resolved: &BundlePlan) -> PathBu
 /// metadata read, and loader validation against `candidate.path()` has
 /// already succeeded - this is the exact promise the module docs make, and
 /// the only step allowed to touch the live path.
-pub(crate) fn publish_runtime_layout(
-    candidate: StagedCandidate,
-    resolved: &BundlePlan,
-) -> Result<PathBuf> {
+pub(crate) fn publish_runtime_layout(candidate: StagedCandidate) -> Result<PathBuf> {
     let StagedCandidate {
         dir: candidate,
         project_root,
     } = candidate;
-    let target = layout_path(&project_root, resolved);
+    let target = layout_path(&project_root);
     let parent = target
         .parent()
         .context("runtime bundle directory has no parent")?;

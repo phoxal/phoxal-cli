@@ -15,7 +15,7 @@ mod tests {
 
     use phoxal_cli_observation::{
         InputObservation, JoypadDevice, JoypadDevicesSample, LogRow, LogSeverity, LogSource,
-        RobotScope, RuntimePerformanceSample, RuntimeRow,
+        RuntimePerformanceSample, RuntimeRow,
     };
     use tuirealm::ratatui::Terminal;
     use tuirealm::ratatui::backend::TestBackend;
@@ -52,10 +52,6 @@ mod tests {
     #[test]
     fn every_page_component_renders_non_empty_typed_state() {
         let mut terminal = Terminal::new(TestBackend::new(100, 32)).expect("test terminal");
-        let scope = RobotScope {
-            namespace: "lab".to_string(),
-            robot_id: "rover".to_string(),
-        };
         let mut model = AppModel::default();
         model
             .overview
@@ -66,10 +62,8 @@ mod tests {
             severity: LogSeverity::Info,
             text: "log-token".to_string(),
             event_time: SystemTime::UNIX_EPOCH,
-            scope: None,
         });
         model.runtimes.rows.push(RuntimeRow {
-            scope,
             sample: RuntimePerformanceSample {
                 sequence: 1,
                 participant_id: "runtime-token".to_string(),

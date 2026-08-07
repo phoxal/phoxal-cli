@@ -1,8 +1,8 @@
 //! Participants responsibilities for check.
 
 use anyhow::Result;
+use phoxal_cli_catalog::ArtifactKind;
 use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::project::catalog::ArtifactKind;
 use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolvedComponentDriver;
 use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
@@ -126,7 +126,7 @@ pub(crate) fn component_driver_runtimes_by_ref(
 
 pub(crate) fn check_artifact_refs_from_resolved(
     resolved: &BundlePlan,
-    drivers: phoxal_cli_core::project::layout::DriverSelection,
+    drivers: phoxal_cli_core::project::intent::DriverSelection,
 ) -> Vec<PlatformArtifactRef> {
     let mut refs = platform_artifact_refs_from_resolved(resolved);
     refs.extend(

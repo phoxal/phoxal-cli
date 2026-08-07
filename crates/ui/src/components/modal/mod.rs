@@ -18,20 +18,20 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     let (title, body): (&str, String) = match modal {
         ModalId::Help => (
             " Help ",
-            "Enter descends from tabs to panels to content. Esc restores the previous depth. Panel-local shortcuts work only after entering that panel.\n\nRuntimes: arrows, Enter detail, r restart, l logs\nLogs: filters / f s, stream arrows/End/Space\nBus: / s a and arrows\nInput: arrows, Enter select, e enable, x disable, r rescan\nS: explicit stop confirmation; q: detach only".to_string(),
+            "Enter descends from tabs to panels to content. Esc restores the previous depth. Panel-local shortcuts work only after entering that panel.\n\nRuntimes: arrows, Enter detail, r restart, l logs\nLogs: filters / f s, stream arrows/End/Space\nBus: / s a and arrows\nInput: arrows, Enter select, e enable, x disable, r rescan\nCtrl+C: stop confirmation; q: detach only".to_string(),
         ),
         ModalId::SessionInfo => {
             let info = model.overview.supervisor.as_ref().map_or_else(
                 || "Attachment snapshot not received".to_string(),
                 |snapshot| {
                     format!(
-                        "project: {}\nentry: {}\nframework: {}\nrouter: {}\nexecution: {}\ngraph generation: {}",
+                        "project: {}\nrobot: {}/{}\nclock: {:?}\nexecution: {}\nrevision: {}",
                         sanitize(&snapshot.project),
-                        sanitize(&snapshot.entry),
-                        sanitize(&snapshot.framework_train),
-                        sanitize(&snapshot.router),
-                        snapshot.execution_id,
-                        snapshot.graph_generation
+                        sanitize(snapshot.robot.namespace.as_str()),
+                        sanitize(snapshot.robot.id.as_str()),
+                        snapshot.mode,
+                        snapshot.execution,
+                        snapshot.revision
                     )
                 },
             );
@@ -39,7 +39,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         }
         ModalId::ConfirmStop => (
             " Stop project? ",
-            "Enter stops the resident and every supervised process. Esc cancels. Closing the UI with q never stops the resident.".to_string(),
+            "Enter stops the execution and every supervised process. Esc cancels. Closing the UI with q only detaches - the daemon keeps running.".to_string(),
         ),
     };
     frame.render_widget(Clear, popup);

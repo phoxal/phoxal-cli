@@ -7,6 +7,8 @@ use tuirealm::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tuirealm::ratatui::text::{Line, Span, Text};
 use tuirealm::ratatui::widgets::Paragraph;
 
+use phoxal_supervisor_api::{StartupStep, StartupStepKind, StartupStepState};
+
 use crate::Theme;
 use crate::app::AppModel;
 
@@ -22,16 +24,13 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     let status_text = model.overview.supervisor.as_ref().map_or_else(
         || Text::from("Waiting for attachment snapshot"),
         |snapshot| {
-            let mode = snapshot.simulation.as_ref().map_or_else(
-                || "native".to_string(),
-                |simulation| {
-                    format!(
-                        "simulation {} / {}",
-                        sanitize(&simulation.profile),
-                        sanitize(&simulation.world)
-                    )
-                },
-            );
+            // The clock IS the mode: `clock: simulated` in the finalized
+            // manifest is what selects the simulator, and the daemon passes it
+            // through untouched.
+            let mode = match snapshot.mode {
+                phoxal_supervisor_api::ExecutionMode::Real => "real",
+                phoxal_supervisor_api::ExecutionMode::Simulated => "simulated",
+            };
             let timeline = startup_timeline(
                 &snapshot.startup,
                 status.width.saturating_sub(2) as usize,
@@ -59,10 +58,11 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             }
             lines.extend([
                 Line::from(format!(
-                    "Framework: {}",
-                    sanitize(&snapshot.framework_train)
+                    "Robot: {}/{}",
+                    sanitize(snapshot.robot.namespace.as_str()),
+                    sanitize(snapshot.robot.id.as_str())
                 )),
-                Line::from(format!("Router: {}", sanitize(&snapshot.router))),
+                Line::from(format!("Execution: {}", snapshot.execution)),
                 Line::from(format!("Processes: {}", model.overview.processes.len())),
             ]);
             Text::from(lines)
@@ -136,27 +136,27 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     );
 }
 
-fn startup_step_label(kind: phoxal_cli_core::runtime::StartupStepKind) -> &'static str {
-    use phoxal_cli_core::runtime::StartupStepKind;
+/// The daemon's own startup sequence, in the order `phoxald` performs it.
+fn startup_step_label(kind: StartupStepKind) -> &'static str {
     match kind {
-        StartupStepKind::Project => "Project",
-        StartupStepKind::PrepareRuntime => "Prepare runtime",
-        StartupStepKind::Infrastructure => "Infrastructure",
-        StartupStepKind::Graph => "Robot graph",
+        StartupStepKind::Bundle => "Bundle",
+        StartupStepKind::Requirements => "Requirements",
+        StartupStepKind::Binaries => "Binaries",
+        StartupStepKind::Router => "Router",
+        StartupStepKind::Participants => "Participants",
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupTimelineLine {
     text: String,
-    state: Option<phoxal_cli_core::runtime::StartupStepState>,
+    state: Option<StartupStepState>,
 }
 
 fn startup_step_style(
     theme: Theme,
-    state: Option<phoxal_cli_core::runtime::StartupStepState>,
+    state: Option<StartupStepState>,
 ) -> tuirealm::ratatui::style::Style {
-    use phoxal_cli_core::runtime::StartupStepState;
     let role = match state {
         Some(StartupStepState::Done) => crate::Role::Success,
         Some(StartupStepState::Active) => crate::Role::Accent,
@@ -166,11 +166,7 @@ fn startup_step_style(
     crate::theme::role::fg(theme, role)
 }
 
-fn startup_marker(
-    state: phoxal_cli_core::runtime::StartupStepState,
-    unicode: bool,
-) -> &'static str {
-    use phoxal_cli_core::runtime::StartupStepState;
+fn startup_marker(state: StartupStepState, unicode: bool) -> &'static str {
     match (unicode, state) {
         (true, StartupStepState::Done) => "✓",
         (true, StartupStepState::Active) => "◐",
@@ -184,18 +180,16 @@ fn startup_marker(
 }
 
 fn startup_timeline(
-    startup: &phoxal_cli_core::runtime::StartupStatus,
+    startup: &[StartupStep],
     width: usize,
     height: usize,
     unicode: bool,
 ) -> Vec<StartupTimelineLine> {
-    use phoxal_cli_core::runtime::StartupStepState;
     // The overview panel has room for all four typed steps only on a normal
     // terminal. Preserve the compact active-step behaviour on short/narrow
     // displays so startup context never evicts controls or diagnostics.
     if height < 11 {
         let line = startup
-            .steps
             .iter()
             .find(|step| step.state == StartupStepState::Active)
             .map_or_else(
@@ -203,7 +197,6 @@ fn startup_timeline(
                     text: format!(
                         "{} steps complete",
                         startup
-                            .steps
                             .iter()
                             .filter(|step| step.state == StartupStepState::Done)
                             .count()
@@ -211,23 +204,26 @@ fn startup_timeline(
                     state: None,
                 },
                 |step| StartupTimelineLine {
-                    text: step.detail.as_deref().map_or_else(
-                        || format!("active: {}", startup_step_label(step.kind)),
-                        |detail| {
-                            format!(
-                                "active: {} · {}",
-                                startup_step_label(step.kind),
-                                sanitize(detail)
-                            )
-                        },
-                    ),
+                    text: step
+                        .detail
+                        .as_ref()
+                        .map(phoxal_supervisor_api::Detail::as_str)
+                        .map_or_else(
+                            || format!("active: {}", startup_step_label(step.kind)),
+                            |detail| {
+                                format!(
+                                    "active: {} · {}",
+                                    startup_step_label(step.kind),
+                                    sanitize(detail)
+                                )
+                            },
+                        ),
                     state: Some(step.state),
                 },
             );
         return vec![line];
     }
     startup
-        .steps
         .iter()
         .map(|step| {
             let marker = startup_marker(step.state, unicode);
@@ -245,8 +241,8 @@ fn startup_timeline(
             }
             let detail = step
                 .detail
-                .as_deref()
-                .map(sanitize)
+                .as_ref()
+                .map(|detail| sanitize(detail.as_str()))
                 .unwrap_or_else(|| match step.state {
                     StartupStepState::Pending => "waiting".to_string(),
                     _ => String::new(),
@@ -294,40 +290,46 @@ fn sanitize(value: &str) -> String {
 #[cfg(test)]
 mod startup_timeline_tests {
     use super::*;
-    use phoxal_cli_core::runtime::{StartupStatus, StartupStep, StartupStepKind, StartupStepState};
+    use phoxal_supervisor_api::Detail;
 
-    fn timeline() -> StartupStatus {
-        StartupStatus {
-            steps: vec![
-                StartupStep {
-                    kind: StartupStepKind::Project,
-                    state: StartupStepState::Done,
-                    detail: Some("robot.yaml · framework 0.45.2".to_string()),
-                    elapsed_ms: Some(125),
-                },
-                StartupStep {
-                    kind: StartupStepKind::PrepareRuntime,
-                    state: StartupStepState::Active,
-                    detail: Some("Cargo artifacts: 2/3".to_string()),
-                    elapsed_ms: None,
-                },
-                StartupStep {
-                    kind: StartupStepKind::Infrastructure,
-                    state: StartupStepState::Failed,
-                    detail: Some("bad\nrouter\u{1b}[31m".to_string()),
-                    elapsed_ms: Some(2_000),
-                },
-                StartupStep {
-                    kind: StartupStepKind::Graph,
-                    state: StartupStepState::Pending,
-                    detail: None,
-                    elapsed_ms: None,
-                },
-            ],
-        }
+    /// The daemon's own sequence, mid-flight: three steps behind it and two to
+    /// go.
+    fn timeline() -> Vec<StartupStep> {
+        vec![
+            StartupStep {
+                kind: StartupStepKind::Bundle,
+                state: StartupStepState::Done,
+                detail: Some(Detail::new(".phoxal/bundle")),
+                elapsed_ms: Some(125),
+            },
+            StartupStep {
+                kind: StartupStepKind::Requirements,
+                state: StartupStepState::Done,
+                detail: Some(Detail::new("6 participants")),
+                elapsed_ms: Some(4),
+            },
+            StartupStep {
+                kind: StartupStepKind::Binaries,
+                state: StartupStepState::Active,
+                detail: Some(Detail::new("validated 2/3")),
+                elapsed_ms: None,
+            },
+            StartupStep {
+                kind: StartupStepKind::Router,
+                state: StartupStepState::Failed,
+                detail: Some(Detail::new("bad\nrouter\u{1b}[31m")),
+                elapsed_ms: Some(2_000),
+            },
+            StartupStep {
+                kind: StartupStepKind::Participants,
+                state: StartupStepState::Pending,
+                detail: None,
+                elapsed_ms: None,
+            },
+        ]
     }
 
-    fn rendered(startup: &StartupStatus, width: usize, height: usize, unicode: bool) -> String {
+    fn rendered(startup: &[StartupStep], width: usize, height: usize, unicode: bool) -> String {
         startup_timeline(startup, width, height, unicode)
             .into_iter()
             .map(|line| line.text)
@@ -338,12 +340,12 @@ mod startup_timeline_tests {
     #[test]
     fn normal_height_renders_all_typed_states_details_and_elapsed_time() {
         let rendered = rendered(&timeline(), 100, 20, true);
-        assert_eq!(rendered.lines().count(), 4);
-        assert!(rendered.contains("✓ Project"), "{rendered}");
-        assert!(rendered.contains("◐ Prepare runtime"), "{rendered}");
-        assert!(rendered.contains("✗ Infrastructure"), "{rendered}");
-        assert!(rendered.contains("○ Robot graph"), "{rendered}");
-        assert!(rendered.contains("Cargo artifacts: 2/3"), "{rendered}");
+        assert_eq!(rendered.lines().count(), 5);
+        assert!(rendered.contains("✓ Bundle"), "{rendered}");
+        assert!(rendered.contains("◐ Binaries"), "{rendered}");
+        assert!(rendered.contains("✗ Router"), "{rendered}");
+        assert!(rendered.contains("○ Participants"), "{rendered}");
+        assert!(rendered.contains("validated 2/3"), "{rendered}");
         assert!(rendered.contains("2.0s"), "{rendered}");
         assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
     }
@@ -353,19 +355,16 @@ mod startup_timeline_tests {
         let rendered = rendered(&timeline(), 30, 20, true);
         assert_eq!(
             rendered,
-            "✓ Project\n◐ Prepare runtime\n✗ Infrastructure\n○ Robot graph"
+            "✓ Bundle\n✓ Requirements\n◐ Binaries\n✗ Router\n○ Participants"
         );
     }
 
     #[test]
     fn short_height_falls_back_to_sanitized_active_summary() {
         let mut startup = timeline();
-        startup.steps[1].detail = Some("compile\nstep\u{1b}[2J".to_string());
+        startup[2].detail = Some(Detail::new("validate\nstep\u{1b}[2J"));
         let rendered = rendered(&startup, 100, 10, true);
-        assert!(
-            rendered.starts_with("active: Prepare runtime · "),
-            "{rendered}"
-        );
+        assert!(rendered.starts_with("active: Binaries · "), "{rendered}");
         assert!(!rendered.contains('\n'), "{rendered:?}");
         assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
     }
@@ -375,7 +374,7 @@ mod startup_timeline_tests {
         // A bordered status panel loses one cell on every edge. The timeline
         // must decide from its drawable inner rect, not the outer layout rect.
         assert_eq!(rendered(&timeline(), 40, 10, true).lines().count(), 1);
-        assert_eq!(rendered(&timeline(), 40, 11, true).lines().count(), 4);
+        assert_eq!(rendered(&timeline(), 40, 11, true).lines().count(), 5);
         let narrow = rendered(&timeline(), 41, 20, true);
         assert_eq!(narrow, rendered(&timeline(), 40, 20, true));
         for line in narrow.lines() {
@@ -406,10 +405,10 @@ mod startup_timeline_tests {
     #[test]
     fn completed_short_timeline_reports_the_real_done_count() {
         let mut startup = timeline();
-        for step in &mut startup.steps {
+        for step in &mut startup {
             step.state = StartupStepState::Done;
         }
-        assert_eq!(rendered(&startup, 100, 10, true), "4 steps complete");
+        assert_eq!(rendered(&startup, 100, 10, true), "5 steps complete");
     }
 
     #[test]
@@ -417,7 +416,7 @@ mod startup_timeline_tests {
         let rendered = rendered(&timeline(), 30, 20, false);
         assert_eq!(
             rendered,
-            "[x] Project\n[>] Prepare runtime\n[!] Infrastructure\n[ ] Robot graph"
+            "[x] Bundle\n[x] Requirements\n[>] Binaries\n[!] Router\n[ ] Participants"
         );
     }
 }

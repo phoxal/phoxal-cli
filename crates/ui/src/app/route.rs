@@ -31,6 +31,15 @@ impl Default for FocusRoute {
 }
 
 impl FocusRoute {
+    /// The modal currently held open, if any.
+    #[must_use]
+    pub const fn modal(&self) -> Option<ModalId> {
+        match self {
+            Self::Modal { modal, .. } => Some(*modal),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub const fn page(&self) -> PageId {
         match self {

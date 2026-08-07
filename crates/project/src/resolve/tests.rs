@@ -1,5 +1,4 @@
 use super::*;
-use crate::paths::host::test_support::ScratchPhoxalHome;
 
 /// A minimal robot workspace whose locked train resolves to `0.1.0` via a
 /// local path dependency on a stub `phoxal` crate - no registry, no network.
@@ -32,7 +31,7 @@ fn locked_project_root() -> anyhow::Result<tempfile::TempDir> {
     )?;
     std::fs::write(
         root.path().join("components/fixture/component.yaml"),
-        "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+        "schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
     )?;
     std::fs::write(
         root.path().join("components/fixture/structure.urdf"),
@@ -94,7 +93,7 @@ fn minimal_robot_with_components(components: &str, extra: &str) -> anyhow::Resul
         (components, "[left_drive.motor]")
     };
     phoxal_cli_core::project::resolver::parse_robot_from_string(&format!(
-        r#"schema: robot/v0
+        r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -130,7 +129,7 @@ fn write_compiler_sources(root: &std::path::Path, robot: &Robot) -> anyhow::Resu
         std::fs::create_dir_all(&component_root)?;
         std::fs::write(
             component_root.join("component.yaml"),
-            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+            "schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
         )?;
         std::fs::write(
             component_root.join("structure.urdf"),
@@ -163,7 +162,6 @@ impl crate::Reporter for RecordingReporter {
 
 #[test]
 fn container_resolution_compiles_once_and_rejects_profile_drift() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
     write_compiler_sources(project.path(), &robot)?;
@@ -232,7 +230,6 @@ fn container_snapshot_uses_the_live_registry_cache_for_components_and_metadata()
         }
     }
 
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot_with_components(
         r#"
     left_drive:
@@ -250,7 +247,7 @@ fn container_snapshot_uses_the_live_registry_cache_for_components_and_metadata()
 
     let live = tempfile::tempdir()?;
     let cache_root = live.path().join(".phoxal/cache/registry");
-    let package = phoxal_cli_core::project::catalog::cargo_package_name("phoxal/component-wheel");
+    let package = phoxal_cli_catalog::cargo_package_name("phoxal/component-wheel");
     let version = "0.1.0";
     let manifest = format!(
         "[package]\nname = {package:?}\nversion = {version:?}\n\n[[bin]]\nname = {package:?}\npath = \"src/main.rs\"\n"
@@ -260,7 +257,7 @@ fn container_snapshot_uses_the_live_registry_cache_for_components_and_metadata()
     for (path, bytes) in [
         ("Cargo.toml", manifest.as_bytes()),
         ("src/main.rs", b"fn main() {}" as &[u8]),
-        ("component.yaml", b"schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n" as &[u8]),
+        ("component.yaml", b"schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n" as &[u8]),
         ("structure.urdf", br#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"# as &[u8]),
     ] {
         let mut header = tar::Header::new_gnu();
@@ -329,7 +326,6 @@ fn an_invalid_declaration_fails_before_locked_project_resolution() -> anyhow::Re
     // when there is no Cargo project at all (which would otherwise be the
     // first failure) - proving the ordering, not just the presence, of the
     // check.
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("services:\n  drive: {}\n")?;
     let error = resolve(&robot, Path::new("/nonexistent"), ResolveOptions::default())
         .expect_err("an official identity in services: must fail resolution");
@@ -343,7 +339,6 @@ fn an_invalid_declaration_fails_before_locked_project_resolution() -> anyhow::Re
 
 #[test]
 fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
 
@@ -364,8 +359,8 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
     // subject to any per-robot pruning.
     assert_eq!(
         resolved.platform_runtimes.len(),
-        catalog::NATIVE
-            .iter()
+        phoxal_cli_catalog::Catalog::official()
+            .native()
             .filter(|official| official.kind == ArtifactKind::Service)
             .count()
     );
@@ -373,7 +368,7 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
     // Anything the supervisor absorbed - or that became a local CLI concern -
     // must never resolve as an artifact: a stale catalog entry here is not a
     // compile error, it is a `cargo install` failure at run time for a package
-    // the train no longer publishes (organization#978).
+    // the train no longer publishes.
     for absorbed in [
         "router",
         "asset",
@@ -398,7 +393,6 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
 
 #[test]
 fn include_simulators_toggles_the_webots_controller_only() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
 
@@ -428,7 +422,6 @@ fn include_simulators_toggles_the_webots_controller_only() -> anyhow::Result<()>
 #[test]
 fn a_matching_workspace_service_crate_overrides_the_official_binary_without_declaration()
 -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
     let crate_dir = project.path().join("services/drive");
@@ -457,7 +450,6 @@ fn a_matching_workspace_service_crate_overrides_the_official_binary_without_decl
 
 #[test]
 fn a_declared_user_service_with_no_workspace_crate_fails_resolution() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("services:\n  mission: {}\n")?;
     let project = locked_project_root()?;
 
@@ -473,7 +465,6 @@ fn a_declared_user_service_with_no_workspace_crate_fails_resolution() -> anyhow:
 
 #[test]
 fn an_undiscovered_workspace_service_is_a_drift_diagnostic_not_an_error() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot("")?;
     let project = locked_project_root()?;
     let crate_dir = project.path().join("services/mission");
@@ -499,7 +490,6 @@ fn an_undiscovered_workspace_service_is_a_drift_diagnostic_not_an_error() -> any
 #[test]
 fn a_workspace_component_resolves_its_assets_and_driver_without_the_registry() -> anyhow::Result<()>
 {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot_with_components(
         r#"
     left_drive:
@@ -521,7 +511,10 @@ fn a_workspace_component_resolves_its_assets_and_driver_without_the_registry() -
         "[package]\nname = \"ddsm115\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"ddsm115\"\npath = \"src/main.rs\"\n",
     )?;
     std::fs::write(crate_dir.join("src/main.rs"), "fn main() {}")?;
-    std::fs::write(crate_dir.join("component.yaml"), "schema: component/v0\n")?;
+    std::fs::write(
+        crate_dir.join("component.yaml"),
+        "schema: phoxal/component/v0\n",
+    )?;
     declare_workspace_member(project.path(), "components/ddsm115")?;
     write_lock(project.path(), &["ddsm115"])?;
     let crate_dir = crate_dir.canonicalize()?;
@@ -537,7 +530,6 @@ fn a_workspace_component_resolves_its_assets_and_driver_without_the_registry() -
 
 #[test]
 fn local_component_roots_are_independent_of_driver_intent() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let driverless_robot = minimal_robot_with_components(
         r#"
     left_drive:
@@ -672,7 +664,10 @@ fn direct_component_scan_distinguishes_asset_only_and_invalid_driver_shapes() ->
 
     let nonmember = project.path().join("components/nonmember");
     std::fs::create_dir_all(nonmember.join("src"))?;
-    std::fs::write(nonmember.join("component.yaml"), "schema: component/v0\n")?;
+    std::fs::write(
+        nonmember.join("component.yaml"),
+        "schema: phoxal/component/v0\n",
+    )?;
     std::fs::write(
         nonmember.join("Cargo.toml"),
         "[package]\nname = \"nonmember\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"nonmember\"\npath = \"src/main.rs\"\n",
@@ -699,7 +694,10 @@ fn direct_component_driver_requires_the_root_locked_workspace() -> anyhow::Resul
     let standalone = tempfile::tempdir()?;
     let component = standalone.path().join("components/standalone");
     std::fs::create_dir_all(component.join("src"))?;
-    std::fs::write(component.join("component.yaml"), "schema: component/v0\n")?;
+    std::fs::write(
+        component.join("component.yaml"),
+        "schema: phoxal/component/v0\n",
+    )?;
     std::fs::write(
         component.join("Cargo.toml"),
         "[package]\nname = \"standalone\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[[bin]]\nname = \"standalone\"\npath = \"src/main.rs\"\n",
@@ -749,7 +747,7 @@ fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_dr
         for (path, bytes) in [
             ("Cargo.toml", manifest.as_bytes()),
             ("src/main.rs", b"fn main() {}" as &[u8]),
-            ("component.yaml", b"schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n" as &[u8]),
+            ("component.yaml", b"schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n" as &[u8]),
             ("structure.urdf", br#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"# as &[u8]),
         ] {
             let mut header = tar::Header::new_gnu();
@@ -768,9 +766,7 @@ fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_dr
         br#"{"dl":"https://download.invalid/{lowerprefix}/{crate}/{version}.crate"}"#.to_vec(),
     )]);
     for id in ["left", "right"] {
-        let package = phoxal_cli_core::project::catalog::cargo_package_name(&format!(
-            "phoxal/component-{id}"
-        ));
+        let package = phoxal_cli_catalog::cargo_package_name(&format!("phoxal/component-{id}"));
         let bytes = archive(&package, version)?;
         let checksum = hex::encode(sha2::Sha256::digest(&bytes));
         let index = crate::registry_package::index_path(&package)?;
@@ -826,7 +822,7 @@ fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_dr
         project.path(),
         ResolveOptions {
             offline: true,
-            drivers: phoxal_cli_core::project::layout::DriverSelection::None,
+            drivers: phoxal_cli_core::project::intent::DriverSelection::None,
             ..Default::default()
         },
     )?;
@@ -848,7 +844,7 @@ fn direct_component_directory_symlinks_are_rejected() -> anyhow::Result<()> {
     let external = tempfile::tempdir()?;
     std::fs::write(
         external.path().join("component.yaml"),
-        "schema: component/v0\n",
+        "schema: phoxal/component/v0\n",
     )?;
     std::os::unix::fs::symlink(external.path(), project.path().join("components/external"))?;
     let error = discover_local_components(project.path(), false)
@@ -886,7 +882,6 @@ fn components_root_symlink_is_rejected() -> anyhow::Result<()> {
 /// `source_manifest` for reporting.
 #[test]
 fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
     let robot = minimal_robot_with_components(
         r#"
     left_drive:
@@ -908,7 +903,10 @@ fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
         "[package]\nname = \"ddsm115\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"ddsm115\"\npath = \"src/main.rs\"\n",
     )?;
     std::fs::write(crate_dir.join("src/main.rs"), "fn main() {}")?;
-    std::fs::write(crate_dir.join("component.yaml"), "schema: component/v0\n")?;
+    std::fs::write(
+        crate_dir.join("component.yaml"),
+        "schema: phoxal/component/v0\n",
+    )?;
     declare_workspace_member(project.path(), "components/ddsm115")?;
     write_lock(project.path(), &["ddsm115"])?;
 
@@ -916,7 +914,7 @@ fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
         &robot,
         project.path(),
         ResolveOptions {
-            drivers: phoxal_cli_core::project::layout::DriverSelection::None,
+            drivers: phoxal_cli_core::project::intent::DriverSelection::None,
             ..ResolveOptions::default()
         },
     )?;

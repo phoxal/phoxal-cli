@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 use phoxal_manifest::{AssetId, CompiledProject, Participant};
 
-use super::catalog::ArtifactKind;
+use phoxal_cli_catalog::ArtifactKind;
 
 const ROBOT_FILE: &str = "robot.yaml";
 
@@ -30,7 +30,7 @@ pub struct ResolveOptions {
     /// for. `run`'s driver policy threads through here so an excluded driver is
     /// never resolved - not even to select its target artifact (#936).
     /// Everything except driver-filtered resident staging resolves `All`.
-    pub drivers: crate::project::layout::DriverSelection,
+    pub drivers: crate::project::intent::DriverSelection,
     /// Whether simulator-only artifacts belong to this resolution.
     ///
     /// Host run/check/simulation paths keep them. A native runtime bundle does
@@ -49,14 +49,14 @@ impl Default for ResolveOptions {
     fn default() -> Self {
         Self {
             official_target_triple: None,
-            drivers: crate::project::layout::DriverSelection::default(),
+            drivers: crate::project::intent::DriverSelection::default(),
             include_simulators: true,
             offline: false,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct BundlePlan {
     pub source_manifest: Robot,
     /// The single canonical compiler output consumed by staging, launch
@@ -81,33 +81,28 @@ pub struct BundlePlan {
     pub path_overrides: Vec<ResolvedPathOverride>,
 }
 
-/// Owned, comparison-friendly representation of [`CompiledProject`].
+/// The compiler output the CLI keeps in memory while it finalizes a bundle.
 ///
-/// The framework keeps canonical model storage private. The CLI therefore
-/// retains its deterministic wire encoding, normalized participant
-/// declarations, and logical assets without inventing a parallel model.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// The canonical model is deliberately NOT persisted: a finalized bundle
+/// carries exactly one robot definition, the finalized `robot.yaml`, and the
+/// canonical [`phoxal_model::Robot`] is rebuilt from it in memory by the
+/// framework's own bundle loader. There is no `robot.json`.
+#[derive(Debug, Clone)]
 pub struct CompiledBundle {
-    pub robot: Vec<u8>,
+    pub robot: phoxal_model::Robot,
     pub participants: Vec<Participant>,
     pub assets: BTreeMap<AssetId, Vec<u8>>,
 }
 
 impl CompiledBundle {
-    pub fn from_project(project: CompiledProject) -> Result<Self> {
+    #[must_use]
+    pub fn from_project(project: CompiledProject) -> Self {
         let (robot, participants, assets) = project.into_parts();
-        Ok(Self {
-            robot: robot
-                .encode()
-                .context("failed to encode the compiled canonical robot")?,
+        Self {
+            robot,
             participants: participants.into_vec(),
             assets: assets.into_map(),
-        })
-    }
-
-    pub fn decode_robot(&self) -> Result<phoxal_model::Robot> {
-        phoxal_model::Robot::decode(&self.robot)
-            .context("failed to decode the compiled canonical robot")
+        }
     }
 }
 
@@ -346,18 +341,41 @@ mod tests {
         );
     }
 
+    /// Both version directions reach the operator as the gate's own message,
+    /// not as serde's unknown-variant text - and each one points at the side
+    /// that actually has to move.
     #[test]
     fn load_robot_gates_an_unsupported_schema_revision_before_parsing() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join(ROBOT_FILE);
+
+        // The document is newer than the tool.
+        let newer = dir.path().join(ROBOT_FILE);
         std::fs::write(
-            &path,
-            "schema: robot/v1\nrobot:\n  id: rover\n  namespace: dev\n",
+            &newer,
+            "schema: phoxal/robot/v1\nrobot:\n  id: rover\n  namespace: dev\n",
         )?;
-        let error = load_robot(&path).expect_err("robot/v1 must be gated");
-        let message = format!("{error:#}");
-        assert!(message.contains("robot/v1"), "{message}");
-        assert!(message.contains("Update phoxal-cli"), "{message}");
+        let message = format!(
+            "{:#}",
+            load_robot(&newer).expect_err("phoxal/robot/v1 must be gated")
+        );
+        assert!(message.contains("phoxal/robot/v1"), "{message}");
+        assert!(message.contains("Update the phoxal CLI"), "{message}");
+        assert!(!message.contains("unknown variant"), "{message}");
+
+        // The document is older than the tool: a project authored against the
+        // 0.53-era CLI, whose grammar tag was not namespaced yet.
+        let older = dir.path().join("stale.robot.yaml");
+        std::fs::write(
+            &older,
+            "schema: robot/v0\nrobot:\n  id: rover\n  namespace: dev\n",
+        )?;
+        let message = format!(
+            "{:#}",
+            load_robot(&older).expect_err("the unnamespaced spelling must be gated")
+        );
+        assert!(message.contains("`robot/v0`"), "{message}");
+        assert!(message.contains("phoxal/robot/v0"), "{message}");
+        assert!(message.contains("Change its `schema:` tag"), "{message}");
         assert!(!message.contains("unknown variant"), "{message}");
         Ok(())
     }

@@ -1,6 +1,5 @@
 //! Pure process-launch values shared by project preparation and supervision.
 
-use crate::identity::ProducerId;
 use crate::runtime::{
     ParticipantInstanceKey, ParticipantKind, ProcessKey, ReadinessPolicy, RobotKey,
     RuntimeFailurePolicy, StartupRequirement,
@@ -45,11 +44,9 @@ impl EncodedParticipantEnv {
 pub const ENV_TO_FLAG: &[(&str, &str)] = &[
     (env::PARTICIPANT_ID, "--participant-id"),
     (env::ROBOT_ID, "--robot-id"),
-    (env::NAMESPACE, "--namespace"),
     (env::BUNDLE_ROOT, "--bundle-root"),
     (env::COMPONENT_INSTANCE, "--component-instance"),
     (env::EXECUTION_ID, "--execution-id"),
-    (env::PRODUCER_ID, "--producer-id"),
     (env::EXECUTION_ORIGIN, "--execution-origin"),
     (env::CONNECT, "--connect"),
     (env::CONFIG, "--config"),
@@ -109,12 +106,14 @@ pub struct ParticipantSpec {
 }
 
 impl ParticipantSpec {
+    /// Readiness observed from the participant's own liveliness token. The
+    /// supervisor waits on the stable identity and learns the producer from
+    /// whichever session actually publishes it.
     #[must_use]
-    pub fn exact_liveliness_template(robot: RobotKey, participant: &str) -> ReadinessPolicy {
+    pub fn exact_liveliness(robot: RobotKey, participant: &str) -> ReadinessPolicy {
         ReadinessPolicy::ExactLiveliness(ParticipantInstanceKey {
             robot,
             participant: participant.to_string(),
-            producer: ProducerId::mint(),
         })
     }
 
@@ -191,9 +190,7 @@ mod tests {
         ParticipantLaunch {
             participant_id: participant_id.to_string(),
             execution: crate::identity::ExecutionId::mint(),
-            producer: crate::identity::ProducerId::mint(),
             execution_origin: None,
-            namespace: "dev".to_string(),
             robot_id: "testbot".to_string(),
             bus: BusProfile {
                 connect_endpoints: vec!["tcp/localhost:7447".to_string()],

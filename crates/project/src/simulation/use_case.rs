@@ -41,8 +41,14 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
             request.reporter.as_ref(),
         )?
     };
-    let candidate = crate::stage::begin_runtime_layout(&resolved.project_root, &resolved.resolved)
-        .context("failed to stage the simulation runtime layout")?;
+    // A simulation bundle is `clock: simulated` with every driver block
+    // stripped; the daemon never learns it is a simulation from anything else.
+    let candidate = crate::stage::begin_runtime_layout(
+        &resolved.project_root,
+        &resolved.resolved,
+        &phoxal_cli_core::project::intent::RunIntent::simulated(),
+    )
+    .context("failed to stage the simulation bundle")?;
     let mut plan = crate::progress::run_phase(
         request.reporter.as_ref(),
         crate::PhaseId::new("check"),
@@ -81,7 +87,7 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
         request.reporter.as_ref(),
         crate::PhaseId::new("publish"),
         "Publishing simulation runtime layout",
-        || crate::stage::publish_runtime_layout(candidate, &resolved.resolved),
+        || crate::stage::publish_runtime_layout(candidate),
     )?;
     for participant in &mut participants {
         if let Some(spec) = participant.launch.as_mut() {
@@ -103,8 +109,9 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
     crate::run::prepare::apply_session_connect(&mut plan, &mut participants, &router.endpoint);
 
     crate::progress::ensure_active(request.reporter.as_ref())?;
-    super::webots::root::wipe_and_recreate()?;
+    super::webots::root::wipe_and_recreate(&resolved.project_root)?;
     let staged_world = super::webots::staging::stage_simulation_for_robot(
+        &resolved.project_root,
         &resolved.world_path,
         &resolved.resolved,
         &plan,
@@ -148,11 +155,10 @@ pub(crate) fn prepare_simulation(request: PrepareSimulationRequest) -> Result<Pr
         note: None,
         launch: Some(webots_spec),
     });
-    let webots_stage_root = super::webots::root::root()?;
+    let webots_stage_root = super::webots::root::root(&resolved.project_root);
     Ok(PreparedExecution {
         target: request.target,
         project_root: resolved.project_root,
-        manual_input: crate::manual_input_from_staged_root(&staged_root),
         staged_root,
         train: resolved.resolved.train.clone(),
         plan,
@@ -206,10 +212,8 @@ mod tests {
             )]
         );
         assert!(
-            env.iter().all(|(key, _)| {
-                key != phoxal_runtime_contract::env::EXECUTION_ORIGIN
-                    && key != phoxal_runtime_contract::env::PRODUCER_ID
-            }),
+            env.iter()
+                .all(|(key, _)| { key != phoxal_runtime_contract::env::EXECUTION_ORIGIN }),
             "Webots must not receive bus or time-authority identity"
         );
     }

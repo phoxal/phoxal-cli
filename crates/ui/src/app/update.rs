@@ -3,12 +3,11 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-use phoxal_cli_core::runtime::{ParticipantKind, ProcessScope, ProjectLifecycle};
 use phoxal_cli_observation::{
-    AttachmentEvent, LogAnchor, LogFilters, LogQuery, LogRead, LogRow, ProcessObservation,
-    ProcessTable, QueryToken, RobotScope, RuntimeQuery, RuntimeRead, RuntimeRow, StoreChanged,
-    StoreRevision, WindowDirection,
+    AttachmentEvent, LogAnchor, LogFilters, LogQuery, LogRead, LogRow, ProcessTable, QueryToken,
+    RuntimeQuery, RuntimeRead, RuntimeRow, StoreChanged, StoreRevision, WindowDirection,
 };
+use phoxal_supervisor_api::Lifecycle;
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
 use crate::components::input::InputModel;
@@ -28,6 +27,7 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
     let effects = match message {
         Msg::Wake => Vec::new(),
         Msg::Terminate => detach(model),
+        Msg::Interrupt => interrupt(model),
         Msg::Diagnostic(message) => {
             model.overview.push_diagnostic(message);
             Vec::new()
@@ -43,8 +43,44 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
     effects
 }
 
+/// Leave the session without touching the execution.
+///
+/// In a simulation session there is nothing to leave behind: the client owns
+/// Webots, so detaching would strand a simulator with no operator
+///. `q` there means "end the session", which is a stop.
 fn detach(model: &mut AppModel) -> Vec<Effect> {
+    if !model.detachable {
+        return request_stop(model);
+    }
     model.exit = Some(AttachmentOutcome::Detached);
+    Vec::new()
+}
+
+/// Ask the supervisor to end the execution, then keep rendering.
+///
+/// The session does NOT exit here. It exits when the supervisor's own terminal
+/// snapshot arrives, or when its identity token is lost - so an operator sees
+/// the graph shutting down rather than a terminal that closed on a hope.
+fn request_stop(model: &mut AppModel) -> Vec<Effect> {
+    close_modal(model);
+    if model.stop_requested {
+        return Vec::new();
+    }
+    model.stop_requested = true;
+    vec![Effect::StopProject]
+}
+
+/// What Ctrl+C means.
+///
+/// The first one opens the confirmation and sends nothing: an interrupt in a
+/// terminal that is driving a robot must never be one keystroke away from
+/// stopping it by reflex. The second one, with the confirmation already up, is
+/// the confirmation.
+fn interrupt(model: &mut AppModel) -> Vec<Effect> {
+    if model.route.modal() == Some(ModalId::ConfirmStop) {
+        return request_stop(model);
+    }
+    open_modal(model, ModalId::ConfirmStop);
     Vec::new()
 }
 
@@ -69,15 +105,15 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
                 phoxal_cli_observation::ConnectionObservation::Lost { .. }
             ) && model.exit.is_none()
             {
-                model.exit = Some(AttachmentOutcome::ResidentFailed { reason: None });
+                model.exit = Some(AttachmentOutcome::ExecutionFailed { reason: None });
             }
             model.overview.connection = Some(connection);
             Vec::new()
         }
         AttachmentEvent::SupervisorChanged(supervisor) => {
             model.exit = match supervisor.lifecycle {
-                ProjectLifecycle::Stopped => Some(AttachmentOutcome::ResidentStopped),
-                ProjectLifecycle::Failed => Some(AttachmentOutcome::ResidentFailed {
+                Lifecycle::Stopped => Some(AttachmentOutcome::ExecutionStopped),
+                Lifecycle::Failed => Some(AttachmentOutcome::ExecutionFailed {
                     reason: supervisor.failure.clone(),
                 }),
                 _ => model.exit.clone(),
@@ -151,45 +187,19 @@ fn preserve_process_candidate(
         .runtimes
         .candidate
         .as_ref()
-        .is_none_or(|candidate| !processes.get(candidate).is_some_and(process_is_runtime))
+        .is_none_or(|candidate| !processes.contains_key(candidate))
     {
-        model.runtimes.candidate = processes
-            .iter()
-            .find(|(_, process)| process_is_runtime(process))
-            .map(|(key, _)| key.clone());
+        model.runtimes.candidate = processes.keys().next().cloned();
     }
     let detail_cleared = model
         .runtimes
         .detail
         .as_ref()
-        .is_some_and(|detail| !processes.get(detail).is_some_and(process_is_runtime));
+        .is_some_and(|detail| !processes.contains_key(detail));
     if detail_cleared {
         model.runtimes.detail = None;
     }
     detail_cleared
-}
-
-pub(crate) fn process_is_runtime(process: &ProcessObservation) -> bool {
-    matches!(
-        process.kind,
-        ParticipantKind::Brain | ParticipantKind::Service | ParticipantKind::Driver
-    ) && (process.user_service || !is_known_internal_id(&process.key.id))
-}
-
-fn is_known_internal_id(id: &str) -> bool {
-    id.eq_ignore_ascii_case("phoxal-cli")
-        || starts_with_ignore_ascii_case(id, "phoxal-cli/")
-        || id.eq_ignore_ascii_case("supervisor")
-        || id.eq_ignore_ascii_case(phoxal_cli_core::runtime::WEBOTS_PROCESS_ID)
-        || starts_with_ignore_ascii_case(id, "webots-")
-        || starts_with_ignore_ascii_case(id, "simulator-")
-}
-
-fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
-    value
-        .as_bytes()
-        .get(..prefix.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 fn newest(current: Option<StoreRevision>, incoming: StoreRevision) -> StoreRevision {
@@ -221,7 +231,6 @@ fn issue_logs_if_idle(model: &mut AppModel) -> Option<Effect> {
             filters: LogFilters {
                 participant: non_empty(&model.logs.participant),
                 minimum_severity: model.logs.severity.minimum(),
-                scope: None,
             },
             anchor: model
                 .logs
@@ -264,10 +273,12 @@ fn log_matches_source(source: LogSourceFilter, row: &LogRow, processes: &Process
     if source == LogSourceFilter::All {
         return true;
     }
-    let runtime = processes.iter().any(|(key, process)| {
-        (key.id == row.participant || key.to_string() == row.participant)
-            && process_is_runtime(process)
-    });
+    // Every row in the snapshot is a supervised participant, so a log whose
+    // participant matches one came from the graph; anything else came from the
+    // supervisor itself.
+    let runtime = processes
+        .keys()
+        .any(|key| participant_id(key) == row.participant);
     match source {
         LogSourceFilter::All => true,
         LogSourceFilter::Runtimes => runtime,
@@ -297,7 +308,7 @@ fn issue_runtimes_if_idle(model: &mut AppModel) -> Option<Effect> {
         observed_revision: revision,
         token,
         body: RuntimeQuery {
-            participant: model.runtimes.detail.as_ref().map(|key| key.id.clone()),
+            participant: model.runtimes.detail.as_ref().map(participant_id),
             direction: WindowDirection::Forward,
             limit: RUNTIME_WINDOW_LIMIT,
         },
@@ -317,27 +328,25 @@ fn accept_runtimes(
             Some(newest(model.runtimes.dirty_revision, observed_revision));
         return issue_runtimes_if_idle(model).into_iter().collect();
     }
-    let detail_scope = model
-        .runtimes
-        .detail
-        .as_ref()
-        .and_then(|key| match &key.scope {
-            ProcessScope::Robot(robot) => Some(robot),
-            ProcessScope::Project => None,
-        });
-    let mut newest_rows = BTreeMap::<(RobotScope, String), RuntimeRow>::new();
-    for row in window.rows.iter().filter(|row| {
-        detail_scope.is_none_or(|scope| {
-            row.scope.namespace == scope.namespace && row.scope.robot_id == scope.robot_id
-        })
-    }) {
-        let key = (row.scope.clone(), row.sample.participant_id.clone());
-        newest_rows.insert(key, row.clone());
+    let mut newest_rows = BTreeMap::<String, RuntimeRow>::new();
+    for row in window.rows.iter() {
+        newest_rows.insert(row.sample.participant_id.clone(), row.clone());
     }
     model.runtimes.rows = newest_rows.into_values().collect();
     model.runtimes.known_revision = window.revision;
     model.runtimes.in_flight = None;
     issue_runtimes_if_idle(model).into_iter().collect()
+}
+
+/// The participant id a supervisor log or telemetry record is stamped with,
+/// for the process key that denotes the same participant.
+fn participant_id(key: &phoxal_supervisor_api::ProcessKey) -> String {
+    use phoxal_supervisor_api::ProcessKey;
+    match key {
+        ProcessKey::Brain => "brain".to_string(),
+        ProcessKey::Service { id } | ProcessKey::Simulator { id } => id.as_str().to_string(),
+        ProcessKey::Driver { instance } => instance.as_str().to_string(),
+    }
 }
 
 fn non_empty(value: &str) -> Option<String> {
@@ -355,8 +364,12 @@ fn update_navigation(model: &mut AppModel, message: NavigationMsg) -> Vec<Effect
 }
 
 fn handle_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
+    // Ctrl+C is the stop gesture, and it takes two: the first opens the
+    // confirmation and sends nothing, the second confirms.
+    // It is handled before the modal branch so the second one is not consumed
+    // as an ordinary modal key.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == Key::Char('c') {
-        return detach(model);
+        return interrupt(model);
     }
     if matches!(model.route, FocusRoute::Modal { .. }) {
         return handle_modal_key(model, key);
@@ -376,10 +389,6 @@ fn handle_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
     }
     if key.code == Key::Char('q') {
         return detach(model);
-    }
-    if key.code == Key::Char('S') {
-        open_modal(model, ModalId::ConfirmStop);
-        return Vec::new();
     }
     if let Key::Char(digit) = key.code
         && let Some(page) = page_for_digit(digit)
@@ -529,13 +538,7 @@ fn handle_runtimes_key(model: &mut AppModel, panel: RuntimesPanelId, key: KeyEve
 }
 
 fn move_process_candidate(model: &mut AppModel, delta: isize) {
-    let keys: Vec<_> = model
-        .overview
-        .processes
-        .iter()
-        .filter(|(_, process)| process_is_runtime(process))
-        .map(|(key, _)| key.clone())
-        .collect();
+    let keys: Vec<_> = model.overview.processes.keys().cloned().collect();
     if keys.is_empty() {
         model.runtimes.candidate = None;
         return;
@@ -562,8 +565,7 @@ fn restart_effect(model: &AppModel) -> Result<Effect, String> {
         .processes
         .get(&process)
         .ok_or_else(|| format!("selected process `{process}` is no longer present"))?
-        .entry
-        .status
+        .row
         .producer
         .ok_or_else(|| format!("process `{process}` has no restartable producer"))?;
     Ok(Effect::Restart {
@@ -774,9 +776,13 @@ fn handle_modal_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
             close_modal(model);
             Vec::new()
         }
-        Key::Enter if modal == ModalId::ConfirmStop => {
+        Key::Enter if modal == ModalId::ConfirmStop => request_stop(model),
+        // `q` is always detach, including out of the confirmation: a modal an
+        // operator opened by reflex must have an exit that does nothing to the
+        // robot.
+        Key::Char('q') if modal == ModalId::ConfirmStop => {
             close_modal(model);
-            vec![Effect::StopProject]
+            detach(model)
         }
         _ => Vec::new(),
     }
@@ -789,25 +795,23 @@ mod tests {
     use std::time::Instant;
 
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_cli_core::runtime::{
-        ParticipantKind, ParticipantState, ProcessDescriptor, ProcessEntry, ProcessKey,
-        ProcessStatus, RobotKey, StartupRequirement, StartupStatus,
-    };
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, Freshness, InputObservation, JoypadDevice,
         JoypadDeviceStatus, JoypadDevicesSample, LogSeverity, LogSource, LogWindow,
         ObservationWindow, ProcessObservation, SupervisorObservation,
     };
+    use phoxal_runtime_contract::ProducerId;
+    use phoxal_supervisor_api::{
+        DaemonFailure, DaemonFailureReason, DesiredState, Detail, ExecutionMode, Name, Process,
+        ProcessKey, ProcessState, RobotIdentity, StartupRequirement,
+    };
 
     use super::*;
 
     fn epoch() -> AttachmentEpoch {
-        AttachmentEpoch {
-            supervisor_generation: 1,
-            execution_id: ExecutionId::parse(&"0".repeat(ExecutionId::LEN))
-                .expect("fixed execution id"),
-            graph_generation: 1,
-        }
+        AttachmentEpoch::new(
+            ExecutionId::parse(&"1".repeat(ExecutionId::LEN)).expect("fixed execution id"),
+        )
     }
 
     #[test]
@@ -873,10 +877,7 @@ mod tests {
         };
         for window in [
             ObservationWindow {
-                epoch: AttachmentEpoch {
-                    graph_generation: 2,
-                    ..epoch()
-                },
+                epoch: AttachmentEpoch::new(ExecutionId::mint()),
                 revision: StoreRevision(5),
                 token: read.token,
                 rows: Arc::from([]),
@@ -974,27 +975,21 @@ mod tests {
         assert!(model.logs.pause_anchor.is_some());
     }
 
+    /// Every row in the snapshot is a supervised participant, so the split is
+    /// "came from the graph" versus "came from the supervisor or this client"
+    ///.
     #[test]
-    fn log_source_filter_separates_runtime_participants_from_host_processes() {
-        let runtime_key = ProcessKey::project("drive");
-        let tool_key = ProcessKey::project("webots");
-        let processes = BTreeMap::from([
-            (
-                runtime_key.clone(),
-                process_with_kind(runtime_key, ParticipantKind::Service),
-            ),
-            (
-                tool_key.clone(),
-                process_with_kind(tool_key, ParticipantKind::Host),
-            ),
-        ]);
+    fn log_source_filter_separates_supervised_participants_from_everything_else() {
+        let runtime_key = ProcessKey::Service {
+            id: Name::new("drive"),
+        };
+        let processes = BTreeMap::from([(runtime_key.clone(), process(runtime_key))]);
         let row = |participant: &str| LogRow {
             participant: participant.to_string(),
             source: LogSource::Raw,
             severity: LogSeverity::Info,
             text: String::new(),
             event_time: std::time::SystemTime::UNIX_EPOCH,
-            scope: None,
         };
 
         assert!(log_matches_source(
@@ -1016,15 +1011,10 @@ mod tests {
             log_matches_source(LogSourceFilter::System, &row("phoxal-cli"), &processes),
             "unmatched local diagnostics belong to the system stream"
         );
-        let internal_key = ProcessKey::project("supervisor");
-        let mut internal = process_with_kind(internal_key.clone(), ParticipantKind::Service);
-        internal.user_service = false;
-        let processes = BTreeMap::from([(internal_key, internal)]);
-        assert!(log_matches_source(
-            LogSourceFilter::System,
-            &row("supervisor"),
-            &processes
-        ));
+        assert!(
+            log_matches_source(LogSourceFilter::System, &row("supervisor"), &processes),
+            "the supervisor's own records are never graph records"
+        );
     }
 
     #[test]
@@ -1072,8 +1062,18 @@ mod tests {
         assert!(!matches!(model.route, FocusRoute::Modal { .. }));
     }
 
+    fn control_c() -> Msg {
+        Msg::Navigate(NavigationMsg::Key(KeyEvent::new(
+            Key::Char('c'),
+            KeyModifiers::CONTROL,
+        )))
+    }
+
+    /// `q` detaches and leaves the daemon running; Ctrl+C takes two presses to
+    /// stop, and the session keeps rendering until the supervisor's own
+    /// terminal snapshot arrives.
     #[test]
-    fn stop_requires_confirmation_while_q_only_detaches() {
+    fn q_detaches_while_stopping_takes_two_interrupts_and_then_waits() {
         let mut model = AppModel::default();
         let detach = update(
             &mut model,
@@ -1083,24 +1083,62 @@ mod tests {
         assert_eq!(model.exit, Some(AttachmentOutcome::Detached));
 
         let mut model = AppModel::default();
-        let open = update(
-            &mut model,
-            Msg::Navigate(NavigationMsg::Key(Key::Char('S').into())),
+        let first = update(&mut model, control_c());
+        assert!(first.is_empty(), "the first interrupt sends nothing");
+        assert_eq!(model.route.modal(), Some(ModalId::ConfirmStop));
+
+        let second = update(&mut model, control_c());
+        assert_eq!(second, vec![Effect::StopProject]);
+        assert!(model.stop_requested);
+        assert_eq!(
+            model.exit, None,
+            "the session waits for the supervisor's terminal snapshot"
         );
-        assert!(open.is_empty());
-        assert!(matches!(
-            model.route,
-            FocusRoute::Modal {
-                modal: ModalId::ConfirmStop,
-                ..
-            }
-        ));
+
+        // A third interrupt does not send a second stop.
+        assert!(update(&mut model, control_c()).is_empty());
+    }
+
+    /// A modal opened by reflex must have an exit that does nothing to the
+    /// robot, and Esc must simply cancel.
+    #[test]
+    fn q_in_the_confirmation_detaches_and_escape_cancels() {
+        let mut model = AppModel::default();
+        update(&mut model, control_c());
+        let detach = update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Char('q').into())),
+        );
+        assert!(detach.is_empty());
+        assert_eq!(model.exit, Some(AttachmentOutcome::Detached));
+
+        let mut model = AppModel::default();
+        update(&mut model, control_c());
+        let cancelled = update(
+            &mut model,
+            Msg::Navigate(NavigationMsg::Key(Key::Esc.into())),
+        );
+        assert!(cancelled.is_empty());
+        assert_eq!(model.route.modal(), None);
+        assert_eq!(model.exit, None);
+        assert!(!model.stop_requested);
+    }
+
+    /// A simulation session is not detachable: the client owns Webots, so `q`
+    /// ends the whole session rather than stranding a simulator.
+    #[test]
+    fn q_in_a_simulation_session_stops_instead_of_detaching() {
+        let mut model = AppModel {
+            detachable: false,
+            ..AppModel::default()
+        };
         let stop = update(
             &mut model,
-            Msg::Navigate(NavigationMsg::Key(Key::Enter.into())),
+            Msg::Navigate(NavigationMsg::Key(Key::Char('q').into())),
         );
         assert_eq!(stop, vec![Effect::StopProject]);
         assert_eq!(model.exit, None);
+        assert!(model.stop_requested);
     }
 
     #[test]
@@ -1109,12 +1147,12 @@ mod tests {
         update(
             &mut model,
             Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(supervisor(
-                ProjectLifecycle::Failed,
+                Lifecycle::Failed,
             )))),
         );
         assert_eq!(
             model.exit,
-            Some(AttachmentOutcome::ResidentFailed { reason: None })
+            Some(AttachmentOutcome::ExecutionFailed { reason: None })
         );
     }
 
@@ -1125,16 +1163,19 @@ mod tests {
             &mut model,
             Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(
                 supervisor_with_failure(
-                    ProjectLifecycle::Failed,
+                    Lifecycle::Failed,
                     Some("catalog train floor not supported: 0.41.2 < 0.42.0"),
                 ),
             ))),
         );
         assert_eq!(
             model.exit,
-            Some(AttachmentOutcome::ResidentFailed {
-                reason: Some("catalog train floor not supported: 0.41.2 < 0.42.0".to_string())
-            })
+            model.exit.clone().filter(|exit| matches!(
+                exit,
+                AttachmentOutcome::ExecutionFailed { reason: Some(failure) }
+                    if failure.detail.as_str()
+                        == "catalog train floor not supported: 0.41.2 < 0.42.0"
+            ))
         );
     }
 
@@ -1148,7 +1189,7 @@ mod tests {
                 },
             ));
             let failed = Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(
-                supervisor_with_failure(ProjectLifecycle::Failed, Some("prepare failed")),
+                supervisor_with_failure(Lifecycle::Failed, Some("prepare failed")),
             )));
             if lost_first {
                 update(&mut model, lost);
@@ -1157,12 +1198,14 @@ mod tests {
                 update(&mut model, failed);
                 update(&mut model, lost);
             }
-            assert_eq!(
-                model.exit,
-                Some(AttachmentOutcome::ResidentFailed {
-                    reason: Some("prepare failed".to_string())
-                }),
-                "lost_first={lost_first}"
+            assert!(
+                matches!(
+                    &model.exit,
+                    Some(AttachmentOutcome::ExecutionFailed { reason: Some(failure) })
+                        if failure.detail.as_str() == "prepare failed"
+                ),
+                "lost_first={lost_first}: {:?}",
+                model.exit
             );
         }
     }
@@ -1184,7 +1227,7 @@ mod tests {
         // own supervisor.log pointer instead.
         assert_eq!(
             model.exit,
-            Some(AttachmentOutcome::ResidentFailed { reason: None })
+            Some(AttachmentOutcome::ExecutionFailed { reason: None })
         );
     }
 
@@ -1199,7 +1242,7 @@ mod tests {
                     },
                 ));
                 let stopped = Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(
-                    supervisor(ProjectLifecycle::Stopped),
+                    supervisor(Lifecycle::Stopped),
                 )));
                 if lost_first {
                     update(&mut model, lost);
@@ -1208,15 +1251,19 @@ mod tests {
                     update(&mut model, stopped);
                     update(&mut model, lost);
                 }
-                assert_eq!(model.exit, Some(AttachmentOutcome::ResidentStopped));
+                assert_eq!(model.exit, Some(AttachmentOutcome::ExecutionStopped));
             }
         }
     }
 
     #[test]
     fn runtime_candidate_tracks_identity_and_never_retargets_a_removed_row() {
-        let alpha = ProcessKey::project("alpha");
-        let beta = ProcessKey::project("beta");
+        let alpha = ProcessKey::Service {
+            id: Name::new("alpha"),
+        };
+        let beta = ProcessKey::Service {
+            id: Name::new("beta"),
+        };
         let mut processes = BTreeMap::from([
             (alpha.clone(), process(alpha.clone())),
             (beta.clone(), process(beta.clone())),
@@ -1253,19 +1300,20 @@ mod tests {
         assert_eq!(model.runtimes.candidate, Some(alpha));
     }
 
+    /// A process the snapshot no longer carries cannot stay selected: the
+    /// detail view is cleared and the widened read is re-issued.
     #[test]
-    fn runtime_detail_clears_and_requeries_when_process_stops_qualifying() {
-        let key = ProcessKey::project("drive");
+    fn runtime_detail_clears_and_requeries_when_the_process_leaves_the_snapshot() {
+        let key = ProcessKey::Service {
+            id: Name::new("drive"),
+        };
         let mut model = AppModel {
             epoch: Some(epoch()),
             ..AppModel::default()
         };
         model.runtimes.candidate = Some(key.clone());
         model.runtimes.detail = Some(key.clone());
-        let processes = Arc::new(BTreeMap::from([(
-            key.clone(),
-            process_with_kind(key, ParticipantKind::Host),
-        )]));
+        let processes = Arc::new(BTreeMap::new());
         let effects = update(
             &mut model,
             Msg::Client(AttachmentEvent::ProcessesChanged {
@@ -1282,9 +1330,11 @@ mod tests {
 
     #[test]
     fn restart_without_a_live_producer_is_a_visible_diagnostic() {
-        let key = ProcessKey::project("drive");
+        let key = ProcessKey::Service {
+            id: Name::new("drive"),
+        };
         let mut process = process(key.clone());
-        process.entry.status.producer = None;
+        process.row.producer = None;
         let mut model = AppModel {
             epoch: Some(epoch()),
             route: FocusRoute::Content {
@@ -1304,7 +1354,9 @@ mod tests {
 
     #[test]
     fn runtime_log_jump_resets_every_stale_filter_and_pause() {
-        let key = ProcessKey::project("drive");
+        let key = ProcessKey::Service {
+            id: Name::new("drive"),
+        };
         let mut model = AppModel {
             route: FocusRoute::Content {
                 panel: PanelId::Runtimes(RuntimesPanelId::Processes),
@@ -1330,8 +1382,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_detail_queries_use_bare_id_and_clear_on_escape() {
-        let key = ProcessKey::robot(RobotKey::new("lab", "rover"), "drive");
+    /// A telemetry record is stamped with the participant id, and a driver's
+    /// participant id is its component instance - so the query carries the
+    /// instance, not the rendered key.
+    fn runtime_detail_queries_use_the_participant_id_and_clear_on_escape() {
+        let key = ProcessKey::Driver {
+            instance: Name::new("base"),
+        };
         let mut model = AppModel {
             epoch: Some(epoch()),
             route: FocusRoute::Content {
@@ -1347,7 +1404,7 @@ mod tests {
         let Effect::ReadRuntimes(read) = &effects[0] else {
             panic!("expected runtime read");
         };
-        assert_eq!(read.body.participant.as_deref(), Some("drive"));
+        assert_eq!(read.body.participant.as_deref(), Some("base"));
         assert_eq!(model.runtimes.detail, Some(key));
         model.runtimes.in_flight = None;
         let effects = update(
@@ -1467,27 +1524,29 @@ mod tests {
         assert!(model.clear_requested);
     }
 
-    fn supervisor(lifecycle: ProjectLifecycle) -> SupervisorObservation {
+    fn supervisor(lifecycle: Lifecycle) -> SupervisorObservation {
         supervisor_with_failure(lifecycle, None)
     }
 
     fn supervisor_with_failure(
-        lifecycle: ProjectLifecycle,
+        lifecycle: Lifecycle,
         failure: Option<&str>,
     ) -> SupervisorObservation {
         SupervisorObservation {
-            supervisor_generation: 1,
             revision: 1,
-            execution_id: epoch().execution_id,
+            execution: epoch().execution,
+            robot: RobotIdentity {
+                id: Name::new("testbot"),
+                namespace: Name::new("dev"),
+            },
+            mode: ExecutionMode::Real,
             project: "/tmp/robot".to_string(),
-            entry: "/tmp/robot/robot.yaml".to_string(),
-            framework_train: "0.44.0".to_string(),
-            simulation: None,
             lifecycle,
-            router: "unixsock-stream/test".to_string(),
-            graph_generation: 1,
-            startup: StartupStatus::default(),
-            failure: failure.map(str::to_string),
+            startup: Vec::new(),
+            failure: failure.map(|detail| DaemonFailure {
+                reason: DaemonFailureReason::LaunchFailed,
+                detail: Detail::new(detail),
+            }),
         }
     }
 
@@ -1515,47 +1574,23 @@ mod tests {
     }
 
     fn process(key: ProcessKey) -> ProcessObservation {
-        process_with_kind(key, ParticipantKind::Service)
-    }
-
-    /// The mandatory root brain is a runtime row like any other graph
-    /// participant, and a host process still is not (organization#973).
-    #[test]
-    fn the_brain_is_presented_as_a_runtime_row() {
-        let brain = process_with_kind(
-            ProcessKey::robot(RobotKey::new("dev", "testbot"), "brain"),
-            ParticipantKind::Brain,
-        );
-        assert!(process_is_runtime(&brain));
-        assert_eq!(brain.kind.label(), "brain");
-        let host = process_with_kind(
-            ProcessKey::robot(RobotKey::new("dev", "testbot"), "webots"),
-            ParticipantKind::Host,
-        );
-        assert!(!process_is_runtime(&host));
-    }
-
-    fn process_with_kind(key: ProcessKey, kind: ParticipantKind) -> ProcessObservation {
         ProcessObservation {
             key: key.clone(),
-            entry: ProcessEntry {
-                descriptor: ProcessDescriptor {
-                    key,
-                    kind,
-                    artifact: "service".to_string(),
-                    owner: "test".to_string(),
-                    startup_requirement: StartupRequirement::Required,
-                },
-                status: ProcessStatus::default(),
+            row: Process {
+                key,
+                component: None,
+                startup: StartupRequirement::Required,
+                desired: DesiredState::Running,
+                state: ProcessState::Ready,
+                pid: Some(42),
+                producer: Some(ProducerId::try_from(0x2b).expect("fixture producer")),
+                restarts: 0,
+                failure: None,
             },
-            kind,
-            state: ParticipantState::Ready,
-            present: Some(true),
-            robot: None,
+            state: ProcessState::Ready,
             started_at: Instant::now(),
             ended_at: None,
             first_ready_at: Some(Instant::now()),
-            user_service: true,
         }
     }
 }

@@ -14,11 +14,9 @@ use crate::validation::run_check_with_context;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use phoxal_cli_core::project::launch_plan::CheckedRobotLaunchInput;
 use phoxal_cli_core::project::launch_plan::LaunchMode;
 use phoxal_cli_core::project::launch_plan::LaunchPlan;
 use phoxal_cli_core::project::launch_plan::RunIdentity;
-use phoxal_cli_core::project::launch_plan::build_launch_plan;
 use phoxal_cli_core::project::resolver::BundlePlan;
 use phoxal_cli_core::project::resolver::ResolveOptions;
 use phoxal_cli_core::simulation::world;
@@ -106,7 +104,7 @@ mod resolve_project_tests {
         )?;
         std::fs::write(
             project.path().join("robot.yaml"),
-            "schema: robot/v0\nrobot:\n  id: test\n  namespace: dev\n  motion_limits:\n    max_linear_speed_mps: 1.0\n    max_angular_speed_radps: 1.0\n  kinematic:\n    kind: omnidirectional\n    actuators: [drive.motor]\n    encoders: []\n  components:\n    drive:\n      component: wheel\n      mount_link: base\n",
+            "schema: phoxal/robot/v0\nrobot:\n  id: test\n  namespace: dev\n  motion_limits:\n    max_linear_speed_mps: 1.0\n    max_angular_speed_radps: 1.0\n  kinematic:\n    kind: omnidirectional\n    actuators: [drive.motor]\n    encoders: []\n  components:\n    drive:\n      component: wheel\n      mount_link: base\n",
         )?;
         let reporter = Reporter;
         let seen = std::sync::atomic::AtomicBool::new(false);
@@ -163,7 +161,7 @@ pub(crate) fn build_checked_sim_launch_plan(
     // fetching, not after Cargo has already done unnecessary host work.
     let platform_refs = check_artifact_refs_from_resolved(
         resolved,
-        phoxal_cli_core::project::layout::DriverSelection::None,
+        phoxal_cli_core::project::intent::DriverSelection::None,
     );
     // Materialize the full selected registry set once into the caller's
     // unpublished candidate. This candidate is later published as the
@@ -255,25 +253,23 @@ pub(crate) fn build_checked_sim_launch_plan(
     // silently accepted invalid user config and missing images).
     crate::validation::ensure_check_outcome_ok(&metadata_outcome)?;
 
-    let plan = build_launch_plan(
-        LaunchMode::Webots {
-            world: world.to_path_buf(),
-        },
-        &[CheckedRobotLaunchInput {
-            project_root,
-            resolved,
-            checked_participants: &sim_participants,
-            source_participants,
-        }],
-        run,
-    )?;
+    // The simulation bundle is an ordinary finalized bundle - `clock:
+    // simulated`, every driver block stripped - so its process graph comes from
+    // the one requirement derivation, exactly like a real run. The world path
+    // is a client-owned input that never reaches the daemon, so it rides the
+    // plan mode rather than the bundle.
+    let mut plan =
+        phoxal_cli_core::project::layout::RuntimeLayout::construct_plan(candidate_root, run)?.plan;
+    plan.mode = LaunchMode::Webots {
+        world: world.to_path_buf(),
+    };
     Ok(plan)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_cli_core::project::catalog::ArtifactKind;
+    use phoxal_cli_catalog::ArtifactKind;
     use phoxal_cli_core::project::launch_plan::RunIdentity;
     use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
     use phoxal_cli_core::project::resolver::ResolvedPathOverride;
@@ -304,9 +300,12 @@ mod tests {
             ),
         )
         .expect("write fixture Cargo.lock");
-        let json = format!(
-            r#"{{"schema":"phoxal/participant-metadata/v0","id":"{SIMULATOR_CONTROLLER_ARTIFACT_NAME}","kind":"simulator","config_schema":{{"type":"null"}}}}"#
-        );
+        let json = String::from_utf8(crate::stage::test_metadata_payload(
+            SIMULATOR_CONTROLLER_ARTIFACT_NAME,
+            "simulator",
+            serde_json::json!({"type": "null"}),
+        ))
+        .expect("the metadata document is UTF-8");
         let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
         let len = json.len();
         std::fs::write(
@@ -344,7 +343,12 @@ mod tests {
             "version = 4\n\n[[package]]\nname = \"testbot-robot\"\nversion = \"0.1.0\"\n",
         )
         .expect("write brain fixture Cargo.lock");
-        let json = r#"{"schema":"phoxal/participant-metadata/v0","id":"brain","kind":"brain","config_schema":{"type":"null"}}"#;
+        let json = String::from_utf8(crate::stage::test_metadata_payload(
+            "brain",
+            "brain",
+            serde_json::json!({"type": "null"}),
+        ))
+        .expect("the metadata document is UTF-8");
         let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
         let len = json.len();
         std::fs::write(
@@ -366,7 +370,7 @@ mod tests {
     /// itself (that happens inside `resolve()`, which this test bypasses by
     /// constructing `BundlePlan` directly), so an empty `components: {}`
     /// is fine here.
-    const FIXTURE_ROBOT: &str = r#"schema: robot/v0
+    const FIXTURE_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: test
@@ -410,10 +414,17 @@ services:
         )
         .expect("write fixture Cargo.lock");
 
-        let schema = r#"{"type":"object","required":["gain"],"properties":{"gain":{"type":"number"}},"additionalProperties":false}"#;
-        let json = format!(
-            r#"{{"schema":"phoxal/participant-metadata/v0","id":"avoid","kind":"service","config_schema":{schema}}}"#
-        );
+        let json = String::from_utf8(crate::stage::test_metadata_payload(
+            "avoid",
+            "service",
+            serde_json::json!({
+                "type": "object",
+                "required": ["gain"],
+                "properties": {"gain": {"type": "number"}},
+                "additionalProperties": false
+            }),
+        ))
+        .expect("the metadata document is UTF-8");
         let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
         let len = json.len();
         std::fs::write(
@@ -516,7 +527,11 @@ services:
             false,
             &crate::SilentReporter,
         )?;
-        let candidate = crate::stage::begin_runtime_layout(temp.path(), &resolved)?;
+        let candidate = crate::stage::begin_runtime_layout(
+            temp.path(),
+            &resolved,
+            &phoxal_cli_core::project::intent::RunIntent::simulated(),
+        )?;
         let world = temp.path().join("world.wbt");
 
         let result = build_checked_sim_launch_plan(

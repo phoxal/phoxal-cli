@@ -3,7 +3,7 @@
 use super::{DriverDecision, DriversMode, RunOptions};
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::project::layout::DriverSelection;
+use phoxal_cli_core::project::intent::DriverSelection;
 use std::collections::BTreeSet;
 
 #[derive(Debug)]

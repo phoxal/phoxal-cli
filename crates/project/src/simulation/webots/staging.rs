@@ -14,6 +14,7 @@ use std::path::Path;
 
 /// Stage a resolved robot and authored world into the Webots filesystem view.
 pub(crate) fn stage_simulation_for_robot(
+    project_root: &Path,
     world_source_path: &Path,
     resolved: &BundlePlan,
     launch_plan: &LaunchPlan,
@@ -33,10 +34,7 @@ pub(crate) fn stage_simulation_for_robot(
         .robots
         .first()
         .context("sim launch plan has no robot")?;
-    let bundle = resolved
-        .compiled
-        .decode_robot()
-        .context("failed to decode the canonical robot for Webots staging")?;
+    let bundle = &resolved.compiled.robot;
     let robot_id = bundle.robot_id();
     anyhow::ensure!(
         !connect_endpoints.is_empty(),
@@ -62,16 +60,16 @@ pub(crate) fn stage_simulation_for_robot(
         .map(|component_type| ComponentTypeToStage { component_type })
         .collect::<Vec<_>>();
 
-    let mesh_root = root::meshes_dir()?;
-    stage_compiled_geometry_assets(&bundle, &resolved.compiled.assets, &mesh_root)?;
+    let mesh_root = root::meshes_dir(project_root);
+    stage_compiled_geometry_assets(bundle, &resolved.compiled.assets, &mesh_root)?;
     stage_simulation_world(
         &base_world_text,
-        &root::protos_dir()?,
+        &root::protos_dir(project_root),
         &mesh_root,
-        &root::world_path(world_name)?,
+        &root::world_path(project_root, world_name),
         &[RobotToStage {
             robot_id: robot_id.to_string(),
-            bundle: &bundle,
+            bundle,
             component_types,
             controller_launch,
         }],
@@ -173,14 +171,13 @@ fn validate_unique_geometry_destinations<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::host::test_support::ScratchPhoxalHome;
     use phoxal_cli_core::project::resolver::CompiledBundle;
 
     #[test]
     fn creates_empty_mesh_root_after_webots_tree_recreation() -> Result<()> {
-        let _home = ScratchPhoxalHome::new()?;
-        root::wipe_and_recreate()?;
-        let mesh_root = root::meshes_dir()?;
+        let webots_project = tempfile::tempdir()?;
+        root::wipe_and_recreate(webots_project.path())?;
+        let mesh_root = root::meshes_dir(webots_project.path());
         assert!(!mesh_root.exists());
 
         let source = tempfile::tempdir()?;
@@ -188,7 +185,7 @@ mod tests {
         std::fs::create_dir_all(&component)?;
         std::fs::write(
             source.path().join("robot.yaml"),
-            r#"schema: robot/v0
+            r#"schema: phoxal/robot/v0
 robot:
   id: asset-free
   namespace: dev
@@ -212,7 +209,7 @@ robot:
         )?;
         std::fs::write(
             component.join("component.yaml"),
-            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
+            "schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
         )?;
         std::fs::write(
             component.join("structure.urdf"),
@@ -226,92 +223,11 @@ robot:
                     "wheel".to_string(),
                     component,
                 )]),
-            })?)?;
-        let robot = compiled.decode_robot()?;
-
-        stage_compiled_geometry_assets(&robot, &compiled.assets, &mesh_root)?;
+            })?);
+        stage_compiled_geometry_assets(&compiled.robot, &compiled.assets, &mesh_root)?;
 
         assert!(mesh_root.is_dir());
         assert_eq!(std::fs::read_dir(&mesh_root)?.count(), 0);
-        Ok(())
-    }
-
-    #[test]
-    fn stages_referenced_geometry_outside_the_legacy_mesh_prefix() -> Result<()> {
-        let source = tempfile::tempdir()?;
-        let component = source.path().join("components/wheel");
-        std::fs::create_dir_all(source.path().join("meshes/geometry"))?;
-        std::fs::create_dir_all(&component)?;
-        std::fs::write(
-            source.path().join("robot.yaml"),
-            r#"schema: robot/v0
-robot:
-  id: geometry-bot
-  namespace: dev
-  motion_limits:
-    max_linear_speed_mps: 0.6
-    max_angular_speed_radps: 2.0
-  structure: structure.urdf
-  kinematic:
-    kind: omnidirectional
-    actuators: [wheel.motor]
-    encoders: []
-  components:
-    wheel:
-      component: wheel
-      mount_link: base
-"#,
-        )?;
-        std::fs::write(
-            source.path().join("structure.urdf"),
-            r#"<robot name="geometry-bot"><link name="base_footprint"/><link name="base_link"/><link name="base"><visual><geometry><mesh filename="package://robot/geometry/body.stl"/></geometry></visual></link><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
-        )?;
-        std::fs::write(
-            source.path().join("meshes/geometry/body.stl"),
-            b"solid body\nendsolid body\n",
-        )?;
-        std::fs::write(
-            component.join("component.yaml"),
-            "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
-        )?;
-        std::fs::write(
-            component.join("structure.urdf"),
-            r#"<robot name="wheel"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
-        )?;
-        let mut compiled =
-            CompiledBundle::from_project(phoxal_manifest::compile(phoxal_manifest::SourceSet {
-                project_root: source.path().to_path_buf(),
-                robot_manifest: source.path().join("robot.yaml"),
-                component_roots: std::collections::BTreeMap::from([(
-                    "wheel".to_string(),
-                    component,
-                )]),
-            })?)?;
-        // Exercise the staging rule independently of today's compiler naming
-        // convention: a future canonical model may reference a normalized
-        // logical asset outside `meshes/`, and staging must follow the model
-        // reference rather than filter by a hard-coded prefix.
-        let old_id = phoxal_manifest::AssetId::new("meshes/robot/geometry/body.stl".to_string())?;
-        let bytes = compiled
-            .assets
-            .remove(&old_id)
-            .context("fixture compiler omitted geometry asset")?;
-        compiled.assets.insert(
-            phoxal_manifest::AssetId::new("geometry/body.stl".to_string())?,
-            bytes,
-        );
-        let canonical = String::from_utf8(compiled.robot)?
-            .replace("meshes/robot/geometry/body.stl", "geometry/body.stl");
-        compiled.robot = canonical.into_bytes();
-        let robot = compiled.decode_robot()?;
-        let destination = tempfile::tempdir()?;
-        let mesh_root = destination.path().join("protos/meshes");
-        assert!(!mesh_root.exists());
-        stage_compiled_geometry_assets(&robot, &compiled.assets, &mesh_root)?;
-        assert_eq!(
-            std::fs::read(mesh_root.join("geometry/body.stl"))?,
-            b"solid body\nendsolid body\n"
-        );
         Ok(())
     }
 

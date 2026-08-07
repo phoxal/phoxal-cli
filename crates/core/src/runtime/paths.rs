@@ -7,6 +7,15 @@ pub const INSTALL_ROOT: &str = "/var/lib/phoxal";
 pub const RELEASES_ROOT: &str = "/var/lib/phoxal/releases";
 pub const INSTALLED_STATE_ROOT: &str = "/var/lib/phoxal/state";
 pub const INSTALLED_VOLATILE_ROOT: &str = "/run/phoxal";
+/// Where the exact `phoxal` + `phoxald` pair is installed on a managed host.
+/// The verified release archive carries both binaries and they are placed here
+/// together, so the unit and the client resolve the daemon
+/// from one place rather than from `PATH`.
+pub const INSTALLED_BINARY_ROOT: &str = "/usr/local/bin";
+/// The installed interactive client. It is never the daemon.
+pub const INSTALLED_CLIENT_BINARY: &str = "/usr/local/bin/phoxal";
+/// The installed supervisor. This is what `phoxal.service` executes.
+pub const INSTALLED_DAEMON_BINARY: &str = "/usr/local/bin/phoxald";
 pub const SYSTEMD_UNIT: &str = "phoxal.service";
 pub const SYSTEMD_ACTIVE_ROOT: &str = "/run/systemd/system";
 pub const SYSTEMD_UNIT_ROOT: &str = "/etc/systemd/system";
@@ -41,9 +50,20 @@ impl RuntimePaths {
         }
     }
 
+    /// The lock every bundle-mutating command takes. A live execution holds
+    /// [`Self::supervisor_lock`] for its whole lifetime, so a build can never
+    /// replace a running daemon's files.
     #[must_use]
-    pub fn project_lock(&self) -> PathBuf {
-        self.state_root.join("project.lock")
+    pub fn build_lock(&self) -> PathBuf {
+        self.volatile_root.join("build.lock")
+    }
+
+    /// The lock one `phoxald` holds for its complete lifetime. Its presence
+    /// under an exclusive holder - not the socket's existence - is what
+    /// "an execution is live" means.
+    #[must_use]
+    pub fn supervisor_lock(&self) -> PathBuf {
+        self.volatile_root.join("supervisor.lock")
     }
 
     #[must_use]
@@ -51,9 +71,37 @@ impl RuntimePaths {
         self.volatile_root.join("supervisor.sock")
     }
 
-    #[must_use]
-    pub fn router_socket(&self) -> PathBuf {
-        self.volatile_root.join("zenoh.sock")
+    /// The supervisor socket, rejected up front when the platform cannot bind
+    /// it.
+    ///
+    /// Unix-socket paths are bounded by `sun_path`; a project nested deeply
+    /// enough exceeds it and the daemon would fail at bind(2) with a transport
+    /// error long after a build. Both the client (before building) and the
+    /// daemon (before opening the router) resolve through this check so the
+    /// operator gets the actionable refusal instead.
+    ///
+    /// # Errors
+    ///
+    /// Names the byte length, the platform maximum, and the fix (a shorter
+    /// project path).
+    pub fn checked_supervisor_socket(&self) -> anyhow::Result<PathBuf> {
+        let path = self.supervisor_socket();
+        let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
+        // The bindable maximum is the `sun_path` array itself minus its NUL
+        // terminator, computed from the field offset because macOS carries an
+        // extra `sun_len` byte before the family field.
+        let maximum = std::mem::size_of::<libc::sockaddr_un>()
+            - std::mem::offset_of!(libc::sockaddr_un, sun_path)
+            - 1;
+        if bytes.len() > maximum {
+            anyhow::bail!(
+                "the supervisor socket path is {} bytes but this platform supports at most \
+                 {maximum}: {}; move the project to a shorter path",
+                bytes.len(),
+                path.display()
+            );
+        }
+        Ok(path)
     }
 
     #[must_use]
@@ -82,16 +130,16 @@ mod tests {
         assert_eq!(paths.state_root, Path::new("/tmp/robot/.phoxal"));
         assert_eq!(paths.volatile_root, Path::new("/tmp/robot/.phoxal/run"));
         assert_eq!(
-            paths.project_lock(),
-            Path::new("/tmp/robot/.phoxal/project.lock")
+            paths.build_lock(),
+            Path::new("/tmp/robot/.phoxal/run/build.lock")
+        );
+        assert_eq!(
+            paths.supervisor_lock(),
+            Path::new("/tmp/robot/.phoxal/run/supervisor.lock")
         );
         assert_eq!(
             paths.supervisor_socket(),
             Path::new("/tmp/robot/.phoxal/run/supervisor.sock")
-        );
-        assert_eq!(
-            paths.router_socket(),
-            Path::new("/tmp/robot/.phoxal/run/zenoh.sock")
         );
         assert_eq!(
             paths.supervisor_log(),
@@ -114,5 +162,36 @@ mod tests {
                 Path::new(INSTALLED_STATE_ROOT).join("supervisor.log")
             );
         }
+    }
+
+    /// Boundary proof that the precheck agrees with the platform: the longest
+    /// path the precheck accepts must actually bind, and one byte more must be
+    /// refused by the precheck rather than by a raw bind(2) later.
+    #[test]
+    fn socket_precheck_boundary_matches_a_real_bind() {
+        let suffix = "/.phoxal/run/supervisor.sock";
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let base = scratch.path().to_str().expect("utf-8 scratch path");
+
+        let socket_for = |total: usize| {
+            let pad = total - base.len() - 1 - suffix.len();
+            let root = std::path::PathBuf::from(format!("{base}/{}", "p".repeat(pad)));
+            RuntimePaths::for_root(&root).checked_supervisor_socket()
+        };
+        let accepted_max = (60..160)
+            .rev()
+            .find(|total| socket_for(*total).is_ok())
+            .expect("some socket path length must be accepted");
+
+        let over = socket_for(accepted_max + 1)
+            .expect_err("one byte past the maximum must fail the precheck");
+        assert!(over.to_string().contains("shorter"));
+
+        let path = socket_for(accepted_max).expect("precheck accepts the maximum");
+        std::fs::create_dir_all(path.parent().expect("socket parent")).expect("create run dir");
+        let listener = std::os::unix::net::UnixListener::bind(&path)
+            .expect("precheck-accepted maximum-length path must bind");
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
     }
 }

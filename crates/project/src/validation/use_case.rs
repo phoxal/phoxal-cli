@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, anyhow, bail};
+use phoxal_cli_catalog::{ArtifactKind, Catalog};
 use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::project::catalog::{self, ArtifactKind};
 use phoxal_cli_core::project::train::LockedProject;
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 
@@ -17,11 +17,8 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         ValidationSource::Project(target) => target,
         ValidationSource::Archive(archive) => {
             crate::bundle::archive::extract_build_archive(&archive.archive, &archive.destination)?;
-            let header =
-                crate::load::header::RuntimeHeader::read_and_validate(&archive.destination)?;
             let plan = crate::load::layout::validate_layout_plan(
                 &archive.destination,
-                &phoxal_cli_core::project::layout::PlanOptions::default(),
                 phoxal_cli_core::project::layout::LayoutInspection::Host,
                 phoxal_cli_core::project::launch_plan::RunIdentity::default(),
             )
@@ -31,9 +28,11 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
                 .first()
                 .context("runtime archive launch plan has no robot")?;
             return Ok(ValidationReport {
-                robot_path: archive.destination.join("robot.json"),
+                robot_path: archive
+                    .destination
+                    .join(phoxal_cli_core::project::layout::ROBOT_FILE),
                 robot: robot.id.clone(),
-                train: header.built_with.phoxal,
+                train: String::new(),
                 platform_services: Vec::new(),
                 services: Vec::new(),
                 components: Vec::new(),
@@ -132,8 +131,8 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         robot_path,
         robot: robot.robot.id.clone(),
         train,
-        platform_services: catalog::NATIVE
-            .iter()
+        platform_services: Catalog::official()
+            .native()
             .filter(|official| official.kind == ArtifactKind::Service)
             .map(|official| official.package.to_string())
             .collect(),
@@ -287,14 +286,13 @@ fn join_errors(errors: Vec<phoxal_manifest::source::robot::v0::ValidationError>)
 mod tests {
     use super::*;
     use crate::validation::{RawArtifact, RawParticipantReport};
-    use phoxal_cli_core::project::train::{LockedTrain, TrainSource, WorkspaceRuntime};
+    use phoxal_cli_core::project::train::{LockedTrain, WorkspaceRuntime};
     use std::path::PathBuf;
 
     fn locked_project(runtimes: Vec<WorkspaceRuntime>) -> LockedProject {
         LockedProject {
             train: LockedTrain {
                 version: "0.42.0".to_string(),
-                source: TrainSource::Registry,
             },
             brain: phoxal_cli_core::project::train::RootBrainPackage {
                 package: "testbot-robot".to_string(),
@@ -320,7 +318,7 @@ mod tests {
         }
     }
 
-    const MINIMAL_ROBOT: &str = r#"schema: robot/v0
+    const MINIMAL_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: bot
   namespace: dev

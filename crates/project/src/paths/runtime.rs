@@ -3,9 +3,10 @@
 use std::path::{Path, PathBuf};
 
 pub use phoxal_cli_core::runtime::paths::{
-    ACTIVE_RUNTIME_ROOT, INSTALL_ROOT, INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT,
-    RELEASES_ROOT, RuntimePaths, SYSTEMD_ACTIVE_ROOT, SYSTEMD_UNIT, SYSTEMD_UNIT_PATH,
-    SYSTEMD_UNIT_ROOT, is_installed_root,
+    ACTIVE_RUNTIME_ROOT, INSTALL_ROOT, INSTALLED_BINARY_ROOT, INSTALLED_CLIENT_BINARY,
+    INSTALLED_DAEMON_BINARY, INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT, RELEASES_ROOT,
+    RuntimePaths, SYSTEMD_ACTIVE_ROOT, SYSTEMD_UNIT, SYSTEMD_UNIT_PATH, SYSTEMD_UNIT_ROOT,
+    is_installed_root,
 };
 
 /// Resolve `/var/phoxal` once after its run lock is held and require its direct

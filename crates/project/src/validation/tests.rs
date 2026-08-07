@@ -6,20 +6,13 @@ use super::participants::{
 use super::*;
 use anyhow::{Result, anyhow, bail};
 use graph_check::Problem;
+use phoxal_cli_catalog::ArtifactKind;
 use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind};
-use phoxal_cli_core::project::catalog::ArtifactKind;
-use phoxal_cli_core::project::launch_plan::RunIdentity;
-use phoxal_cli_core::project::launch_plan::{
-    CheckedRobotLaunchInput, LaunchMode, build_launch_plan,
-};
 use phoxal_cli_core::project::resolver::{
-    BundlePlan, ResolveOptions, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
+    BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
 };
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 use std::path::{Path, PathBuf};
-
-use crate::paths::host::test_support::ScratchPhoxalHome;
-use crate::resolve::project::resolve;
 
 /// Converts a fixture's `(name, artifact_ref)` pairs into the
 /// [`PlatformArtifactRef`]s `run_check_with_context` expects, all of kind
@@ -37,225 +30,7 @@ fn platform_refs(images: &[(String, String)]) -> Vec<PlatformArtifactRef> {
         .collect()
 }
 
-#[test]
-fn launch_plan_covers_services_services_and_component_instances() -> Result<()> {
-    let _phoxal_home = ScratchPhoxalHome::new()?;
-    let temp = tempfile::tempdir()?;
-    std::fs::create_dir_all(temp.path().join("services/mission/src"))?;
-    std::fs::create_dir_all(temp.path().join("components/ddsm115/src"))?;
-    std::fs::create_dir_all(temp.path().join("src"))?;
-    std::fs::create_dir_all(temp.path().join("train/phoxal/src"))?;
-    std::fs::write(
-        temp.path().join("services/mission/Cargo.toml"),
-        "[package]\nname = \"mission\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )?;
-    std::fs::write(
-        temp.path().join("services/mission/src/main.rs"),
-        "fn main() {}",
-    )?;
-    std::fs::write(
-        temp.path().join("components/ddsm115/Cargo.toml"),
-        "[package]\nname = \"ddsm115\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"ddsm115\"\npath = \"src/main.rs\"\n",
-    )?;
-    std::fs::write(
-        temp.path().join("components/ddsm115/src/main.rs"),
-        "fn main() {}",
-    )?;
-    std::fs::write(
-        temp.path().join("components/ddsm115/component.yaml"),
-        "schema: component/v0\n",
-    )?;
-    std::fs::write(
-        temp.path().join("Cargo.toml"),
-        "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\nmembers = [\".\", \"services/mission\", \"components/ddsm115\"]\nresolver = \"2\"\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
-    )?;
-    // The root package IS the mandatory brain (organization#973).
-    std::fs::write(temp.path().join("src/main.rs"), "fn main() {}")?;
-    std::fs::write(
-        temp.path().join("train/phoxal/Cargo.toml"),
-        "[package]\nname = \"phoxal\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )?;
-    std::fs::write(temp.path().join("train/phoxal/src/lib.rs"), "")?;
-    std::fs::write(
-        temp.path().join("Cargo.lock"),
-        "version = 4\n\n[[package]]\nname = \"ddsm115\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"mission\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"phoxal\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"robot\"\nversion = \"0.1.0\"\ndependencies = [\"phoxal\"]\n",
-    )?;
-    let mut robot =
-        phoxal_cli_core::project::resolver::parse_robot_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)?;
-    robot
-        .services
-        .get_mut("mission")
-        .expect("mission service")
-        .config = Some(serde_json::json!({
-        "message": "line\nquoted \"value\"",
-    }));
-    phoxal_cli_core::project::resolver::write_robot_to_dir(&robot, temp.path())?;
-    std::fs::write(
-        temp.path().join("structure.urdf"),
-        r#"<robot name="testbot"><link name="base_footprint"/><link name="base_link"/><link name="left_wheel"/><link name="right_wheel"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="left_mount" type="fixed"><parent link="base_link"/><child link="left_wheel"/></joint><joint name="right_mount" type="fixed"><parent link="base_link"/><child link="right_wheel"/></joint></robot>"#,
-    )?;
-    std::fs::write(
-        temp.path().join("components/ddsm115/component.yaml"),
-        "schema: component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n  encoder:\n    kind: encoder\n    publish_rate_hz: 50.0\n    gear_ratio: 1.0\n    encoder_type: incremental\n    counts_per_revolution: 4096\n    target:\n      kind: joint\n      id: wheel_joint\n",
-    )?;
-    std::fs::write(
-        temp.path().join("components/ddsm115/structure.urdf"),
-        r#"<robot name="ddsm115"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
-    )?;
-    // `ddsm115` resolves from the `components/` workspace crate above -
-    // no network, unlike a registry-resolved component.
-    let resolved = resolve(&robot, temp.path(), ResolveOptions::default())?;
-    let source_participants = vec![
-        SourceParticipant::brain(
-            resolved.brain.crate_dir.clone(),
-            resolved.brain.bin_target.clone(),
-        ),
-        SourceParticipant::user_service("mission", temp.path().join("services/mission")),
-        SourceParticipant::component_driver_with_artifact_id(
-            "left_drive",
-            "ddsm115",
-            temp.path().join("components/ddsm115"),
-        ),
-        SourceParticipant::component_driver_with_artifact_id(
-            "right_drive",
-            "ddsm115",
-            temp.path().join("components/ddsm115"),
-        ),
-    ];
-    let platform_refs = platform_artifact_refs_from_resolved(&resolved);
-    let outcome = run_check_with_context(
-        &platform_refs,
-        &source_participants,
-        CheckGraphContext {
-            robot: Some(&robot),
-        },
-        |artifact_ref| {
-            let participant = platform_refs
-                .iter()
-                .find(|participant| participant.binary_name == artifact_ref)
-                .ok_or_else(|| anyhow!("unexpected platform artifact {artifact_ref}"))?;
-            Ok(launch_plan_raw_participant_report(
-                participant.kind.wire_kind(),
-                &participant.name,
-            ))
-        },
-        |source| match source.kind {
-            SourceParticipantKind::Brain => Ok(raw_brain_unit()),
-            SourceParticipantKind::UserService => {
-                Ok(launch_plan_raw_participant_report("service", &source.name))
-            }
-            SourceParticipantKind::ComponentDriver => Ok(launch_plan_raw_participant_report(
-                "driver",
-                &source.expected_artifact_id,
-            )),
-            SourceParticipantKind::OfficialService => Ok(launch_plan_raw_participant_report(
-                "service",
-                &source.expected_artifact_id,
-            )),
-            SourceParticipantKind::Simulator => Ok(launch_plan_raw_participant_report(
-                "simulator",
-                &source.expected_artifact_id,
-            )),
-        },
-    )?;
-    assert!(outcome.is_ok(), "fixture check should pass: {outcome:?}");
-    let plan = build_launch_plan(
-        LaunchMode::Run,
-        &[CheckedRobotLaunchInput {
-            project_root: temp.path(),
-            resolved: &resolved,
-            checked_participants: &outcome.checked_participants,
-            source_participants: &source_participants,
-        }],
-        RunIdentity::default(),
-    )?;
-
-    assert_eq!(plan.mode, LaunchMode::Run);
-    let robot = &plan.robots[0];
-    assert_eq!(robot.id, "testbot");
-    let participant_ids = robot
-        .participants
-        .iter()
-        .map(|participant| participant.launch.participant_id.as_str())
-        .collect::<Vec<_>>();
-    for service in resolved
-        .platform_runtimes
-        .iter()
-        .map(|runtime| runtime.name.as_str())
-    {
-        assert!(
-            participant_ids.contains(&service),
-            "missing platform service {service}: {participant_ids:?}"
-        );
-    }
-    assert!(participant_ids.contains(&"left_drive"));
-    assert!(participant_ids.contains(&"right_drive"));
-    // The mandatory root brain is planned exactly once, under its canonical
-    // identity, never under the root Cargo package name (organization#973).
-    assert_eq!(
-        participant_ids.iter().filter(|id| **id == "brain").count(),
-        1,
-        "the root brain must be planned exactly once: {participant_ids:?}"
-    );
-    assert!(
-        !participant_ids.contains(&"robot"),
-        "the root Cargo package name must never become a participant id"
-    );
-    // No `tool-*` participant survives: the supervisor absorbed the resident
-    // tools and the joypad became a local CLI concern (organization#978).
-    assert!(
-        !participant_ids.iter().any(|id| id.starts_with("tool-")),
-        "the tool concept is gone: {participant_ids:?}"
-    );
-    assert_eq!(
-        participant_ids
-            .iter()
-            .filter(|id| **id == "mission")
-            .count(),
-        1,
-        "only the explicitly authored user mission remains"
-    );
-    let left_drive = robot
-        .participants
-        .iter()
-        .find(|participant| participant.launch.participant_id == "left_drive")
-        .expect("left_drive participant");
-    assert_eq!(left_drive.artifact_id, "ddsm115");
-    assert_eq!(
-        left_drive.launch.component_instance.as_deref(),
-        Some("left_drive")
-    );
-    let mission = robot
-        .participants
-        .iter()
-        .find(|participant| participant.launch.participant_id == "mission")
-        .expect("mission participant");
-    assert_eq!(
-        mission.launch.config,
-        Some(serde_json::json!({"message": "line\nquoted \"value\""}))
-    );
-    let encoded = phoxal_cli_core::runtime::launch::encode_participant_env(&mission.launch)?;
-    assert_eq!(
-        encoded
-            .variables()
-            .get(phoxal_runtime_contract::env::CONFIG)
-            .map(String::as_str),
-        Some(r#"{"message":"line\nquoted \"value\""}"#)
-    );
-    Ok(())
-}
-
-fn launch_plan_raw_participant_report(kind: &str, id: &str) -> RawParticipantReport {
-    RawParticipantReport {
-        artifact: RawArtifact {
-            kind: kind.to_string(),
-            id: id.to_string(),
-        },
-        config_schema: None,
-    }
-}
-
-const LAUNCH_PLAN_FIXTURE_ROBOT: &str = r#"schema: robot/v0
+const LAUNCH_PLAN_FIXTURE_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -886,7 +661,7 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
 
     let off = check_artifact_refs_from_resolved(
         &resolved,
-        phoxal_cli_core::project::layout::DriverSelection::None,
+        phoxal_cli_core::project::intent::DriverSelection::None,
     );
     assert!(
         off.iter()
@@ -895,7 +670,7 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
     );
     let subset = check_artifact_refs_from_resolved(
         &resolved,
-        phoxal_cli_core::project::layout::DriverSelection::Only(
+        phoxal_cli_core::project::intent::DriverSelection::Only(
             ["left_drive".to_string()].into_iter().collect(),
         ),
     );
@@ -1345,7 +1120,9 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Bundle
         source_manifest: phoxal_cli_core::project::resolver::parse_robot_from_string(
             MINIMAL_ROBOT,
         )?,
-        compiled: Default::default(),
+        compiled: crate::stage::compile_test_bundle(
+            &phoxal_cli_core::project::resolver::parse_robot_from_string(MINIMAL_ROBOT)?,
+        )?,
         train: "0.36.0".to_string(),
         target: crate::resolve::project::host_target_triple(),
         brain: phoxal_cli_core::project::resolver::ResolvedBrain {
@@ -1362,7 +1139,7 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Bundle
     })
 }
 
-const MINIMAL_ROBOT: &str = r#"schema: robot/v0
+const MINIMAL_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: test

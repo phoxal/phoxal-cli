@@ -100,9 +100,8 @@ struct WebotsHome {
 }
 
 #[must_use]
-pub fn probes() -> [ProbeStatus; 5] {
+pub fn probes() -> [ProbeStatus; 4] {
     [
-        probe_version(),
         probe_rust_tools(),
         probe_webots_executable(),
         probe_webots_home(),
@@ -129,10 +128,6 @@ pub fn webots_executable_path() -> Result<PathBuf, HostError> {
 pub fn webots_home_path() -> Result<PathBuf, HostError> {
     let executable = detect_webots_executable().ok();
     detect_webots_home(executable.as_ref()).map(|home| home.path)
-}
-
-pub fn probe_version() -> ProbeStatus {
-    ProbeStatus::Ok(format!("phoxal {}", env!("CARGO_PKG_VERSION")))
 }
 
 pub fn probe_rust_tools() -> ProbeStatus {

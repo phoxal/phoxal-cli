@@ -7,17 +7,13 @@ use std::process::Command;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
+/// The exact framework version a robot project's Cargo graph locks. It is
+/// provenance for diagnostics and package resolution only: no compatibility
+/// decision reads it, because the embedded record of each built binary is the
+/// only compatibility artifact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LockedTrain {
     pub version: String,
-    pub source: TrainSource,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TrainSource {
-    Registry,
-    Git(String),
-    Path,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,13 +63,6 @@ pub struct LockedProject {
     pub brain: RootBrainPackage,
     pub runtimes: Vec<WorkspaceRuntime>,
     pub local_components: Vec<WorkspaceComponentCrate>,
-}
-
-impl LockedTrain {
-    #[must_use]
-    pub fn is_published(&self) -> bool {
-        matches!(self.source, TrainSource::Registry)
-    }
 }
 
 /// `offline` passes `--offline` to the underlying `cargo metadata`
@@ -139,15 +128,8 @@ pub fn resolve_locked_project(project_root: &Path, offline: bool) -> Result<Lock
         packages.len()
     );
     let package = &packages[0];
-    let source = match package.source.as_deref() {
-        Some(source) if source.starts_with("registry+") => TrainSource::Registry,
-        Some(source) if source.starts_with("git+") => TrainSource::Git(source.to_string()),
-        Some(source) => bail!("unsupported locked phoxal source {source}"),
-        None => TrainSource::Path,
-    };
     let train = LockedTrain {
         version: package.version.clone(),
-        source,
     };
     let runtimes = discover_workspace_runtimes(project_root, &metadata)?;
     let local_components = discover_local_component_packages(project_root, &metadata)?;
@@ -335,7 +317,7 @@ fn discover_workspace_runtimes(
         };
         // Only `services/` carries workspace runtime crates: components have
         // their own resolution path, and the tool concept is gone
-        // (organization#978).
+        //.
         if directory != "services" {
             continue;
         }
@@ -376,7 +358,6 @@ struct Package {
     id: String,
     name: String,
     version: String,
-    source: Option<String>,
     manifest_path: String,
     publish: Option<Vec<String>>,
     dependencies: Vec<PackageDependency>,
@@ -437,7 +418,6 @@ mod tests {
             id: "root".to_string(),
             name: "testbot-robot".to_string(),
             version: "0.1.0".to_string(),
-            source: None,
             manifest_path: "/robot/Cargo.toml".to_string(),
             publish: Some(Vec::new()),
             dependencies: Vec::new(),
@@ -546,7 +526,6 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             version: "0.1.0".to_string(),
-            source: None,
             manifest_path: root
                 .path()
                 .join(directory)
@@ -586,7 +565,7 @@ mod tests {
         );
         assert_eq!(runtimes[0].package, "mission");
         assert_eq!(runtimes[0].binary_names, ["mission"]);
-        // `tools/` is no longer a runtime family (organization#978), and
+        // `tools/` is no longer a runtime family, and
         // `components/` never was one.
         for ignored in ["operator", "passive", "wrapped"] {
             assert!(
@@ -607,7 +586,6 @@ mod tests {
                 id: id.to_string(),
                 name: id.to_string(),
                 version: "0.1.0".to_string(),
-                source: None,
                 manifest_path: manifest.display().to_string(),
                 publish: None,
                 dependencies: Vec::new(),

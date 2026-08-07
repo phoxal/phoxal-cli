@@ -42,7 +42,6 @@ pub(crate) fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<Runtim
     };
     let paths = RuntimePaths::for_root(&root);
     let logical_root = paths.ownership_root.clone();
-    let zenoh_socket = paths.router_socket();
     let authority = if crate::paths::runtime::is_installed_root(&root) {
         ResidentAuthority::SystemdUnit {
             unit: crate::paths::runtime::SYSTEMD_UNIT.to_string(),
@@ -50,13 +49,17 @@ pub(crate) fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<Runtim
     } else {
         ResidentAuthority::DetachedSession
     };
+    // The daemon's Zenoh listen endpoint IS the supervisor socket: one stable
+    // path locates the current execution, and the per-boot identity is learned
+    // from the router behind it. Checked here so a too-deep project refuses
+    // before any build instead of failing at the daemon's bind.
+    let supervisor_socket = paths.checked_supervisor_socket()?;
     Ok(RuntimeTarget {
         logical_root,
         requested_entry,
-        project_lock: paths.project_lock(),
-        supervisor_socket: paths.supervisor_socket(),
-        zenoh_endpoint: format!("unixsock-stream/{}", zenoh_socket.display()),
-        zenoh_socket,
+        build_lock: paths.build_lock(),
+        zenoh_endpoint: format!("unixsock-stream/{}", supervisor_socket.display()),
+        supervisor_socket,
         authority,
     })
 }
@@ -81,12 +84,11 @@ mod tests {
         let target = resolve(Some(root.path()), Path::new("/unused"))?;
         let root = root.path().canonicalize()?;
         assert_eq!(target.logical_root, root);
-        assert_eq!(target.project_lock, root.join(".phoxal/project.lock"));
+        assert_eq!(target.build_lock, root.join(".phoxal/run/build.lock"));
         assert_eq!(
             target.supervisor_socket,
             root.join(".phoxal/run/supervisor.sock")
         );
-        assert_eq!(target.zenoh_socket, root.join(".phoxal/run/zenoh.sock"));
         assert_eq!(target.authority, ResidentAuthority::DetachedSession);
         Ok(())
     }
@@ -100,15 +102,11 @@ mod tests {
                 unit: "phoxal.service".to_string()
             }
         );
-        assert_eq!(
-            target.project_lock,
-            Path::new("/var/lib/phoxal/state/project.lock")
-        );
+        assert_eq!(target.build_lock, Path::new("/run/phoxal/build.lock"));
         assert_eq!(
             target.supervisor_socket,
             Path::new("/run/phoxal/supervisor.sock")
         );
-        assert_eq!(target.zenoh_socket, Path::new("/run/phoxal/zenoh.sock"));
         Ok(())
     }
 }

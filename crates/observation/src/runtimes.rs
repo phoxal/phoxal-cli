@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use crate::RobotScope;
-
 use crate::{ObservationQuery, ObservationWindow, WindowDirection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +147,6 @@ pub struct RuntimeQuery {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeRow {
-    pub scope: RobotScope,
     pub sample: RuntimePerformanceSample,
     pub capacity_evictions: u64,
 }

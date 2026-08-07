@@ -13,7 +13,63 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use object::{Object, ObjectSection};
-pub use phoxal_runtime_contract::ParticipantMetadata as ParticipantMeta;
+use phoxal_runtime_contract::{
+    BusAbi, ComponentSchema, LaunchAbi, ParticipantKind, ParticipantMetadata, ParticipantSchemas,
+    RobotSchema, SimulationSchema,
+};
+
+/// The version set this CLI build speaks.
+///
+/// Every field is a one-variant enum, so this is the *only* value of its type
+/// that exists on this train - which is exactly why nothing compares against
+/// it: a binary that disagrees fails to parse. It is named here so a test that
+/// synthesizes a participant binary can emit the same document a role macro
+/// does, without restating a single version string.
+pub const CURRENT_SCHEMAS: ParticipantSchemas = ParticipantSchemas {
+    bus: BusAbi::V0,
+    launch: LaunchAbi::V0,
+    robot: RobotSchema::V0,
+    component: ComponentSchema::V0,
+    simulation: SimulationSchema::V0,
+};
+
+/// One binary's accepted embedded compatibility record: the tagged `V0`
+/// document destructured into the fields callers actually branch on.
+///
+/// Every version identity in it is a `phoxal-runtime-contract` enum with one
+/// variant per version this train speaks, so **holding this value is already
+/// the compatibility proof**. There is no set to compare it against and no
+/// check a caller could forget: a binary from another train carries a token
+/// none of those enums has a variant for, and it fails at
+/// [`phoxal_runtime_contract::parse_participant_metadata`] - where serde names
+/// both the token it found and the one it expected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParticipantMeta {
+    pub api: phoxal_runtime_contract::RobotApi,
+    pub schemas: ParticipantSchemas,
+    pub id: String,
+    pub kind: ParticipantKind,
+    pub config_schema: serde_json::Value,
+}
+
+impl From<ParticipantMetadata> for ParticipantMeta {
+    fn from(metadata: ParticipantMetadata) -> Self {
+        let ParticipantMetadata::V0 {
+            api,
+            schemas,
+            id,
+            kind,
+            config_schema,
+        } = metadata;
+        Self {
+            api,
+            schemas,
+            id,
+            kind,
+            config_schema,
+        }
+    }
+}
 
 /// The linker section names a participant attribute places its metadata
 /// static under, tried in order. `object`'s generic [`Object::section_by_name`]
@@ -74,9 +130,21 @@ pub fn extract_participant_metadata_from_bytes(
             SECTION_NAMES.join(" or ")
         )
     })?;
-    phoxal_runtime_contract::parse_participant_metadata(&bytes).with_context(|| {
-        format!("phoxal participant metadata section in {describe} is not valid JSON")
-    })
+    // The parse IS the compatibility check. Every version identity in the
+    // document is a one-variant enum, so a binary from another train fails
+    // here, naming the token it carries and the token this CLI expects. The
+    // context below adds only the two things serde cannot know: which file it
+    // was, and what an operator does about it.
+    let metadata =
+        phoxal_runtime_contract::parse_participant_metadata(&bytes).with_context(|| {
+            format!(
+                "{describe} was built against a different phoxal train than this CLI.\n\nIf the \
+                 binary is older, update the project dependency and rebuild:\n    cargo update -p \
+                 phoxal\n\nIf it is newer, update the phoxal CLI to the release that ships this \
+                 contract."
+            )
+        })?;
+    Ok(ParticipantMeta::from(metadata))
 }
 
 /// Extracts and parses `binary_path`'s embedded participant metadata: reads
@@ -364,9 +432,31 @@ mod tests {
         obj.write().expect("synthesize object file")
     }
 
+    /// The exact document a role macro embeds, for a binary that agrees with
+    /// this CLI on every process-boundary contract. Written through the
+    /// framework's own serialize twin, so the fixture cannot drift from the
+    /// parser it is meant to satisfy.
+    fn current_record(id: &str) -> serde_json::Value {
+        serde_json::to_value(
+            phoxal_runtime_contract::emit::ParticipantMetadataRecord::V0 {
+                api: phoxal_runtime_contract::RobotApi::V0_1,
+                schemas: CURRENT_SCHEMAS,
+                id,
+                kind: ParticipantKind::Service,
+                config_schema: serde_json::json!({"type": "null"}),
+            },
+        )
+        .expect("the typed record serializes")
+    }
+
+    /// [`current_record`] as the bytes a linker section carries.
+    fn current_record_bytes(id: &str) -> Vec<u8> {
+        serde_json::to_vec(&current_record(id)).expect("a JSON value serializes")
+    }
+
     #[test]
     fn extracts_metadata_from_foreign_format_and_arch_object_files() -> Result<()> {
-        let payload = br#"{"schema":"phoxal/participant-metadata/v0","id":"drive","kind":"service","config_schema":{"type":"null"}}"#;
+        let payload = &current_record_bytes("drive");
 
         // aarch64 ELF (Linux robot / release binary shape), `.phoxal_meta`.
         let elf = synthesize_object(
@@ -535,5 +625,86 @@ mod tests {
             message.contains("no phoxal participant metadata section"),
             "{message}"
         );
+    }
+
+    /// A binary from another train is rejected before its config schema is
+    /// trusted. The rejection is the *parse*, not a comparison: the diagnostic
+    /// therefore names the token the binary carries, the token this CLI
+    /// expects, and - from this module's own context - the fix for either
+    /// direction.
+    #[test]
+    fn a_binary_on_another_api_revision_is_rejected_with_an_actionable_diagnostic() {
+        let mut record = current_record("cleaning");
+        record["api"] = serde_json::json!("phoxal/robot-api/v9.9");
+        let elf = synthesize_object(
+            object::BinaryFormat::Elf,
+            object::Architecture::Aarch64,
+            b".phoxal_meta",
+            b"",
+            serde_json::to_vec(&record).unwrap().as_slice(),
+        );
+        let error = extract_participant_metadata_from_bytes(&elf, "bin/cleaning")
+            .expect_err("a foreign API revision must be rejected");
+        let message = format!("{error:#}");
+        assert!(message.contains("bin/cleaning"), "{message}");
+        assert!(message.contains("phoxal/robot-api/v9.9"), "{message}");
+        assert!(message.contains("phoxal/robot-api/v0.1"), "{message}");
+        assert!(message.contains("cargo update -p phoxal"), "{message}");
+        assert!(message.contains("update the phoxal CLI"), "{message}");
+    }
+
+    /// The same for a document grammar, including the 0.53-era unnamespaced
+    /// spelling a stale binary would still carry.
+    #[test]
+    fn a_binary_on_another_document_schema_is_rejected_naming_the_contract() {
+        for stale in ["robot/v0", "phoxal/robot/v9"] {
+            let mut record = current_record("drive");
+            record["schemas"]["robot"] = serde_json::json!(stale);
+            let elf = synthesize_object(
+                object::BinaryFormat::Elf,
+                object::Architecture::Aarch64,
+                b".phoxal_meta",
+                b"",
+                serde_json::to_vec(&record).unwrap().as_slice(),
+            );
+            let message = format!(
+                "{:#}",
+                extract_participant_metadata_from_bytes(&elf, "bin/phoxal-service-drive")
+                    .expect_err("a foreign robot document schema must be rejected")
+            );
+            assert!(message.contains(stale), "{message}");
+            assert!(message.contains("phoxal/robot/v0"), "{message}");
+        }
+    }
+
+    /// An unknown metadata schema tag and an unknown field are both rejected by
+    /// the tagged document itself: there is no post-hoc string comparison the
+    /// CLI could get wrong.
+    #[test]
+    fn an_unsupported_metadata_document_is_rejected() {
+        let mut with_framework = current_record("drive");
+        with_framework["framework"] = serde_json::json!("0.54.0");
+        for record in [
+            serde_json::json!({
+                "schema": "phoxal/participant-metadata/v1",
+                "id": "drive",
+                "kind": "service",
+                "config_schema": null,
+            }),
+            with_framework,
+        ] {
+            let bytes = serde_json::to_vec(&record).unwrap();
+            let elf = synthesize_object(
+                object::BinaryFormat::Elf,
+                object::Architecture::Aarch64,
+                b".phoxal_meta",
+                b"",
+                &bytes,
+            );
+            assert!(
+                extract_participant_metadata_from_bytes(&elf, "bin/phoxal-service-drive").is_err(),
+                "unsupported metadata document must be rejected: {record}",
+            );
+        }
     }
 }

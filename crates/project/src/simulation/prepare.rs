@@ -316,7 +316,7 @@ mod tests {
         )?;
         std::fs::write(
             project_root.join("robot.yaml"),
-            r#"schema: robot/v0
+            r#"schema: phoxal/robot/v0
 robot:
   id: testbot
   namespace: dev
@@ -336,7 +336,7 @@ robot:
         )?;
         std::fs::write(
             component_source_dir.join("component.yaml"),
-            r#"schema: component/v0
+            r#"schema: phoxal/component/v0
 capabilities:
   motor:
     kind: motor
@@ -348,7 +348,7 @@ capabilities:
         )?;
         std::fs::write(
             component_source_dir.join("simulation.yaml"),
-            "schema: simulation/v0\ncapabilities: {}\nlinks: {}\n",
+            "schema: phoxal/simulation/v0\ncapabilities: {}\nlinks: {}\n",
         )?;
         std::fs::write(
             project_root.join("structure.urdf"),

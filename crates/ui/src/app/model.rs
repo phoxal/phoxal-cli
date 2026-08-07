@@ -13,6 +13,13 @@ use super::route::FocusRoute;
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppModel {
     pub epoch: Option<AttachmentEpoch>,
+    /// Whether leaving this session is allowed to leave the execution running.
+    /// A simulation session is not detachable: the client owns Webots, so `q`
+    /// there ends the whole session.
+    pub detachable: bool,
+    /// Whether a stop has already been sent. The session keeps rendering until
+    /// the supervisor's own terminal snapshot arrives.
+    pub stop_requested: bool,
     pub route: FocusRoute,
     pub overview: OverviewModel,
     pub runtimes: RuntimesModel,
@@ -27,6 +34,8 @@ impl Default for AppModel {
     fn default() -> Self {
         Self {
             epoch: None,
+            detachable: true,
+            stop_requested: false,
             route: FocusRoute::default(),
             overview: OverviewModel::default(),
             runtimes: RuntimesModel::default(),

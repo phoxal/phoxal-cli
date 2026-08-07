@@ -1,19 +1,25 @@
-use phoxal_cli_core::identity::ExecutionId;
-use phoxal_cli_core::runtime::{ProjectLifecycle, SimulationSessionInfo, StartupStatus};
+//! The execution-level observation, projected from one supervisor snapshot.
 
+use phoxal_cli_core::identity::ExecutionId;
+use phoxal_supervisor_api::{DaemonFailure, ExecutionMode, Lifecycle, RobotIdentity, StartupStep};
+
+/// What an attached client knows about the execution as a whole.
+///
+/// Everything here comes from the authoritative snapshot except `project`,
+/// which is the client's own local knowledge of where the bundle it launched
+/// lives - the daemon has no opinion about the operator's directory layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupervisorObservation {
-    pub supervisor_generation: u64,
+    /// Monotonic within one execution. A client keeps the highest it has seen.
     pub revision: u64,
-    pub execution_id: ExecutionId,
+    pub execution: ExecutionId,
+    pub robot: RobotIdentity,
+    pub mode: ExecutionMode,
+    /// Where this client believes the execution's bundle lives, for display.
     pub project: String,
-    pub entry: String,
-    pub framework_train: String,
-    pub simulation: Option<SimulationSessionInfo>,
-    pub lifecycle: ProjectLifecycle,
-    pub router: String,
-    pub graph_generation: u64,
-    pub startup: StartupStatus,
-    /// Why `lifecycle` reached `Failed`; `None` for every other lifecycle.
-    pub failure: Option<String>,
+    pub lifecycle: Lifecycle,
+    pub startup: Vec<StartupStep>,
+    /// Why `lifecycle` reached `Failed`, as a typed reason plus its evidence;
+    /// `None` for every other lifecycle.
+    pub failure: Option<DaemonFailure>,
 }

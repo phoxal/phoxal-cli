@@ -3,7 +3,7 @@
 use super::*;
 use crate::build::cargo::missing_device_path;
 use anyhow::Result;
-use phoxal_cli_core::identity::{ExecutionId, ProducerId};
+use phoxal_cli_core::identity::ExecutionId;
 use phoxal_cli_core::project::launch_plan::{
     LaunchMode, LaunchPlan, ParticipantExecution, ParticipantLaunchRecord,
 };
@@ -27,9 +27,7 @@ fn participant(id: &str, execution: ParticipantExecution) -> ParticipantLaunchRe
         launch: ParticipantLaunch {
             participant_id: id.to_string(),
             execution: ExecutionId::mint(),
-            producer: ProducerId::mint(),
             execution_origin: None,
-            namespace: "dev".to_string(),
             robot_id: "robot".to_string(),
             bus: BusProfile {
                 connect_endpoints: vec![
@@ -93,7 +91,7 @@ fn driver_subset_is_strict() -> Result<()> {
     // The subset maps onto the core plan selection, which keeps only `imu`.
     assert_eq!(
         policy.selection(),
-        phoxal_cli_core::project::layout::DriverSelection::Only(available_drivers(&["imu"]))
+        phoxal_cli_core::project::intent::DriverSelection::Only(available_drivers(&["imu"]))
     );
 
     let err = DriverPolicy::from_options(
@@ -129,7 +127,7 @@ fn drivers_off_selects_no_drivers() -> Result<()> {
     // Drivers off maps onto the core selection that plans no component drivers.
     assert_eq!(
         policy.selection(),
-        phoxal_cli_core::project::layout::DriverSelection::None
+        phoxal_cli_core::project::intent::DriverSelection::None
     );
     Ok(())
 }
@@ -224,7 +222,7 @@ fn selected_router_endpoint_reaches_plan_and_spawn_environment() {
         process_group: true,
         note: None,
         bus_participant: true,
-        readiness: ParticipantSpec::exact_liveliness_template(
+        readiness: ParticipantSpec::exact_liveliness(
             phoxal_cli_core::runtime::RobotKey::new("test", "robot"),
             "tool-bus",
         ),

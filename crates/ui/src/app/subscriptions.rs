@@ -136,8 +136,8 @@ fn is_terminal_supervisor(input: &SessionInput) -> bool {
         SessionInput::Client(AttachmentEvent::SupervisorChanged(supervisor))
             if matches!(
                 supervisor.lifecycle,
-                phoxal_cli_core::runtime::ProjectLifecycle::Stopped
-                    | phoxal_cli_core::runtime::ProjectLifecycle::Failed
+                phoxal_supervisor_api::Lifecycle::Stopped
+                    | phoxal_supervisor_api::Lifecycle::Failed
             )
     )
 }
@@ -156,6 +156,7 @@ fn slot_for(input: &SessionInput) -> Option<Slot> {
         SessionInput::Runtimes(_) => Some(Slot::RuntimesReply),
         SessionInput::Client(AttachmentEvent::EpochChanged(_))
         | SessionInput::Diagnostic(_)
+        | SessionInput::Interrupt
         | SessionInput::Terminate => None,
     }
 }
@@ -222,22 +223,17 @@ mod tests {
     use std::sync::Arc;
 
     use phoxal_cli_core::identity::ExecutionId;
-    use phoxal_cli_core::runtime::{ProjectLifecycle, StartupStatus};
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, LogWindow, QueryToken, StoreChanged, StoreRevision,
         SupervisorObservation,
     };
+    use phoxal_supervisor_api::{ExecutionMode, Lifecycle, Name, RobotIdentity};
 
     use super::*;
 
     fn changed(revision: u64) -> SessionInput {
         SessionInput::Client(AttachmentEvent::LogsChanged(StoreChanged {
-            epoch: AttachmentEpoch {
-                supervisor_generation: 1,
-                execution_id: ExecutionId::parse(&"0".repeat(ExecutionId::LEN))
-                    .expect("fixed execution id"),
-                graph_generation: 1,
-            },
+            epoch: changed_epoch(),
             revision: StoreRevision(revision),
         }))
     }
@@ -297,10 +293,9 @@ mod tests {
     fn epoch_change_is_a_barrier_and_purges_old_invalidations() {
         let pending = PendingInputs::default();
         let old = changed_epoch();
-        let new = AttachmentEpoch {
-            graph_generation: 2,
-            ..old
-        };
+        // A new execution is a new attachment, so a different execution id is
+        // exactly what an epoch change is.
+        let new = AttachmentEpoch::new(ExecutionId::mint());
         pending.push(SessionInput::Client(AttachmentEvent::EpochChanged(old)));
         pending.push(changed(1));
         pending.push(SessionInput::Client(AttachmentEvent::EpochChanged(new)));
@@ -337,10 +332,9 @@ mod tests {
     fn stale_query_reply_after_epoch_change_is_discarded() {
         let pending = PendingInputs::default();
         let old = changed_epoch();
-        let new = AttachmentEpoch {
-            graph_generation: 2,
-            ..old
-        };
+        // A new execution is a new attachment, so a different execution id is
+        // exactly what an epoch change is.
+        let new = AttachmentEpoch::new(ExecutionId::mint());
         pending.push(SessionInput::Client(AttachmentEvent::EpochChanged(new)));
         pending.push(SessionInput::Logs(LogWindow {
             epoch: old,
@@ -381,33 +375,29 @@ mod tests {
         }
         pending.push(SessionInput::Client(AttachmentEvent::SupervisorChanged(
             Arc::new(SupervisorObservation {
-                supervisor_generation: 1,
                 revision: 1,
-                execution_id: ExecutionId::mint(),
+                execution: ExecutionId::mint(),
+                robot: RobotIdentity {
+                    id: Name::new("rover"),
+                    namespace: Name::new("lab"),
+                },
+                mode: ExecutionMode::Real,
                 project: "project".into(),
-                entry: "robot.yaml".into(),
-                framework_train: "0.44".into(),
-                simulation: None,
-                lifecycle: ProjectLifecycle::Stopped,
-                router: "tcp/127.0.0.1:7447".into(),
-                graph_generation: 1,
-                startup: StartupStatus::default(),
+                lifecycle: Lifecycle::Stopped,
+                startup: Vec::new(),
                 failure: None,
             }),
         )));
         assert!(pending.drain().iter().any(|input| matches!(
             input,
             SessionInput::Client(AttachmentEvent::SupervisorChanged(supervisor))
-                if supervisor.lifecycle == ProjectLifecycle::Stopped
+                if supervisor.lifecycle == Lifecycle::Stopped
         )));
     }
 
     fn changed_epoch() -> AttachmentEpoch {
-        AttachmentEpoch {
-            supervisor_generation: 1,
-            execution_id: ExecutionId::parse(&"0".repeat(ExecutionId::LEN))
-                .expect("fixed execution id"),
-            graph_generation: 1,
-        }
+        AttachmentEpoch::new(
+            ExecutionId::parse(&"1".repeat(ExecutionId::LEN)).expect("fixed execution id"),
+        )
     }
 }

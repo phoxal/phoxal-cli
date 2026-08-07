@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use phoxal_cli_core::project::catalog::{self, ArtifactKind};
+use phoxal_cli_catalog::{ArtifactKind, Catalog, OfficialRuntime};
 pub use phoxal_cli_core::project::host_target_triple;
 use phoxal_cli_core::project::tooling::hash_tree;
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
@@ -98,7 +98,6 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
     // (organization#951 WS4 review, medium 3): reject a locked train it
     // predates before applying it, rather than silently resolving an
     // official set that never existed for that train.
-    catalog::ensure_train_supported(&project.train)?;
     let train = project.train.version.clone();
     let target = options
         .official_target_triple
@@ -107,8 +106,8 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
     robot
         .validate()
         .map_err(|errors| anyhow!("Robot errors:\n{}", join_errors(errors)))?;
-    let mut platform_runtimes = catalog::NATIVE
-        .iter()
+    let mut platform_runtimes = Catalog::official()
+        .native()
         .filter(|official| official.kind == ArtifactKind::Service)
         .map(|official| platform_runtime_from_official(official, &train, Some(&target)))
         .collect::<Vec<_>>();
@@ -117,8 +116,8 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
     // keeps them; `phoxal build` explicitly omits them so a physical target
     // build does not require a Webots controller for that target.
     let mut simulators = if options.include_simulators {
-        catalog::WEBOTS
-            .iter()
+        Catalog::official()
+            .simulation()
             .map(|official| {
                 platform_runtime_from_official(official, &train, Some(&host_target_triple()))
             })
@@ -160,7 +159,7 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
             component_roots,
         })
         .context("failed to compile the resolved source project")?,
-    )?;
+    );
 
     Ok(BundlePlan {
         source_manifest: robot.clone(),
@@ -184,7 +183,7 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
 }
 
 fn platform_runtime_from_official(
-    official: &catalog::OfficialRuntime,
+    official: &OfficialRuntime,
     train: &str,
     target: Option<&str>,
 ) -> ResolvedPlatformRuntime {
@@ -215,7 +214,7 @@ struct ComponentResolutionContext<'a> {
     registry_cache_root: &'a Path,
     train: &'a str,
     target: &'a str,
-    drivers: &'a phoxal_cli_core::project::layout::DriverSelection,
+    drivers: &'a phoxal_cli_core::project::intent::DriverSelection,
     local_packages: &'a [phoxal_cli_core::project::train::WorkspaceComponentCrate],
     offline: bool,
 }
@@ -312,7 +311,7 @@ fn resolve_registry_component_roots(
     component_ids
         .iter()
         .map(|id| {
-            let package = phoxal_cli_core::project::catalog::cargo_package_name(&format!(
+            let package = phoxal_cli_catalog::cargo_package_name(&format!(
                 "{PHOXAL_PROVIDER}/component-{id}"
             ));
             let package = crate::registry_package::fetch_registry_package(http, cache, &package, train, offline)

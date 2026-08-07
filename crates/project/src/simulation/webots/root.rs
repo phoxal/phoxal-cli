@@ -3,46 +3,56 @@
 //! Every `simulation webots run` removes `.phoxal/webots` and recreates the
 //! complete `worlds|controllers|protos` project before launching Webots.
 
-use std::path::PathBuf;
+//! Every path below is derived from the project root the caller passes in.
+//! Nothing here reads an environment variable: the root is a fact the command
+//! resolved, not a process global two call sites could disagree about.
+
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::paths::host;
-
 /// The generated Webots project root: `<project>/.phoxal/webots`.
-pub fn root() -> Result<PathBuf> {
-    host::webots_dir()
+#[must_use]
+pub fn root(project_root: &Path) -> PathBuf {
+    crate::paths::runtime::RuntimePaths::for_root(project_root)
+        .state_root
+        .join("webots")
 }
 
 /// Where generated robot/component PROTOs are written.
-pub fn protos_dir() -> Result<PathBuf> {
-    Ok(root()?.join("protos"))
+#[must_use]
+pub fn protos_dir(project_root: &Path) -> PathBuf {
+    root(project_root).join("protos")
 }
 
 /// Where generated PROTO-owned mesh assets are written.
-pub fn meshes_dir() -> Result<PathBuf> {
-    Ok(protos_dir()?.join("meshes"))
+#[must_use]
+pub fn meshes_dir(project_root: &Path) -> PathBuf {
+    protos_dir(project_root).join("meshes")
 }
 
 /// Where the generated world is written.
-pub fn worlds_dir() -> Result<PathBuf> {
-    Ok(root()?.join("worlds"))
+#[must_use]
+pub fn worlds_dir(project_root: &Path) -> PathBuf {
+    root(project_root).join("worlds")
 }
 
 /// The generated path of the world named `world_name`.
-pub fn world_path(world_name: &str) -> Result<PathBuf> {
-    Ok(worlds_dir()?.join(format!("{world_name}.wbt")))
+#[must_use]
+pub fn world_path(project_root: &Path, world_name: &str) -> PathBuf {
+    worlds_dir(project_root).join(format!("{world_name}.wbt"))
 }
 
 /// The generated controller directory. Webots expects the executable to be
 /// named exactly `<name>` inside `controllers/<name>/`.
-pub fn controller_dir(controller_name: &str) -> Result<PathBuf> {
-    Ok(root()?.join("controllers").join(controller_name))
+#[must_use]
+pub fn controller_dir(project_root: &Path, controller_name: &str) -> PathBuf {
+    root(project_root).join("controllers").join(controller_name)
 }
 
 /// Delete any previous Webots project and recreate its standard directories.
-pub fn wipe_and_recreate() -> Result<PathBuf> {
-    let root = root()?;
+pub fn wipe_and_recreate(project_root: &Path) -> Result<PathBuf> {
+    let root = root(project_root);
     if root.exists() {
         std::fs::remove_dir_all(&root).with_context(|| {
             format!(
@@ -66,17 +76,16 @@ pub fn wipe_and_recreate() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::host::test_support::ScratchPhoxalHome;
 
     #[test]
     fn recreates_the_complete_disposable_webots_project() -> Result<()> {
-        let _home = ScratchPhoxalHome::new()?;
-        let previous = root()?;
+        let project = tempfile::tempdir()?;
+        let previous = root(project.path());
         std::fs::create_dir_all(previous.join("worlds"))?;
         std::fs::write(previous.join("worlds/old-state"), b"old Webots state")?;
         std::fs::create_dir_all(previous.join("custom"))?;
 
-        let recreated = wipe_and_recreate()?;
+        let recreated = wipe_and_recreate(project.path())?;
 
         assert!(!recreated.join("worlds/old-state").exists());
         assert!(!recreated.join("custom").exists());

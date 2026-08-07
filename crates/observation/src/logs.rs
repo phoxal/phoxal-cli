@@ -103,12 +103,6 @@ pub enum LogSeverity {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct LogScope {
-    pub namespace: String,
-    pub robot_id: String,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WindowDirection {
     Forward,
@@ -120,7 +114,6 @@ pub enum WindowDirection {
 pub struct LogFilters {
     pub participant: Option<String>,
     pub minimum_severity: Option<LogSeverity>,
-    pub scope: Option<LogScope>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -146,7 +139,6 @@ pub struct LogRow {
     pub severity: LogSeverity,
     pub text: String,
     pub event_time: SystemTime,
-    pub scope: Option<LogScope>,
 }
 
 pub type LogRead = ObservationQuery<LogQuery>;

@@ -1,8 +1,8 @@
 //! Typed commands emitted by the pure UI update function.
 
-use phoxal_cli_core::identity::ProducerId;
-use phoxal_cli_core::runtime::ProcessKey;
 use phoxal_cli_observation::{LogRead, RuntimeRead};
+use phoxal_runtime_contract::ProducerId;
+use phoxal_supervisor_api::ProcessKey;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,15 +28,18 @@ pub struct EffectSenders {
     pub commands: mpsc::Sender<Effect>,
 }
 
+/// How an attachment session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachmentOutcome {
+    /// The client left; the daemon keeps running. This is what `q` means.
     Detached,
-    ResidentStopped,
-    /// `reason` is the supervisor-reported failure when one reached the
-    /// client; `None` means the connection was lost with no supervisor
+    /// The execution reached a terminal stopped state while attached.
+    ExecutionStopped,
+    /// The execution failed. `reason` is the supervisor's typed failure when
+    /// one reached the client; `None` means the connection was lost with no
     /// failure ever observed (see `update_client`'s `ConnectionChanged`
     /// handling).
-    ResidentFailed {
-        reason: Option<String>,
+    ExecutionFailed {
+        reason: Option<phoxal_supervisor_api::DaemonFailure>,
     },
 }

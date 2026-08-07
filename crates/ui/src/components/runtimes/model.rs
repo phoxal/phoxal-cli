@@ -1,5 +1,5 @@
-use phoxal_cli_core::runtime::ProcessKey;
 use phoxal_cli_observation::{AttachmentEpoch, QueryToken, RuntimeRow, StoreRevision};
+use phoxal_supervisor_api::ProcessKey;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimesModel {

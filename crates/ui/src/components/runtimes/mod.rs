@@ -16,19 +16,14 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
         .areas(area);
-    let rows = model
-        .overview
-        .processes
-        .iter()
-        .filter(|(_, process)| crate::app::process_is_runtime(process))
-        .map(|(key, process)| {
-            let candidate = model.runtimes.candidate.as_ref() == Some(key);
-            Row::new(vec![
-                if candidate { ">" } else { " " }.to_string(),
-                key.to_string(),
-                format!("{:?}", process.state).to_lowercase(),
-            ])
-        });
+    let rows = model.overview.processes.iter().map(|(key, process)| {
+        let candidate = model.runtimes.candidate.as_ref() == Some(key);
+        Row::new(vec![
+            if candidate { ">" } else { " " }.to_string(),
+            key.to_string(),
+            format!("{:?}", process.state).to_lowercase(),
+        ])
+    });
     frame.render_widget(
         Table::new(
             rows,
@@ -57,10 +52,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             let summary = row.sample.summary();
             [
                 Line::from(vec![
-                    Span::raw(format!(
-                        "{}/{}::{}  ",
-                        row.scope.namespace, row.scope.robot_id, row.sample.participant_id
-                    )),
+                    Span::raw(format!("{}  ", row.sample.participant_id)),
                     Span::raw(format!("{:.1} msg/s", summary.message_rate_hz)),
                 ]),
                 Line::from(format!(
