@@ -4,6 +4,20 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.36.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.36.0) - 2026-08-07
+
+
+### Added
+
+- Split phoxal from phoxald around finalized bundles and execution-scoped Zenoh ([#297](https://github.com/phoxal/phoxal-cli/pull/297)) [**breaking**]
+
+  The CLI now ships two executables that install and upgrade as one exact pair.
+  `phoxal` builds projects, publishes the finalized bundle, and attaches a
+  terminal session; `phoxald` supervises one execution and owns the robot's
+  Zenoh router. The finalized `robot.yaml` is the only persisted robot
+  definition, every bus key is rooted at the execution, and the private resident
+  socket protocol is gone in favour of the typed supervisor API.
+
 ## [0.35.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.35.0) - 2026-08-06
 
 
