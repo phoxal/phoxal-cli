@@ -71,6 +71,39 @@ impl RuntimePaths {
         self.volatile_root.join("supervisor.sock")
     }
 
+    /// The supervisor socket, rejected up front when the platform cannot bind
+    /// it.
+    ///
+    /// Unix-socket paths are bounded by `sun_path`; a project nested deeply
+    /// enough exceeds it and the daemon would fail at bind(2) with a transport
+    /// error long after a build. Both the client (before building) and the
+    /// daemon (before opening the router) resolve through this check so the
+    /// operator gets the actionable refusal instead.
+    ///
+    /// # Errors
+    ///
+    /// Names the byte length, the platform maximum, and the fix (a shorter
+    /// project path).
+    pub fn checked_supervisor_socket(&self) -> anyhow::Result<PathBuf> {
+        let path = self.supervisor_socket();
+        let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
+        // The bindable maximum is the `sun_path` array itself minus its NUL
+        // terminator, computed from the field offset because macOS carries an
+        // extra `sun_len` byte before the family field.
+        let maximum = std::mem::size_of::<libc::sockaddr_un>()
+            - std::mem::offset_of!(libc::sockaddr_un, sun_path)
+            - 1;
+        if bytes.len() > maximum {
+            anyhow::bail!(
+                "the supervisor socket path is {} bytes but this platform supports at most \
+                 {maximum}: {}; move the project to a shorter path",
+                bytes.len(),
+                path.display()
+            );
+        }
+        Ok(path)
+    }
+
     #[must_use]
     pub fn supervisor_log(&self) -> PathBuf {
         if self.installed {
@@ -129,5 +162,36 @@ mod tests {
                 Path::new(INSTALLED_STATE_ROOT).join("supervisor.log")
             );
         }
+    }
+
+    /// Boundary proof that the precheck agrees with the platform: the longest
+    /// path the precheck accepts must actually bind, and one byte more must be
+    /// refused by the precheck rather than by a raw bind(2) later.
+    #[test]
+    fn socket_precheck_boundary_matches_a_real_bind() {
+        let suffix = "/.phoxal/run/supervisor.sock";
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let base = scratch.path().to_str().expect("utf-8 scratch path");
+
+        let socket_for = |total: usize| {
+            let pad = total - base.len() - 1 - suffix.len();
+            let root = std::path::PathBuf::from(format!("{base}/{}", "p".repeat(pad)));
+            RuntimePaths::for_root(&root).checked_supervisor_socket()
+        };
+        let accepted_max = (60..160)
+            .rev()
+            .find(|total| socket_for(*total).is_ok())
+            .expect("some socket path length must be accepted");
+
+        let over = socket_for(accepted_max + 1)
+            .expect_err("one byte past the maximum must fail the precheck");
+        assert!(over.to_string().contains("shorter"));
+
+        let path = socket_for(accepted_max).expect("precheck accepts the maximum");
+        std::fs::create_dir_all(path.parent().expect("socket parent")).expect("create run dir");
+        let listener = std::os::unix::net::UnixListener::bind(&path)
+            .expect("precheck-accepted maximum-length path must bind");
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
     }
 }

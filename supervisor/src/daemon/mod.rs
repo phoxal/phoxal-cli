@@ -204,7 +204,7 @@ async fn execute(requested_root: &Path, state: &ExecutionState) -> Result<()> {
     // without asking anyone.
     state.step_active(StartupStepKind::Router);
     let execution = ExecutionId::mint();
-    let endpoint = router_endpoint(&paths.supervisor_socket());
+    let endpoint = router_endpoint(&paths.checked_supervisor_socket()?);
     let shutdown = CancellationToken::new();
     let router_lost = {
         let state = state.clone();

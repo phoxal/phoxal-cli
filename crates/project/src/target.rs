@@ -51,8 +51,9 @@ pub(crate) fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<Runtim
     };
     // The daemon's Zenoh listen endpoint IS the supervisor socket: one stable
     // path locates the current execution, and the per-boot identity is learned
-    // from the router behind it.
-    let supervisor_socket = paths.supervisor_socket();
+    // from the router behind it. Checked here so a too-deep project refuses
+    // before any build instead of failing at the daemon's bind.
+    let supervisor_socket = paths.checked_supervisor_socket()?;
     Ok(RuntimeTarget {
         logical_root,
         requested_entry,
