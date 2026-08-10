@@ -103,7 +103,7 @@ struct Entry {
 /// The bookkeeping files `cargo install --root` leaves in the candidate root.
 /// They embed absolute host paths, so a bundle containing them is not
 /// reproducible - and nothing at runtime reads them.
-const CARGO_INSTALL_BOOKKEEPING: [&str; 2] = [".crates.toml", ".crates2.json"];
+pub(crate) const CARGO_INSTALL_BOOKKEEPING: [&str; 2] = [".crates.toml", ".crates2.json"];
 
 /// Recursively collect every directory and regular file under `root`, sorted by
 /// relative path so the archive's entry order is stable regardless of the

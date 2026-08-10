@@ -167,10 +167,6 @@ const NATIVE: &[OfficialRuntime] = &[
         kind: ArtifactKind::Service,
     },
     OfficialRuntime {
-        package: "phoxal/service-power",
-        kind: ArtifactKind::Service,
-    },
-    OfficialRuntime {
         package: "phoxal/service-safety",
         kind: ArtifactKind::Service,
     },
