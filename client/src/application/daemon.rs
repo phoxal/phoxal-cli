@@ -179,7 +179,19 @@ mod tests {
         }
         let mut command = Command::new(&executable);
         command.stderr(Stdio::piped()).stdout(Stdio::null());
-        let mut child = command.spawn().expect("spawn the fixture daemon");
+        // A concurrently forked test child can inherit the script's write fd
+        // for the instant between open and close, and Linux then refuses the
+        // exec with ETXTBSY. The fd is closed by the time this line runs, so
+        // retrying converges as soon as the raced fork completes its own exec.
+        let mut child = loop {
+            match command.spawn() {
+                Ok(child) => break child,
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("spawn the fixture daemon: {error}"),
+            }
+        };
         let stderr = Arc::new(Mutex::new(String::new()));
         {
             let mut pipe = child.stderr.take().expect("piped stderr");
