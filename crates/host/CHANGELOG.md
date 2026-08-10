@@ -15,11 +15,3 @@ All notable changes documented here. The format follows
 
 - Reconcile CLI runtime ownership ([#299](https://github.com/phoxal/phoxal-cli/pull/299))
 
-
-## [0.36.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.36.0) - 2026-08-07
-
-
-### Added
-
-- Split phoxal from phoxald around finalized bundles and execution-scoped Zenoh ([#297](https://github.com/phoxal/phoxal-cli/pull/297)) [**breaking**]
-
