@@ -5,16 +5,10 @@
 //! isolated process group, and the kernel-level crash containment that outlives
 //! this process.
 //!
-//! # Crash containment without a guardian
-//!
-//! There used to be an out-of-process `__graph-guardian` re-exec here: a second
-//! copy of the binary holding a pipe, registering each spawned process group,
-//! and killing every registered group when the pipe hit EOF. It is gone.
-//! What replaces it is what the kernel already offers:
+//! # Kernel crash containment
 //!
 //! - **Linux:** `PR_SET_PDEATHSIG(SIGKILL)` in `pre_exec`, so the kernel kills
-//!   the child the moment this process dies, with no helper process, no pipe
-//!   protocol, no acknowledgement bookkeeping, and no failure mode of its own.
+//!   the child the moment this process dies.
 //!   Installed deployments additionally run under a systemd unit, whose cgroup
 //!   kill takes the whole tree down regardless.
 //! - **macOS:** no equivalent exists. Every graceful path here still stops the
@@ -53,16 +47,6 @@ fn scrub_std_environment(command: &mut std::process::Command) {
     for key in SUPERVISOR_ONLY_ENV {
         command.env_remove(key);
     }
-    // Every participant launch-contract variable is removed before the spec's
-    // own entries are applied, so a child is configured by its spec and by
-    // nothing that happened to be in the operator's shell. An ambient
-    // `PHOXAL_EXECUTION_ORIGIN` is the sharp case: inherited by the Webots
-    // application and through it by the controller, it would hand a clockless
-    // process real-clock authority over a run it is not part of (#952 section
-    // B).
-    for key in phoxal_runtime_contract::env::ALL {
-        command.env_remove(key);
-    }
 }
 
 /// Ask the kernel to kill this child when the spawning process dies.
@@ -97,19 +81,10 @@ pub(crate) struct ManagedChild {
 }
 
 impl ManagedChild {
-    pub(crate) fn spawn(
-        command: &mut Command,
-        process_group: bool,
-        explicit_env: &[(String, String)],
-    ) -> Result<Self> {
+    pub(crate) fn spawn(command: &mut Command) -> Result<Self> {
         scrub_environment(command);
-        command.envs(explicit_env.iter().map(|(key, value)| (key, value)));
         #[cfg(unix)]
-        if process_group {
-            // Its own group, so a graceful stop reaches the child's own
-            // descendants and never this process's terminal group.
-            command.process_group(0);
-        }
+        command.process_group(0);
         arm_parent_death_signal(command.as_std_mut());
         let inner = command.spawn().context("spawn managed child")?;
         Ok(Self { inner })
@@ -136,46 +111,6 @@ pub(crate) fn scrub_environment(command: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// #952: a managed child is configured by its spec, not by whatever the
-    /// operator's shell happened to export. The Webots case is the sharp one:
-    /// an ambient `PHOXAL_EXECUTION_ORIGIN` would be inherited by Webots and
-    /// through it by the controller, handing a clockless process real-clock
-    /// authority over a run it is not part of.
-    #[test]
-    fn a_managed_child_inherits_no_ambient_launch_contract_variable() {
-        let mut command = std::process::Command::new("/usr/bin/true");
-        scrub_std_environment(&mut command);
-        let explicit = [(
-            phoxal_runtime_contract::env::EXECUTION_ID.to_string(),
-            "a0123456789abcdef0123456789abcdef".to_string(),
-        )];
-        command.envs(explicit.iter().map(|(key, value)| (key, value)));
-
-        let effective = |key: &str| {
-            command
-                .get_envs()
-                .find(|(candidate, _)| *candidate == std::ffi::OsStr::new(key))
-                .map(|(_, value)| value)
-        };
-        for key in phoxal_runtime_contract::env::ALL {
-            if *key == phoxal_runtime_contract::env::EXECUTION_ID {
-                continue;
-            }
-            assert_eq!(
-                effective(key),
-                Some(None),
-                "{key} must be removed from a managed child's inherited environment"
-            );
-        }
-        assert_eq!(
-            effective(phoxal_runtime_contract::env::EXECUTION_ID)
-                .flatten()
-                .map(std::ffi::OsStr::to_string_lossy),
-            Some("a0123456789abcdef0123456789abcdef".into()),
-            "the spec's own entries are applied after the scrub, not before it"
-        );
-    }
 
     #[test]
     fn the_systemd_bootstrap_environment_is_scrubbed() {

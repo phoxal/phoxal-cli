@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
+use crate::cli::output::diagnostics::RuntimeEvent;
 use anyhow::{Context, Result};
-use phoxal_cli_observation::RuntimeEvent;
 use phoxal_cli_ui::{AttachmentOutcome, Effect, EffectSenders, SessionInput, UiOptions};
 use phoxal_supervisor_api::CommandOutcome;
 use tokio::signal::unix::{SignalKind, signal};
@@ -16,7 +16,7 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 
 use crate::attach::{Session, SessionPorts};
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 
 const UI_INGRESS_CAPACITY: usize = 256;
 const EFFECT_CAPACITY: usize = 64;
@@ -290,7 +290,7 @@ async fn route_effect(effect: Effect, ports: &EffectPorts) -> Option<SessionInpu
 /// error: the supervisor answered, and it said no and why.
 fn accepted(outcome: CommandOutcome) -> Result<()> {
     match outcome {
-        CommandOutcome::Accepted => Ok(()),
+        CommandOutcome::Accepted { .. } => Ok(()),
         CommandOutcome::Rejected { reason } => Err(anyhow::anyhow!(
             "the supervisor rejected the command: {}",
             rejection(reason)
@@ -301,14 +301,16 @@ fn accepted(outcome: CommandOutcome) -> Result<()> {
 fn rejection(reason: phoxal_supervisor_api::CommandRejection) -> &'static str {
     use phoxal_supervisor_api::CommandRejection;
     match reason {
-        CommandRejection::UnknownProcess => {
+        CommandRejection::UnknownParticipant => {
             "no process in the current snapshot has that key; the graph moved on"
         }
         CommandRejection::ProducerFenced => {
             "the target's producer is not the one you saw - it has already been replaced, or the \
              fresh incarnation has not opened its session yet"
         }
-        CommandRejection::NotRunning => "the execution is already stopping or stopped",
+        CommandRejection::Busy => "the supervisor is already applying another lifecycle command",
+        CommandRejection::ControlClosed => "the supervisor lifecycle loop has already ended",
+        CommandRejection::Unknown => "the supervisor returned an unknown rejection",
     }
 }
 
@@ -322,8 +324,17 @@ fn terminal_title(project: &Path) -> String {
 
 fn diagnostic_message(event: RuntimeEvent) -> String {
     match event {
-        RuntimeEvent::Diagnostic { message, .. } => message,
-        other => format!("{other:?}"),
+        RuntimeEvent::PhaseStarted { id, label } => format!("{id}: {label}"),
+        RuntimeEvent::PhaseFinished {
+            id,
+            outcome,
+            elapsed,
+        } => format!("{id}: {outcome:?} in {elapsed:?}"),
+        RuntimeEvent::Diagnostic {
+            source,
+            level,
+            message,
+        } => format!("{source:?} {level:?}: {message}"),
     }
 }
 
@@ -344,9 +355,11 @@ mod tests {
     #[test]
     fn every_rejection_reason_renders_something_actionable() {
         for reason in [
-            CommandRejection::UnknownProcess,
+            CommandRejection::UnknownParticipant,
             CommandRejection::ProducerFenced,
-            CommandRejection::NotRunning,
+            CommandRejection::Busy,
+            CommandRejection::ControlClosed,
+            CommandRejection::Unknown,
         ] {
             let error = accepted(CommandOutcome::Rejected { reason })
                 .expect_err("a rejection is not silently accepted");
@@ -354,6 +367,6 @@ mod tests {
             assert!(rendered.contains("rejected"), "{rendered}");
             assert!(rendered.len() > "the supervisor rejected the command: ".len());
         }
-        assert!(accepted(CommandOutcome::Accepted).is_ok());
+        assert!(accepted(CommandOutcome::Accepted { at_revision: 1 }).is_ok());
     }
 }

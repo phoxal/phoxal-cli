@@ -1,12 +1,8 @@
 //! Local gamepad input.
 //!
-//! The joypad used to be a framework tool: a robot-side process that read HID,
-//! published its device inventory on the bus, and took selection commands back
-//! over the bus so this client could drive it. The pad is
-//! physically attached to the machine running this client, so that round trip
-//! only moved local state away from its only reader. The client now reads the
-//! pad directly and publishes `motion::ManualCommand` - the one thing that
-//! genuinely belongs on the bus.
+//! The pad is physically attached to the machine running this client. The
+//! client reads it directly and publishes `motion::ManualCommand`, the one
+//! result that belongs on the bus.
 //!
 //! [`Joypad`] is the backend-facing half: it owns the `gilrs` handle and
 //! translates its events into [`registry`] transitions. The registry itself is

@@ -1,11 +1,54 @@
-use phoxal_cli_core::check as graph_check;
+use crate::check as graph_check;
 use phoxal_manifest::source::robot::v0::Manifest as RobotManifest;
 use serde_json::Value;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::RuntimeTarget;
+
+use crate::Reporter;
+
+pub use use_case::validate;
+
+pub struct ValidateRequest {
+    pub source: ValidationSource,
+    pub offline: bool,
+    pub reporter: Arc<dyn Reporter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidationSource {
+    Project(RuntimeTarget),
+    Archive(ArchiveValidation),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveValidation {
+    pub archive: PathBuf,
+    pub destination: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ValidationComponent {
+    pub instance: String,
+    pub source: String,
+    pub has_driver: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ValidationReport {
+    pub robot_path: PathBuf,
+    pub robot: String,
+    pub train: String,
+    pub platform_services: Vec<String>,
+    pub services: Vec<String>,
+    pub components: Vec<ValidationComponent>,
+}
 
 /// The CLI's own participant-report shape: `artifact.id` IS self-reported -
 /// a built binary's linker section carries the participant's own declared
 /// `id`, kind, class, and config schema (see
-/// `phoxal_cli_core::check::participant_metadata`) - and is checked against
+/// `crate::check::participant_metadata`) - and is checked against
 /// the expectations that selected the binary before any metadata fact is
 /// trusted (`raw_participant_report_from_extracted_metadata`).
 #[derive(Debug, Clone, PartialEq)]
@@ -45,11 +88,10 @@ pub(crate) use participants::{
     PlatformArtifactRef, check_artifact_refs_from_resolved, component_driver_runtimes_by_ref,
     source_participants_from_resolved, source_participants_from_resolved_with_drivers,
 };
-pub(crate) use use_case::validate;
 mod graph;
 pub use graph::run_check_with_context;
 mod config;
-pub(crate) use config::{validate_user_runtime_config, validate_user_service_config};
+pub(crate) use config::validate_user_service_config;
 mod metadata;
 pub(crate) use metadata::{
     extract_participant_report_from_staged_runtime, raw_participant_report_from_extracted_metadata,

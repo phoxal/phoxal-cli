@@ -7,8 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-phoxal-cli-catalog = { workspace = true }
-phoxal-cli-core = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
 phoxal-supervisor-api = { workspace = true }
 

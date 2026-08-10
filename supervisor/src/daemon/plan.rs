@@ -1,198 +1,247 @@
-//! The in-memory launch plan.
-//!
-//! The plan is never persisted. It is derived from the finalized bundle at
-//! startup - the manifest, the CLI-internal catalog, and the embedded metadata
-//! of the binaries under `bin/` - and it dies with the daemon. A restart
-//! derives it again from the same two authorities, which is why there is
-//! nothing on disk for the two to disagree about.
-//!
-//! Producers are not planned. Each participant's producer is the ZID of the
-//! Zenoh session it opens, so nothing here can name one in advance.
+//! Translate persisted runtime records into host process specifications.
 
-use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use phoxal_cli_core::project::launch_plan::{LaunchPlan, ParticipantExecution};
-use phoxal_cli_core::runtime::{
-    ParticipantKind, ParticipantSpec, ProcessKey, RobotKey, RuntimeFailurePolicy,
-    encode_participant_env,
+use crate::model::{
+    ParticipantKind, ParticipantSpec, RestartPolicy, RuntimeFailurePolicy, StartupRequirement,
 };
+use phoxal_bundle::RuntimeBundle;
+use phoxal_runtime_contract::identity::ExecutionId;
+use phoxal_runtime_contract::metadata::ParticipantKind as RuntimeKind;
+use phoxal_runtime_contract::origin::ExecutionOrigin;
 
-/// Turn the constructed launch plan into the specs the process machinery
-/// spawns, with every participant dialing this daemon's own router.
-///
-/// The endpoint is applied here rather than being carried through plan
-/// construction: the router does not exist until the execution identity has
-/// been minted and the router opened, and a plan that named an endpoint before
-/// that could only ever name a guess.
+const DEFAULT_SHUTDOWN_GRACE_MS: u64 = 2_000;
+
 pub(crate) fn participant_specs(
-    plan: &LaunchPlan,
-    bin_dir: &Path,
+    bundle: &RuntimeBundle,
+    execution: ExecutionId,
+    origin: Option<ExecutionOrigin>,
     connect_endpoint: &str,
-) -> Result<Vec<ParticipantSpec>> {
-    let mut specs = Vec::new();
-    for robot in &plan.robots {
-        let robot_key = RobotKey::new(robot.namespace.clone(), robot.id.clone());
-        for participant in &robot.participants {
-            let mut launch = participant.launch.clone();
-            launch.bus.connect_endpoints = vec![connect_endpoint.to_string()];
-            let id = launch.participant_id.clone();
-            let env = encode_participant_env(&launch).with_context(|| {
-                format!("failed to encode the launch environment for participant `{id}`")
-            })?;
-            specs.push(ParticipantSpec {
-                key: ProcessKey::robot(robot_key.clone(), &id),
-                kind: kind(&participant.execution),
-                // A bundle has no source tree, so a participant runs from
-                // nowhere in particular: every path it needs is resolved
-                // through the bundle root its launch record carries.
-                cwd: None,
-                executable: bin_dir.join(binary_name(&participant.execution)),
-                args: Vec::new(),
-                env: env.spawn_env(),
-                shutdown_grace: Duration::from_millis(launch.shutdown_grace_ms),
-                // Its own group, so a graceful stop reaches whatever the
-                // participant itself spawned.
-                process_group: true,
-                note: None,
-                bus_participant: true,
-                readiness: ParticipantSpec::exact_liveliness(robot_key.clone(), &id),
-                startup_requirement: participant.startup_requirement,
+) -> anyhow::Result<Vec<ParticipantSpec>> {
+    bundle
+        .participants()
+        .iter()
+        .map(|participant| -> anyhow::Result<_> {
+            let artifact = bundle
+                .artifacts()
+                .get(participant.artifact())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "validated runtime participant {} has no artifact {}",
+                        participant.id(),
+                        participant.artifact()
+                    )
+                })?;
+            let id = participant.id().as_str().to_string();
+            let mut args = vec![
+                "--execution-id".to_string(),
+                execution.to_string(),
+                "--participant-id".to_string(),
+                id.clone(),
+                "--bundle-root".to_string(),
+                bundle.root().display().to_string(),
+                "--connect".to_string(),
+                connect_endpoint.to_string(),
+                "--shutdown-grace-ms".to_string(),
+                DEFAULT_SHUTDOWN_GRACE_MS.to_string(),
+            ];
+            if let Some(origin) = origin {
+                args.extend(["--execution-origin".to_string(), origin.encode()]);
+            }
+            Ok(ParticipantSpec {
+                spawn: artifact.contract().kind != RuntimeKind::Simulator,
+                key: participant.id().clone().into(),
+                kind: kind(artifact.contract().kind),
+                executable: bundle.root().join(artifact.path().as_str()),
+                args,
+                shutdown_grace: Duration::from_millis(DEFAULT_SHUTDOWN_GRACE_MS),
+                startup_requirement: StartupRequirement::Required,
                 runtime_failure: RuntimeFailurePolicy::StopProject,
-                restart_policy: phoxal_cli_core::runtime::RestartPolicy::default(),
-                id,
-            });
-        }
-    }
-    Ok(specs)
+                restart_policy: RestartPolicy::default(),
+            })
+        })
+        .collect()
 }
 
-const fn kind(execution: &ParticipantExecution) -> ParticipantKind {
-    match execution {
-        ParticipantExecution::Brain { .. } => ParticipantKind::Brain,
-        ParticipantExecution::OfficialArtifact { .. }
-        | ParticipantExecution::UserService { .. } => ParticipantKind::Service,
-        ParticipantExecution::ComponentDriver { .. } => ParticipantKind::Driver,
-    }
-}
-
-fn binary_name(execution: &ParticipantExecution) -> &str {
-    match execution {
-        ParticipantExecution::Brain { binary_name }
-        | ParticipantExecution::OfficialArtifact { binary_name }
-        | ParticipantExecution::UserService { binary_name }
-        | ParticipantExecution::ComponentDriver { binary_name } => binary_name,
+const fn kind(kind: RuntimeKind) -> ParticipantKind {
+    match kind {
+        RuntimeKind::Brain => ParticipantKind::Brain,
+        RuntimeKind::Service => ParticipantKind::Service,
+        RuntimeKind::Driver => ParticipantKind::Driver,
+        RuntimeKind::Simulator => ParticipantKind::Simulator,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use phoxal_cli_core::project::launch_plan::{LaunchMode, ParticipantLaunchRecord, RobotLaunch};
-    use phoxal_cli_core::runtime::StartupRequirement;
-    use phoxal_runtime_contract::{
-        BusProfile, ClockMode, DEFAULT_SHUTDOWN_GRACE_MS, ExecutionOrigin, ParticipantLaunch, env,
+    use std::collections::BTreeMap;
+
+    use phoxal_bundle::{
+        AssetIndex, BinaryReference, BinarySource, BundlePath, BundleWriter, ParticipantClock,
+        Runtime, RuntimeDocument, RuntimeParticipant,
     };
+    use phoxal_model::{Clock, RobotBuilder};
+    use phoxal_runtime_contract::identity::{ParticipantArtifactId, ParticipantId};
+    use phoxal_runtime_contract::metadata::{
+        ParticipantContract, ParticipantKind, ParticipantSchemas,
+    };
+    use phoxal_runtime_contract::version::{BusAbi, LaunchAbi, RobotApiVersion, RuntimeSchema};
 
     use super::*;
 
-    fn plan() -> LaunchPlan {
-        let launch = |participant_id: &str| ParticipantLaunch {
-            participant_id: participant_id.to_string(),
-            execution: phoxal_cli_core::identity::ExecutionId::mint(),
-            execution_origin: Some(ExecutionOrigin::mint()),
-            robot_id: "rover".to_string(),
-            bus: BusProfile {
-                // Deliberately the placeholder plan construction writes: the
-                // daemon must replace it with its own router.
-                connect_endpoints: vec!["tcp/localhost:7447".to_string()],
-            },
-            clock: ClockMode::Simulation,
-            config: None,
-            bundle_root: Some(std::path::PathBuf::from("/bundle")),
-            component_instance: None,
-            shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
-        };
-        LaunchPlan {
-            mode: LaunchMode::Run,
-            robots: vec![RobotLaunch {
-                id: "rover".to_string(),
-                namespace: "demo".to_string(),
-                participants: vec![
-                    ParticipantLaunchRecord {
-                        artifact_id: "brain".to_string(),
-                        execution: ParticipantExecution::Brain {
-                            binary_name: "brain".to_string(),
-                        },
-                        launch: launch("brain"),
-                        startup_requirement: StartupRequirement::Required,
-                        runtime_failure: RuntimeFailurePolicy::StopProject,
-                    },
-                    ParticipantLaunchRecord {
-                        artifact_id: "ddsm115".to_string(),
-                        execution: ParticipantExecution::ComponentDriver {
-                            binary_name: "phoxal-driver-ddsm115".to_string(),
-                        },
-                        launch: launch("left"),
-                        startup_requirement: StartupRequirement::Required,
-                        runtime_failure: RuntimeFailurePolicy::StopProject,
-                    },
-                ],
-            }],
-        }
-    }
-
     #[test]
-    fn every_participant_dials_this_daemons_router_from_its_canonical_binary() {
+    fn strict_launch_uses_argv_and_no_environment_compatibility_path() {
+        let (_root, bundle) = bundle(Clock::Real, ParticipantKind::Brain);
+        let execution = ExecutionId::mint();
+        let origin = ExecutionOrigin::try_mint().expect("host boot clock");
         let specs = participant_specs(
-            &plan(),
-            Path::new("/bundle/bin"),
-            "unixsock-stream//run/supervisor.sock",
+            &bundle,
+            execution,
+            Some(origin),
+            "unixsock-stream/test.sock",
         )
-        .expect("the specs build");
-
-        assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0].executable, Path::new("/bundle/bin/brain"));
-        assert_eq!(specs[0].kind, ParticipantKind::Brain);
+        .expect("the verified bundle has a process plan");
+        assert_eq!(specs.len(), 1);
         assert_eq!(
-            specs[1].executable,
-            Path::new("/bundle/bin/phoxal-driver-ddsm115")
+            specs[0].args,
+            vec![
+                "--execution-id".to_string(),
+                execution.to_string(),
+                "--participant-id".to_string(),
+                "brain".to_string(),
+                "--bundle-root".to_string(),
+                bundle.root().display().to_string(),
+                "--connect".to_string(),
+                "unixsock-stream/test.sock".to_string(),
+                "--shutdown-grace-ms".to_string(),
+                "2000".to_string(),
+                "--execution-origin".to_string(),
+                origin.encode(),
+            ]
         );
-        assert_eq!(specs[1].kind, ParticipantKind::Driver);
-
-        for spec in &specs {
-            let connect = spec
-                .env
-                .iter()
-                .find(|(key, _)| key == env::CONNECT)
-                .map(|(_, value)| value.as_str())
-                .expect("every participant is told where to dial");
-            assert_eq!(
-                connect, "unixsock-stream//run/supervisor.sock",
-                "the plan's placeholder endpoint must not survive"
-            );
-            // Nothing plans a producer: it is the ZID of the session the
-            // participant itself opens.
-            assert!(
-                !spec.env.iter().any(|(key, _)| key.contains("PRODUCER")),
-                "{:?}",
-                spec.env
-            );
-            assert!(spec.cwd.is_none(), "a bundle run has no source directory");
-            assert!(spec.process_group, "a participant owns its own group");
-        }
+        assert!(specs[0].spawn);
     }
 
     #[test]
-    fn readiness_is_the_participants_own_liveliness_token() {
-        let specs = participant_specs(&plan(), Path::new("/bundle/bin"), "tcp/127.0.0.1:7447")
-            .expect("the specs build");
-        for spec in specs {
-            assert_eq!(
-                spec.readiness,
-                ParticipantSpec::exact_liveliness(RobotKey::new("demo", "rover"), &spec.id),
-                "a spawned process is not a ready one"
-            );
+    fn a_simulator_uses_the_same_strict_argv_without_an_origin_or_spawn() {
+        let (_root, bundle) = bundle(Clock::Simulated, ParticipantKind::Simulator);
+        let specs = participant_specs(
+            &bundle,
+            ExecutionId::mint(),
+            None,
+            "unixsock-stream/test.sock",
+        )
+        .expect("the verified bundle has a process plan");
+        let simulator = specs
+            .iter()
+            .find(|spec| spec.key.participant().as_str() == "webots")
+            .expect("simulator spec");
+        assert!(!simulator.spawn);
+        assert!(!simulator.args.iter().any(|arg| arg == "--execution-origin"));
+        assert_eq!(
+            simulator
+                .args
+                .iter()
+                .filter(|arg| arg.starts_with("--"))
+                .count(),
+            5
+        );
+    }
+
+    fn bundle(clock: Clock, kind: ParticipantKind) -> (tempfile::TempDir, RuntimeBundle) {
+        let root = tempfile::tempdir().expect("temporary bundle parent");
+        let source = BinarySource::open(std::env::current_exe().expect("test executable"))
+            .expect("test executable source");
+        let artifact_id = ParticipantArtifactId::new(match kind {
+            ParticipantKind::Brain => "brain",
+            ParticipantKind::Simulator => "webots",
+            ParticipantKind::Service | ParticipantKind::Driver => "participant",
+        })
+        .expect("artifact id");
+        let participant_id = ParticipantId::new(artifact_id.as_str()).expect("participant id");
+        let binary_path = BundlePath::new(format!("bin/{artifact_id}")).expect("binary path");
+        let reference = BinaryReference::from_source(
+            binary_path.clone(),
+            ParticipantContract {
+                id: artifact_id.clone(),
+                kind,
+                api: RobotApiVersion::new(0, 1),
+                schemas: ParticipantSchemas {
+                    bus: BusAbi::V0,
+                    launch: LaunchAbi::V0,
+                    runtime: RuntimeSchema::V0,
+                },
+                requirement: None,
+                config_schema: serde_json::json!({"type": "null"}),
+            },
+            &source,
+        )
+        .expect("binary reference");
+        let participant = RuntimeParticipant::new(
+            participant_id,
+            artifact_id.clone(),
+            None,
+            None,
+            if clock == Clock::Real {
+                ParticipantClock::Real
+            } else {
+                ParticipantClock::Simulation
+            },
+        );
+        let mut artifacts = BTreeMap::from([(artifact_id.clone(), reference)]);
+        let mut participants = vec![participant];
+        let mut binaries = BTreeMap::from([(binary_path, source)]);
+        if kind == ParticipantKind::Simulator {
+            let brain_id = ParticipantArtifactId::new("brain").expect("brain artifact id");
+            let brain_path = BundlePath::new("bin/brain").expect("brain path");
+            let brain_source =
+                BinarySource::open(std::env::current_exe().expect("test executable"))
+                    .expect("brain executable source");
+            let brain = BinaryReference::from_source(
+                brain_path.clone(),
+                ParticipantContract {
+                    id: brain_id.clone(),
+                    kind: ParticipantKind::Brain,
+                    api: RobotApiVersion::new(0, 1),
+                    schemas: ParticipantSchemas {
+                        bus: BusAbi::V0,
+                        launch: LaunchAbi::V0,
+                        runtime: RuntimeSchema::V0,
+                    },
+                    requirement: None,
+                    config_schema: serde_json::json!({"type": "null"}),
+                },
+                &brain_source,
+            )
+            .expect("brain reference");
+            artifacts.insert(brain_id.clone(), brain);
+            participants.push(RuntimeParticipant::new(
+                ParticipantId::new("brain").expect("brain participant"),
+                brain_id,
+                None,
+                None,
+                ParticipantClock::Simulation,
+            ));
+            binaries.insert(brain_path, brain_source);
         }
+        let runtime = Runtime::new(
+            RobotBuilder::new("rover")
+                .clock(clock)
+                .build()
+                .expect("robot"),
+            artifacts,
+            participants,
+            AssetIndex::from_bytes(&BTreeMap::new()).expect("empty asset index"),
+            None,
+        )
+        .expect("runtime");
+        let bundle = BundleWriter::write(
+            root.path().join("bundle"),
+            &RuntimeDocument::new(runtime),
+            &BTreeMap::new(),
+            &binaries,
+        )
+        .expect("verified bundle");
+        (root, bundle)
     }
 }

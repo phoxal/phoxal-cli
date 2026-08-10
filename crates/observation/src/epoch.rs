@@ -1,6 +1,6 @@
 //! The identity every observation in one attachment is stamped with.
 
-use phoxal_cli_core::identity::ExecutionId;
+use phoxal_runtime_contract::identity::ExecutionId;
 
 /// Identity shared by every source and store update in one attachment.
 ///

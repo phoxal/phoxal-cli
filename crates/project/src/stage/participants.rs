@@ -4,11 +4,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::source::resolver::{BundlePlan, ResolvedPlatformRuntime, official_binary_name};
 use anyhow::{Context, Result, ensure};
-use phoxal_cli_core::project::launch_plan::ParticipantLaunchRecord;
-use phoxal_cli_core::project::resolver::{
-    BundlePlan, ResolvedPlatformRuntime, official_binary_name,
-};
 
 use super::publish::remove_if_present;
 use crate::build::materialise::{MaterializeProfile, MaterializeSpec, cargo_install_batch};
@@ -56,44 +53,10 @@ impl MaterializeSettings {
     }
 }
 
-/// The canonical identity name one launched participant is stored under in
-/// `bin/`. The source-free plan (#936) names each participant's `bin/` binary
-/// on its `execution` directly - the loader resolves the identical name from
-/// the compiler-owned participant declarations - so this is just that name.
-pub(crate) fn canonical_binary_name(participant: &ParticipantLaunchRecord) -> String {
-    participant.execution.binary_name().to_string()
-}
-
-/// Stage one launched CLI-managed participant's binary into the staged `bin/`
-/// under its canonical identity name, returning the flat `bin/` entry the
-/// participant runs from. `source` is the built binary a workspace/source
-/// override resolves to; `bin/` is a flat identity-keyed store, so one driver
-/// binary shared by several component instances is linked once under its
-/// component id, and a source-overridden official lands at the same name a
-/// `cargo install`-materialized one would - the loader resolves both
-/// identically.
-///
-/// No symlinks and no `.app` bundles: the staged layout holds real file
-/// identities that keep working if `target/` is later cleaned. Every
-/// participant, on every host, gets a flat `bin/` entry - a robot participant is
-/// always a plain executable (a cargo-built `target/` binary), never a macOS
-/// `.app` bundle. The only `.app` in the whole system is the Webots
-/// *application* on the `simulate` path, which is a CLI-managed host process
-/// outside the plan/layout contract entirely and runs in place, never here.
-pub(crate) fn stage_participant_binary(
-    staged_root: &Path,
-    participant: &ParticipantLaunchRecord,
-    source: &Path,
-) -> Result<PathBuf> {
-    stage_named_binary(staged_root, &canonical_binary_name(participant), source)
-}
-
 /// Stage one resolved source binary into the staged `bin/` under an explicit
 /// canonical name, returning the flat `bin/` entry the participant runs from.
-/// This is the name-keyed core [`stage_participant_binary`] delegates to, and
-/// the entry point the layout-completing staging pass (#936) uses to link user
-/// services and component drivers into `bin/` before the loader constructs the
-/// plan. Strict flat `bin/` on every host - see [`stage_participant_binary`].
+/// The runtime document refers to these immutable entries by their exact
+/// bundle-relative paths.
 pub(crate) fn stage_named_binary(
     staged_root: &Path,
     binary_name: &str,

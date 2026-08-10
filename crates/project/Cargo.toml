@@ -12,17 +12,17 @@ dirs = { workspace = true }
 flate2 = { workspace = true }
 heck = { workspace = true }
 hex = { workspace = true }
-jsonschema = { version = "0.46.6", default-features = false }
+jsonschema = { workspace = true }
 libc = { workspace = true }
 nalgebra = { workspace = true }
 object = { workspace = true }
 pathdiff = { workspace = true }
-phoxal-bus = { workspace = true }
+phoxal-bundle = { workspace = true }
 phoxal-manifest = { workspace = true }
 phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
 phoxal-cli-catalog = { workspace = true }
-phoxal-cli-core = { workspace = true }
+phoxal-cli-host = { workspace = true }
 reqwest = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
@@ -31,12 +31,10 @@ serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
 toml = { workspace = true }
 webots-proto = { workspace = true }
 
 [dev-dependencies]
-clap = { workspace = true }
 object = { workspace = true, features = ["write"] }
 
 [lints]

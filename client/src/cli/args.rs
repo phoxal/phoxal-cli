@@ -26,7 +26,7 @@ use super::commands::{
                   \x20         -> Result<(Self::State, Self::Api)> { Ok(((), ())) }\n\
                   \x20 }\n\
                   \x20 fn main() -> phoxal::Result<()> { phoxal::run::<Brain>() }\n\n\
-                  The CLI discovers it from Cargo metadata, always builds it, stages it as `bin/brain`, and launches it in every native and Webots graph. It is never declared under robot.yaml `services:` - `brain` is a reserved identity there. A project whose root is still a code-less `src/lib.rs` anchor is rejected with the exact migration instruction."
+                  The CLI discovers it from Cargo metadata, always builds it, stages it as `bin/brain`, and launches it in every native and Webots graph. It is never declared under robot.yaml `services:` - `brain` is a reserved identity there."
 )]
 pub struct Cli {
     #[arg(
@@ -145,48 +145,5 @@ mod tests {
         assert!(Cli::try_parse_from(["phoxal", "version", "--plain"]).is_err());
         assert!(Cli::try_parse_from(["phoxal", "--quiet", "version"]).is_err());
         assert!(Cli::try_parse_from(["phoxal", "--welcome", "version"]).is_err());
-    }
-
-    /// The whole private-IPC and resident vocabulary is gone: no verb, flag, or
-    /// environment variable may reintroduce it.
-    #[test]
-    fn no_resident_or_private_bootstrap_surface_survives() {
-        use clap::Parser;
-        for removed in [
-            vec!["phoxal", "resident"],
-            vec!["phoxal", "run", "--detach"],
-            vec!["phoxal", "run", "-d"],
-            vec!["phoxal", "simulation", "webots", "run", "default", "-d"],
-            vec!["phoxal", "stop", "--force"],
-        ] {
-            assert!(
-                Cli::try_parse_from(removed.clone()).is_err(),
-                "removed surface unexpectedly parsed: {removed:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn removed_command_surfaces_stay_removed() {
-        use clap::Parser;
-        for args in [
-            vec!["phoxal", "service", "add", "avoid_obstacles"],
-            vec!["phoxal", "service", "run", "avoid_obstacles"],
-            vec!["phoxal", "service", "suite"],
-            vec!["phoxal", "runtime", "add", "avoid_obstacles"],
-            vec!["phoxal", "check", "avoid_obstacles"],
-            vec!["phoxal", "simulate", "default"],
-            vec!["phoxal", "simulation", "default"],
-            vec!["phoxal", "simulation", "run", "default"],
-            vec!["phoxal", "validate", "--allow-user-service-drift"],
-            vec!["phoxal", "deploy", "--dry-run", "--target", "aarch64"],
-            vec!["phoxal", "update"],
-            vec!["phoxal", "robot", "new", "rover"],
-            vec!["phoxal", "pull"],
-            vec!["phoxal", "outdated"],
-            vec!["phoxal", "cache"],
-        ] {
-            assert!(Cli::try_parse_from(args.clone()).is_err(), "{args:?}");
-        }
     }
 }

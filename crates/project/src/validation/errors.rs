@@ -1,9 +1,9 @@
 //! Errors responsibilities for check.
 
 use super::CheckOutcome;
+use crate::check as graph_check;
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::check as graph_check;
 
 pub(crate) fn ensure_check_outcome_ok(outcome: &CheckOutcome) -> Result<()> {
     if !outcome.report.is_ok() {

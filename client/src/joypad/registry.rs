@@ -107,11 +107,8 @@ impl Registry {
     ) -> String {
         if let Some(stable_id) = self.entries.iter().find_map(|(stable_id, entry)| {
             (entry.handle == Some(handle)).then(|| stable_id.clone())
-        }) {
-            let entry = self
-                .entries
-                .get_mut(&stable_id)
-                .expect("observed controller must still exist");
+        }) && let Some(entry) = self.entries.get_mut(&stable_id)
+        {
             entry.name = name;
             entry.connected = true;
             entry.mapped = mapped;
@@ -123,11 +120,8 @@ impl Registry {
 
         if let Some(stable_id) = self.entries.iter().find_map(|(stable_id, entry)| {
             (entry.base_id == base && entry.handle.is_none()).then(|| stable_id.clone())
-        }) {
-            let entry = self
-                .entries
-                .get_mut(&stable_id)
-                .expect("reconnecting controller must still exist");
+        }) && let Some(entry) = self.entries.get_mut(&stable_id)
+        {
             entry.handle = Some(handle);
             entry.connected = true;
             entry.mapped = mapped;
@@ -354,10 +348,9 @@ impl Registry {
             let Some(position) = candidate else {
                 break;
             };
-            let stable_id = self
-                .device_order
-                .remove(position)
-                .expect("device eviction candidate must exist");
+            let Some(stable_id) = self.device_order.remove(position) else {
+                break;
+            };
             if let Some(entry) = self.entries.remove(&stable_id) {
                 tracing::warn!(
                     device_id = %stable_id,

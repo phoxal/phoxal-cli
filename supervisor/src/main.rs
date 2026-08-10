@@ -20,61 +20,22 @@
 //! supervisor API on the bus - `phoxal attach`, `phoxal status`, `phoxal stop`
 //! - not through a second invocation of this binary.
 
-#![allow(clippy::module_name_repetitions)]
-
-use std::time::{Duration, Instant};
-
-// Four bytes per character preserves the observation crate's 4,096-character
-// routed-log bound even for maximum-width UTF-8 input.
-const MAX_CAPTURED_LINE_BYTES: usize = 16 * 1024;
-
-/// A readiness/stage-wait budget for one supervised session.
-///
-/// This is explicit rather than a large duration sentinel: an interactive
-/// operator may wait indefinitely, while a headless invocation needs a
-/// deterministic deadline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WaitBudget {
-    /// No deadline is applied.
-    Unbounded,
-    /// Fail after the supplied duration.
-    Bounded(Duration),
-}
-
-impl Default for WaitBudget {
-    /// Default to an already-elapsed bounded wait so a derived default can
-    /// never silently turn a missing policy into an unbounded wait.
-    fn default() -> Self {
-        Self::Bounded(Duration::default())
-    }
-}
-
-impl WaitBudget {
-    /// Resolve this policy into the absolute deadline used by a wait loop.
-    #[must_use]
-    pub fn deadline_from(self, now: Instant) -> Option<Instant> {
-        match self {
-            Self::Unbounded => None,
-            Self::Bounded(duration) => Some(now + duration),
-        }
-    }
-}
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 
 mod daemon;
+mod model;
 mod process;
 mod router;
 mod state;
 mod systemd;
-
-pub(crate) use phoxal_cli_core::runtime::format_duration;
-pub(crate) use phoxal_cli_core::runtime::{ParticipantSpec, ProcessState};
-
-pub(crate) use process::child::ManagedChild;
-pub(crate) use process::spec::{SupervisorAction, SupervisorActionReceiver, SupervisorOptions};
-pub(crate) use process::stages::{SupervisionStage, stages_for_run};
-pub(crate) use process::supervise::supervise_until_shutdown;
-pub(crate) use router::{RouterLost, start_embedded_router};
-pub(crate) use state::SupervisorState;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -161,10 +122,10 @@ Usage:
     phoxald <BUNDLE_ROOT>
     phoxald --version
 
-<BUNDLE_ROOT> is a finalized bundle directory: robot.yaml, assets/, and bin/.
+<BUNDLE_ROOT> is a compiled bundle directory: runtime.json, assets/, and bin/.
 Build one with `phoxal build`. The daemon validates and executes it; it never
 builds, and it takes no other options - the clock and the participant set are
-already written into the bundle's robot.yaml.
+already written into runtime.json.
 
 `--version` reports this daemon's version so `phoxal` can confirm the two ship
 as the exact pair they must be.";
@@ -195,7 +156,7 @@ mod tests {
         values.into_iter().map(OsString::from).collect()
     }
 
-    /// One operand and nothing else. Every subcommand and flag the old resident
+    /// One operand and nothing else. Every subcommand and obsolete flag
     /// entry point carried is gone, so anything shaped like one is a misuse
     /// rather than something this binary quietly ignores.
     #[test]
@@ -225,8 +186,7 @@ mod tests {
     }
 
     /// `phoxal` parses this exact line to decide whether the installed pair is
-    /// exact, so its shape is a contract between the two binaries
-    ///.
+    /// exact, so its shape is a contract between the two binaries.
     #[test]
     fn the_version_line_is_the_pair_probes_contract() {
         assert_eq!(

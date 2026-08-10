@@ -6,6 +6,9 @@ use super::{
 };
 use crate::build::cargo::SourceArtifacts;
 use crate::resolve::project::resolve_with_train;
+use crate::simulation::world;
+use crate::source::resolver::BundlePlan;
+use crate::source::resolver::ResolveOptions;
 use crate::validation::CheckGraphContext;
 use crate::validation::build_participant_report_from_binary;
 use crate::validation::check_artifact_refs_from_resolved;
@@ -14,12 +17,6 @@ use crate::validation::run_check_with_context;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use phoxal_cli_core::project::launch_plan::LaunchMode;
-use phoxal_cli_core::project::launch_plan::LaunchPlan;
-use phoxal_cli_core::project::launch_plan::RunIdentity;
-use phoxal_cli_core::project::resolver::BundlePlan;
-use phoxal_cli_core::project::resolver::ResolveOptions;
-use phoxal_cli_core::simulation::world;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -52,14 +49,14 @@ fn resolve_project_with(
         ResolveOptions,
     ) -> Result<BundlePlan>,
 ) -> Result<ResolvedSimulation> {
-    let robot_path = phoxal_cli_core::project::resolver::discover_robot_yaml(project_start)
+    let robot_path = crate::source::resolver::discover_robot_yaml(project_start)
         .with_context(|| format!("failed to find robot.yaml from {}", project_start.display()))?;
     let project_root = robot_path
         .parent()
         .context("robot.yaml did not have a parent directory")?
         .to_path_buf();
     let world_path = world::resolve_world(&project_root, &options.world)?;
-    let robot = phoxal_cli_core::project::resolver::load_robot(&robot_path)?;
+    let robot = crate::source::resolver::load_robot(&robot_path)?;
 
     // Resolve Cargo-workspace component drivers for compile-time metadata and
     // for their crate-owned model assets. Physical drivers are never launched.
@@ -104,7 +101,7 @@ mod resolve_project_tests {
         )?;
         std::fs::write(
             project.path().join("robot.yaml"),
-            "schema: phoxal/robot/v0\nrobot:\n  id: test\n  namespace: dev\n  motion_limits:\n    max_linear_speed_mps: 1.0\n    max_angular_speed_radps: 1.0\n  kinematic:\n    kind: omnidirectional\n    actuators: [drive.motor]\n    encoders: []\n  components:\n    drive:\n      component: wheel\n      mount_link: base\n",
+            "schema: phoxal/robot/v0\nrobot:\n  id: test\n  motion_limits:\n    max_linear_speed_mps: 1.0\n    max_angular_speed_radps: 1.0\n  kinematic:\n    kind: omnidirectional\n    actuators: [drive.motor]\n    encoders: []\n  components:\n    drive:\n      component: wheel\n      mount_link: base\n",
         )?;
         let reporter = Reporter;
         let seen = std::sync::atomic::AtomicBool::new(false);
@@ -135,16 +132,15 @@ pub(crate) struct CheckedSimulationInput<'a> {
     pub(crate) world: &'a Path,
     pub(crate) resolved: &'a BundlePlan,
     pub(crate) candidate_root: &'a Path,
-    pub(crate) source_participants: &'a [phoxal_cli_core::check::source::SourceParticipant],
+    pub(crate) source_participants: &'a [crate::check::source::SourceParticipant],
     pub(crate) source_artifacts: &'a SourceArtifacts,
     pub(crate) offline: bool,
-    pub(crate) run: RunIdentity,
 }
 
 pub(crate) fn build_checked_sim_launch_plan(
     input: CheckedSimulationInput<'_>,
     reporter: &dyn crate::Reporter,
-) -> Result<LaunchPlan> {
+) -> Result<()> {
     let CheckedSimulationInput {
         project_root,
         world,
@@ -153,16 +149,13 @@ pub(crate) fn build_checked_sim_launch_plan(
         source_participants,
         source_artifacts,
         offline,
-        run,
     } = input;
     let metadata_source_participants = source_participants.to_vec();
     // Webots substitutes physical drivers out of the graph. Apply that
     // command-specific selection before registry materialization and metadata
     // fetching, not after Cargo has already done unnecessary host work.
-    let platform_refs = check_artifact_refs_from_resolved(
-        resolved,
-        phoxal_cli_core::project::intent::DriverSelection::None,
-    );
+    let platform_refs =
+        check_artifact_refs_from_resolved(resolved, crate::source::intent::DriverSelection::None);
     // Materialize the full selected registry set once into the caller's
     // unpublished candidate. This candidate is later published as the
     // simulation runtime layout; there is no scratch staging tree and no
@@ -199,10 +192,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         .iter()
         .map(|runtime| {
             (
-                phoxal_cli_core::project::resolver::official_binary_name(
-                    runtime.kind,
-                    &runtime.name,
-                ),
+                crate::source::resolver::official_binary_name(runtime.kind, &runtime.name),
                 runtime,
             )
         })
@@ -241,7 +231,7 @@ pub(crate) fn build_checked_sim_launch_plan(
     let sim_participants = sim_checked_participants(&checked_participants);
     // The complete simulation surface is the only place this can be asked:
     // the controller is validated here and then handed to Webots rather than
-    // entering the resident launch plan the ordinary graph check sees.
+    // entering the supervisor launch plan the ordinary graph check sees.
     ensure_exactly_one_simulator(&sim_participants)?;
     // Reject exactly what `build`/`run` reject: `metadata_outcome` already
     // carries the real config-schema validation (`InvalidConfig` problems)
@@ -253,29 +243,19 @@ pub(crate) fn build_checked_sim_launch_plan(
     // silently accepted invalid user config and missing images).
     crate::validation::ensure_check_outcome_ok(&metadata_outcome)?;
 
-    // The simulation bundle is an ordinary finalized bundle - `clock:
-    // simulated`, every driver block stripped - so its process graph comes from
-    // the one requirement derivation, exactly like a real run. The world path
-    // is a client-owned input that never reaches the daemon, so it rides the
-    // plan mode rather than the bundle.
-    let mut plan =
-        phoxal_cli_core::project::layout::RuntimeLayout::construct_plan(candidate_root, run)?.plan;
-    plan.mode = LaunchMode::Webots {
-        world: world.to_path_buf(),
-    };
-    Ok(plan)
+    let _ = world;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simulation::participants::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
+    use crate::source::resolver::ResolvedPathOverride;
+    use crate::source::resolver::ResolvedPathOverrideKind;
+    use crate::source::resolver::ResolvedPlatformRuntime;
+    use crate::source::resolver::ResolvedUserRuntime;
     use phoxal_cli_catalog::ArtifactKind;
-    use phoxal_cli_core::project::launch_plan::RunIdentity;
-    use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
-    use phoxal_cli_core::project::resolver::ResolvedPathOverride;
-    use phoxal_cli_core::project::resolver::ResolvedPathOverrideKind;
-    use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
-    use phoxal_cli_core::project::resolver::ResolvedUserRuntime;
     use std::path::PathBuf;
 
     /// A minimal Webots-controller fixture crate: a real `cargo build`-able
@@ -326,7 +306,7 @@ mod tests {
     /// binary whose linker section declares exactly the record
     /// `#[phoxal::brain]` embeds. Its Cargo package and bin target are
     /// deliberately NOT named `brain`, so the canonical identity can never be
-    /// inferred from either (organization#973).
+    /// inferred from either ().
     fn write_brain_fixture(dir: &Path) -> (PathBuf, String) {
         let crate_dir = dir.join("robot-root");
         let bin_target = "testbot-robot".to_string();
@@ -373,7 +353,6 @@ mod tests {
     const FIXTURE_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
-  namespace: test
   motion_limits:
     max_linear_speed_mps: 0.6
     max_angular_speed_radps: 2.0
@@ -453,7 +432,7 @@ services:
         simulator_dir: PathBuf,
         brain: (PathBuf, String),
     ) -> Result<BundlePlan> {
-        let mut robot = phoxal_cli_core::project::resolver::parse_robot_from_string(FIXTURE_ROBOT)?;
+        let mut robot = crate::source::resolver::parse_robot_from_string(FIXTURE_ROBOT)?;
         robot
             .services
             .get_mut("avoid")
@@ -467,7 +446,7 @@ services:
             compiled,
             train: "0.42.0".to_string(),
             target: target.clone(),
-            brain: phoxal_cli_core::project::resolver::ResolvedBrain {
+            brain: crate::source::resolver::ResolvedBrain {
                 crate_dir: brain.0,
                 package: "testbot-robot".to_string(),
                 bin_target: brain.1,
@@ -508,7 +487,7 @@ services:
     #[test]
     fn rejects_a_user_service_whose_config_violates_its_own_schema() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        // `begin_runtime_layout` (organization#951 WS4 review) genuinely
+        // `begin_runtime_layout` genuinely
         // stages the candidate now, including the robot structure file the
         // manifest declares - it must exist for staging to reach the config
         // validation this test actually exercises.
@@ -527,11 +506,7 @@ services:
             false,
             &crate::SilentReporter,
         )?;
-        let candidate = crate::stage::begin_runtime_layout(
-            temp.path(),
-            &resolved,
-            &phoxal_cli_core::project::intent::RunIntent::simulated(),
-        )?;
+        let candidate = crate::stage::begin_runtime_layout(temp.path(), &resolved)?;
         let world = temp.path().join("world.wbt");
 
         let result = build_checked_sim_launch_plan(
@@ -543,7 +518,6 @@ services:
                 source_participants: &source_participants,
                 source_artifacts: &source_artifacts,
                 offline: false,
-                run: RunIdentity::default(),
             },
             &crate::SilentReporter,
         );

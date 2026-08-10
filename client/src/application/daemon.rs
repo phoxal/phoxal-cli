@@ -112,7 +112,6 @@ pub(crate) fn spawn(bundle_root: &Path) -> Result<LaunchedDaemon> {
     })
 }
 
-#[cfg(unix)]
 fn isolate_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     // `setpgid(0, 0)` in the child: it leaves this client's foreground process
@@ -120,17 +119,13 @@ fn isolate_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
-#[cfg(not(unix))]
-fn isolate_process_group(_command: &mut Command) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pair::DAEMON_BINARY;
 
     /// The daemon must not be in this client's process group, or a terminal
-    /// Ctrl+C would stop the robot the client only meant to detach from
-    ///.
+    /// Ctrl+C would stop the robot the client only meant to detach from.
     #[test]
     fn a_launched_daemon_leaves_this_clients_process_group() {
         let script = tempfile::tempdir().expect("temp dir");

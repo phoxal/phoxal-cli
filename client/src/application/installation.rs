@@ -4,17 +4,13 @@
 //! validates an archive, swaps the active-release symlink atomically, and
 //! restarts the unit - all of which mutate a bundle a daemon may be executing.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
-use phoxal_supervisor_api::Lifecycle;
-
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 use crate::digest::sha256_file;
 use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
@@ -49,77 +45,90 @@ impl InstallRoots {
     }
 }
 
-trait ServiceManager {
-    fn stop(&self) -> Result<()>;
-    fn start(&self) -> Result<()>;
-    fn wait_ready<'a>(
-        &'a self,
-        endpoint: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+enum ServiceControl {
+    Systemd,
+    #[cfg(test)]
+    Fake {
+        operations: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        fail_readiness_once: std::sync::Arc<std::sync::Mutex<bool>>,
+    },
 }
 
-struct SystemdService;
-
-impl ServiceManager for SystemdService {
+impl ServiceControl {
     fn stop(&self) -> Result<()> {
-        systemctl(["stop", phoxal_cli_project::SYSTEMD_UNIT])
+        match self {
+            Self::Systemd => systemctl(["stop", phoxal_cli_project::SYSTEMD_UNIT]),
+            #[cfg(test)]
+            Self::Fake { operations, .. } => {
+                operations.lock().unwrap().push("stop");
+                Ok(())
+            }
+        }
     }
 
     fn start(&self) -> Result<()> {
-        systemctl(["reset-failed", phoxal_cli_project::SYSTEMD_UNIT])?;
-        systemctl(["start", "--no-block", phoxal_cli_project::SYSTEMD_UNIT])
+        match self {
+            Self::Systemd => {
+                systemctl(["reset-failed", phoxal_cli_project::SYSTEMD_UNIT])?;
+                systemctl(["start", "--no-block", phoxal_cli_project::SYSTEMD_UNIT])
+            }
+            #[cfg(test)]
+            Self::Fake { operations, .. } => {
+                operations.lock().unwrap().push("start");
+                Ok(())
+            }
+        }
     }
 
-    fn wait_ready<'a>(
-        &'a self,
-        endpoint: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            let deadline = tokio::time::Instant::now() + READINESS_TIMEOUT;
-            loop {
-                if let Some(failure) = systemd_failure()? {
-                    bail!("phoxal.service failed before readiness: {failure}");
-                }
-                // The completed handshake plus a snapshot is the readiness
-                // signal, exactly as it is for an interactive `run`
-                //. A unit that is up but whose graph never
-                // came together answers connect and reports why.
-                if let Ok(attachment) = phoxal_supervisor_client::Attachment::open(
-                    &phoxal_supervisor_client::AttachmentConfig::new(
-                        endpoint,
-                        crate::attach::CLIENT_PARTICIPANT,
-                    ),
-                )
-                .await
-                {
-                    if let Some(snapshot) = attachment.snapshot() {
-                        match snapshot.lifecycle {
-                            Lifecycle::Ready | Lifecycle::Degraded => return Ok(()),
-                            Lifecycle::Failed => bail!(
-                                "the installed runtime failed readiness: {}",
-                                snapshot.failure.as_ref().map_or_else(
-                                    || "no reason was reported".to_string(),
-                                    |failure| format!(
-                                        "{:?}: {}",
-                                        failure.reason,
-                                        failure.detail.as_str()
-                                    ),
-                                )
-                            ),
-                            Lifecycle::Stopping | Lifecycle::Stopped => {
-                                bail!("the installed runtime stopped before it became ready")
-                            }
-                            Lifecycle::Starting => {}
-                        }
-                    }
-                    let _ = attachment.close().await;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    bail!("timed out waiting for the installed supervisor to become ready");
-                }
-                tokio::time::sleep(Duration::from_millis(250)).await;
+    async fn wait_ready(&self, endpoint: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Self::Fake {
+            operations,
+            fail_readiness_once,
+        } = self
+        {
+            operations.lock().unwrap().push("ready");
+            let mut fail = fail_readiness_once.lock().unwrap();
+            if *fail {
+                *fail = false;
+                bail!("forced readiness failure");
             }
-        })
+            return Ok(());
+        }
+
+        let deadline = tokio::time::Instant::now() + READINESS_TIMEOUT;
+        loop {
+            if let Some(failure) = systemd_failure()? {
+                bail!("phoxal.service failed before readiness: {failure}");
+            }
+            // The completed handshake plus a snapshot is the readiness
+            // signal, exactly as it is for an interactive `run`
+            //. A unit that is up but whose graph never
+            // came together answers connect and reports why.
+            if let Ok(attachment) = phoxal_supervisor_client::Attachment::open(
+                &phoxal_supervisor_client::AttachmentConfig::new(
+                    endpoint,
+                    crate::attach::CLIENT_PARTICIPANT,
+                ),
+            )
+            .await
+            {
+                let readiness = tokio::time::timeout(
+                    Duration::from_millis(250),
+                    attachment.port().wait_ready(),
+                )
+                .await;
+                let _ = attachment.close().await;
+                if let Ok(readiness) = readiness {
+                    readiness.context("the installed runtime failed readiness")?;
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("timed out waiting for the installed supervisor to become ready");
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 }
 
@@ -169,12 +178,18 @@ pub(crate) async fn install(archive: &Path, offline: bool) -> Result<PathBuf> {
     let archive = archive
         .canonicalize()
         .with_context(|| format!("failed to resolve build archive {}", archive.display()))?;
-    install_archive(&archive, &InstallRoots::system(), &SystemdService, offline).await
+    install_archive(
+        &archive,
+        &InstallRoots::system(),
+        &ServiceControl::Systemd,
+        offline,
+    )
+    .await
 }
 
 pub(crate) async fn rollback(release: Option<&str>) -> Result<PathBuf> {
     require_system_installation()?;
-    rollback_release(release, &InstallRoots::system(), &SystemdService).await
+    rollback_release(release, &InstallRoots::system(), &ServiceControl::Systemd).await
 }
 
 fn require_system_installation() -> Result<()> {
@@ -196,7 +211,7 @@ fn require_system_installation() -> Result<()> {
 async fn install_archive(
     archive: &Path,
     roots: &InstallRoots,
-    service: &dyn ServiceManager,
+    service: &ServiceControl,
     offline: bool,
 ) -> Result<PathBuf> {
     require_build_archive(archive)?;
@@ -217,18 +232,22 @@ async fn install_archive(
     );
     remove_dir_if_present(&candidate)?;
 
+    let validation_archive = archive.to_path_buf();
+    let validation_destination = candidate.clone();
     let prepared = async {
-        phoxal_cli_project::validate(phoxal_cli_project::ValidateRequest {
-            source: phoxal_cli_project::ValidationSource::Archive(
-                phoxal_cli_project::ArchiveValidation {
-                    archive: archive.to_path_buf(),
-                    destination: candidate.clone(),
-                },
-            ),
-            offline,
-            reporter: std::sync::Arc::new(phoxal_cli_project::SilentReporter),
+        tokio::task::spawn_blocking(move || {
+            phoxal_cli_project::validate(phoxal_cli_project::ValidateRequest {
+                source: phoxal_cli_project::ValidationSource::Archive(
+                    phoxal_cli_project::ArchiveValidation {
+                        archive: validation_archive,
+                        destination: validation_destination,
+                    },
+                ),
+                offline,
+                reporter: std::sync::Arc::new(phoxal_cli_project::SilentReporter),
+            })
         })
-        .await?;
+        .await??;
         reject_simulation_bundle(&candidate)?;
         fsync_tree(&candidate)?;
         Ok::<_, anyhow::Error>(())
@@ -294,7 +313,7 @@ async fn install_archive(
 async fn rollback_release(
     requested: Option<&str>,
     roots: &InstallRoots,
-    service: &dyn ServiceManager,
+    service: &ServiceControl,
 ) -> Result<PathBuf> {
     let active = active_release(&roots.active, &roots.releases)?
         .context("cannot roll back: /var/phoxal does not select a release")?;
@@ -325,7 +344,7 @@ fn discard_failed_release(release: &Path, releases: &Path) -> Result<()> {
 async fn restore_after_failed_activation(
     previous: Option<&Path>,
     roots: &InstallRoots,
-    service: &dyn ServiceManager,
+    service: &ServiceControl,
 ) -> Result<()> {
     let _ = service.stop();
     if let Some(previous) = previous {
@@ -360,15 +379,14 @@ pub(crate) const SIMULATION_BUNDLE_REJECTED: &str = "PHOXAL-E-INSTALL-SIMULATION
 /// Webots can produce - forever, on a `Restart=on-failure` unit. So the refusal
 /// is here, where the durable install is being made.
 fn reject_simulation_bundle(root: &Path) -> Result<()> {
-    let robot = root.join(phoxal_cli_core::project::layout::ROBOT_FILE);
-    let manifest = phoxal_cli_core::project::resolver::load_robot(&robot)
-        .with_context(|| format!("failed to read the bundle's {}", robot.display()))?;
-    ensure_real_clock(manifest.clock)
+    let bundle = phoxal_bundle::RuntimeBundle::open_verified(root)
+        .context("failed to verify the runtime bundle before installation")?;
+    ensure_real_clock(bundle.robot().clock())
 }
 
 /// The clock rule alone, so the refusal is testable without a bundle on disk.
-fn ensure_real_clock(clock: phoxal_manifest::source::robot::v0::Clock) -> Result<()> {
-    if clock == phoxal_manifest::source::robot::v0::Clock::Simulated {
+fn ensure_real_clock(clock: phoxal_model::Clock) -> Result<()> {
+    if clock == phoxal_model::Clock::Simulated {
         bail!(
             "error[{SIMULATION_BUNDLE_REJECTED}]: this build.phoxal is a simulation bundle \
              (clock: simulated) and is never installed. A simulated execution needs the \
@@ -569,39 +587,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    #[derive(Default)]
-    struct FakeService {
-        operations: Mutex<Vec<&'static str>>,
-        fail_readiness_once: Mutex<bool>,
-    }
-
-    impl ServiceManager for FakeService {
-        fn stop(&self) -> Result<()> {
-            self.operations.lock().unwrap().push("stop");
-            Ok(())
-        }
-
-        fn start(&self) -> Result<()> {
-            self.operations.lock().unwrap().push("start");
-            Ok(())
-        }
-
-        fn wait_ready<'a>(
-            &'a self,
-            _endpoint: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-            Box::pin(async move {
-                self.operations.lock().unwrap().push("ready");
-                let mut fail = self.fail_readiness_once.lock().unwrap();
-                if *fail {
-                    *fail = false;
-                    bail!("forced readiness failure");
-                }
-                Ok(())
-            })
-        }
-    }
-
     fn roots(temp: &tempfile::TempDir) -> InstallRoots {
         InstallRoots {
             active: temp.path().join("var/phoxal"),
@@ -667,15 +652,16 @@ mod tests {
         std::fs::create_dir(&previous)?;
         std::fs::create_dir(&failed)?;
         atomic_symlink_switch(&roots.active, &failed)?;
-        let service = FakeService::default();
+        let operations = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let service = ServiceControl::Fake {
+            operations: operations.clone(),
+            fail_readiness_once: std::sync::Arc::new(Mutex::new(false)),
+        };
 
         restore_after_failed_activation(Some(&previous), &roots, &service).await?;
 
         assert_eq!(std::fs::read_link(&roots.active)?, previous);
-        assert_eq!(
-            *service.operations.lock().unwrap(),
-            ["stop", "start", "ready"]
-        );
+        assert_eq!(*operations.lock().unwrap(), ["stop", "start", "ready"]);
         Ok(())
     }
 
@@ -723,7 +709,7 @@ mod tests {
     /// what to run instead.
     #[test]
     fn a_simulation_bundle_is_rejected_at_the_installer_with_a_named_error() {
-        use phoxal_manifest::source::robot::v0::Clock;
+        use phoxal_model::Clock;
 
         assert!(ensure_real_clock(Clock::Real).is_ok());
         let error = ensure_real_clock(Clock::Simulated)

@@ -65,13 +65,15 @@ mod tests {
         });
         model.runtimes.rows.push(RuntimeRow {
             sample: RuntimePerformanceSample {
-                sequence: 1,
-                participant_id: "runtime-token".to_string(),
-                truncated: 0,
-                window_ns: 1,
-                step: None,
-                topics: Arc::new(Vec::new()),
-                overflow: None,
+                record: phoxal_supervisor_api::payload::telemetry::Record {
+                    sequence: 1,
+                    participant_id: "runtime-token".to_string(),
+                    truncated: 0,
+                    window_ns: 1,
+                    step: None,
+                    topics: Vec::new(),
+                    overflow: None,
+                },
             },
             capacity_evictions: 0,
         });

@@ -1,4 +1,4 @@
-//! The container builder engine seam (#936).
+//! The container builder engine seam ().
 //!
 //! `phoxal build --builder container` compiles the workspace user/driver crates
 //! inside a pinned official Docker `rust` image, then hands the built binaries
@@ -8,10 +8,10 @@
 //! registry, and git caches, builds the selected packages, and installs every official
 //! package in one Cargo invocation. It never produces a Docker/OCI image.
 //!
-//! ## Officials materialize inside the container too (organization#951 WS4)
+//! ## Officials materialize inside the container too
 //!
 //! The deterministic, robot-independent catalog set (every official service
-//! ("every official always runs" per #945) is installed with one
+//! ("every official always runs" per ) is installed with one
 //! multi-package `cargo install` in the SAME container invocation,
 //! not host-side: the container already runs natively on the target
 //! architecture ([`platform_for_triple`]), which is exactly the property that
@@ -33,8 +33,7 @@
 //! --builder container` resolves the robot graph, from the same frozen
 //! source snapshot the container compiles, BEFORE invoking the container -
 //! specifically to learn them - and adds every registry-sourced driver it
-//! finds to the same `cargo install` batch the container runs (organization
-//! #951 WS4 review, blocker 2). This closes the gap the exception used to
+//! finds to the same `cargo install` batch the container runs. This ensures
 //! describe: a container build no longer leaves any official, including a
 //! component driver, to cross-compile host-side. A missing expected official
 //! in the container's own output is a hard error, never a silent fallback to
@@ -44,7 +43,7 @@
 //! container or on the host): it is staged from its own build output
 //! instead, exactly like any other source-overridden participant.
 //!
-//! ## Offline and proxy plumbing (organization#951 WS4 review, medium 4)
+//! ## Offline and proxy plumbing
 //!
 //! `--offline` threads through EVERY Cargo invocation this module makes: the
 //! workspace `cargo build` line as well as the officials' `cargo install`
@@ -192,7 +191,7 @@ pub struct ContainerBuildSpec {
     /// The complete official set to install via `cargo install` inside the
     /// container, at the resolved train: the deterministic catalog set
     /// (services) plus every registry-sourced component
-    /// driver this robot declares (organization#951 WS4 review, blocker 2).
+    /// driver this robot declares.
     /// Empty skips every official install; the caller then has no
     /// `officials_source` to hand to host-side staging, which materializes
     /// the whole set itself instead.
@@ -212,7 +211,7 @@ const CONTAINER_CARGO_GIT: &str = "/usr/local/cargo/git";
 const CONTAINER_OFFICIALS: &str = "/phoxal/officials";
 
 /// Host proxy environment variable names forwarded into the container
-/// (organization#951 WS4 review, medium 4) - both the upper- and lower-case
+/// including both the upper- and lower-case
 /// spellings different tools read, so whichever one a host's proxy setup
 /// actually exports is carried through.
 pub(super) const PROXY_ENV_VARS: &[&str] = &[
@@ -306,7 +305,7 @@ impl ContainerBuildSpec {
             ));
         }
         // The container has no route to the host's own network configuration
-        // otherwise (organization#951 WS4 review, medium 4): a build behind
+        // otherwise: a build behind
         // a corporate/lab proxy would silently fail network-side inside the
         // container even though the host itself has connectivity through it.
         args.extend(proxy_engine_args(std::env::vars()));
@@ -329,17 +328,12 @@ impl ContainerBuildSpec {
             let operands = self
                 .workspace_packages
                 .iter()
-                .map(|package| {
-                    format!(
-                        "--package {}",
-                        phoxal_cli_core::runtime::launch::shell_quote(package)
-                    )
-                })
+                .map(|package| format!("--package {}", shell_quote(package)))
                 .collect::<Vec<_>>()
                 .join(" ");
             let mut workspace_build = format!(
                 "cargo build {operands} --locked --release --target {} --target-dir {CONTAINER_WORKDIR}/target",
-                phoxal_cli_core::runtime::launch::shell_quote(&self.target),
+                shell_quote(&self.target),
             );
             if self.offline {
                 workspace_build.push_str(" --offline");
@@ -366,7 +360,7 @@ impl ContainerBuildSpec {
             commands.push(
                 command
                     .iter()
-                    .map(|arg| phoxal_cli_core::runtime::launch::shell_quote(arg))
+                    .map(|arg| shell_quote(arg))
                     .collect::<Vec<_>>()
                     .join(" "),
             );
@@ -377,6 +371,18 @@ impl ContainerBuildSpec {
             format!("set -e; {}", commands.join("; "))
         }
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'/' | b'.' | b'-' | b'_' | b':' | b',' | b'=' | b'@')
+        })
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Execute a rendered invocation, streaming output through the session UI.
@@ -646,7 +652,7 @@ mod tests {
         assert!(joined.contains("--offline"), "{joined}");
     }
 
-    /// Organization#951 WS4 review, medium 4: the officials installs already
+    /// The official installs already
     /// threaded `--offline` through; the workspace build line itself did
     /// not, so a warm-cache "offline" container build could still reach the
     /// network for the workspace's own crate dependencies. Asserts the

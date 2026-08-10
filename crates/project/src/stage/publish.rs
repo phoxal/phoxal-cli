@@ -3,10 +3,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use phoxal_cli_core::project::launch_plan::runtime_layout_dir;
-
 use super::candidate::StagedCandidate;
+use anyhow::{Context, Result};
 
 const PREVIOUS_LAYOUT_SUFFIX: &str = ".previous";
 
@@ -15,7 +13,7 @@ const PREVIOUS_LAYOUT_SUFFIX: &str = ".previous";
 /// function of the project alone, not of what was resolved into it.
 #[must_use]
 pub(crate) fn layout_path(project_root: &Path) -> PathBuf {
-    runtime_layout_dir(project_root)
+    crate::paths::runtime::runtime_bundle_root(project_root)
 }
 
 /// Atomically publish `candidate` as the live `.phoxal/bundle/`, replacing

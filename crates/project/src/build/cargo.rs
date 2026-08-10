@@ -1,13 +1,11 @@
 //! Build responsibilities for run.
 
 use super::profile::Profile;
+use crate::check::source::SourceParticipant;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::project::resolver::BundlePlan;
-use phoxal_manifest::source::robot::v0::ConnectionConfig;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -36,23 +34,6 @@ impl SourceArtifacts {
             .get(name)
             .map(PathBuf::as_path)
             .ok_or_else(|| anyhow!("source build plan did not contain participant `{name}`"))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(name: impl Into<String>, binary: PathBuf) -> Self {
-        Self {
-            by_participant: [(name.into(), binary)].into_iter().collect(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test_pairs(pairs: &[(&str, PathBuf)]) -> Self {
-        Self {
-            by_participant: pairs
-                .iter()
-                .map(|(name, binary)| ((*name).to_string(), binary.clone()))
-                .collect(),
-        }
     }
 }
 
@@ -144,12 +125,14 @@ pub(crate) fn build_selected_source_artifacts(
             workspace
         } else {
             metadata.push(load_workspace_metadata(&crate_dir, offline)?);
-            metadata.last().expect("inserted workspace metadata")
+            metadata
+                .last()
+                .ok_or_else(|| anyhow::anyhow!("workspace metadata was not retained"))?
         };
         let package = workspace.package_for(&crate_dir)?;
         // The root brain's Cargo bin target is project-specific and comes from
         // the locked metadata, never from its canonical `brain` identity
-        // (organization#973); every other participant's target name IS its
+        // (); every other participant's target name IS its
         // identity, so this is the same lookup for them.
         let binary = package.binary_for(participant.bin_target.as_deref(), &participant.name)?;
         let group_key = SourceBuildGroupKey {
@@ -248,7 +231,7 @@ pub(crate) fn build_selected_source_artifacts(
 /// manifest for the container path (host builds read `cargo metadata`).
 ///
 /// `required` is a bin target the caller ALREADY knows from Cargo metadata -
-/// today only the root brain's (organization#973). It is an exact demand: if
+/// today only the root brain's (). It is an exact demand: if
 /// that target is not among the package's bins, the manifest and the locked
 /// metadata disagree, so this fails rather than silently staging whichever
 /// single binary happens to exist. `preferred` is the softer,
@@ -730,7 +713,7 @@ pub(super) fn locate_prebuilt_binary(
     // The container always compiles with an explicit `--target <triple>`, so
     // its output is always under `target/<triple>/<profile>` - including when the
     // triple equals the CLI host triple (a Linux host building its own arch in
-    // a container). Never collapse to the implicit `target/debug` here (#936).
+    // a container). Never collapse to the implicit `target/debug` here ().
     let path = profile_binary_path(target_dir, target, profile, binary_name);
     if !path.is_file() {
         bail!(
@@ -760,7 +743,7 @@ fn profile_binary_path(
 
 /// Fail with an actionable error when the cross target's standard library is not
 /// installed, naming the exact `rustup target add` command. The CLI never
-/// installs toolchains (#936); this only turns an opaque later cargo failure
+/// installs toolchains (); this only turns an opaque later cargo failure
 /// into a precise instruction. If `rustup` is not on PATH the check is skipped -
 /// a non-rustup toolchain may still have the target - and cargo reports any real
 /// gap itself.
@@ -791,7 +774,7 @@ pub(crate) fn cargo_target_dir(crate_dir: &Path, offline: bool) -> Result<PathBu
     // resolving the target directory never triggers a lock rewrite or a
     // registry resolve. `--no-deps` already means this call has no real need
     // to reach the network, but `--offline` is threaded through anyway
-    // (organization#951 WS4 review, round 2) so it holds on principle for
+    // so it holds on principle for
     // every Cargo invocation this CLI makes, not just the ones that happen
     // to need it today.
     let mut args = vec!["metadata", "--format-version", "1", "--no-deps", "--locked"];
@@ -807,77 +790,7 @@ pub(crate) fn cargo_target_dir(crate_dir: &Path, offline: bool) -> Result<PathBu
 }
 
 pub(crate) fn binary_name_with_suffix(binary_name: &str) -> String {
-    if cfg!(windows) {
-        format!("{binary_name}.exe")
-    } else {
-        binary_name.to_string()
-    }
-}
-
-pub(crate) fn device_missing_note(resolved: &BundlePlan, participant_id: &str) -> Option<String> {
-    let component = resolved
-        .source_manifest
-        .robot
-        .components
-        .get(participant_id)?;
-    let driver = component.driver.as_ref()?;
-    let missing = missing_device_path(&driver.connection)?;
-    Some(format!(
-        "DeviceMissing: {missing} for driver {participant_id}"
-    ))
-}
-
-pub(crate) fn missing_device_path(connection: &ConnectionConfig) -> Option<String> {
-    match connection {
-        ConnectionConfig::Serial { port, .. } | ConnectionConfig::Uart { port, .. } => {
-            (!Path::new(port).exists()).then(|| port.clone())
-        }
-        ConnectionConfig::Can { bus, .. } => {
-            let path = PathBuf::from(format!("/sys/class/net/can{bus}"));
-            (!path.exists()).then(|| path.display().to_string())
-        }
-        ConnectionConfig::I2c { bus, .. } => {
-            let path = PathBuf::from(format!("/dev/i2c-{bus}"));
-            (!path.exists()).then(|| path.display().to_string())
-        }
-        ConnectionConfig::Spi { bus, chip_select } => {
-            let path = PathBuf::from(format!("/dev/spidev{bus}.{chip_select}"));
-            (!path.exists()).then(|| path.display().to_string())
-        }
-        ConnectionConfig::Gpio { chip, .. } => {
-            let path = if chip.starts_with('/') {
-                PathBuf::from(chip)
-            } else {
-                PathBuf::from("/dev").join(chip)
-            };
-            (!path.exists()).then(|| path.display().to_string())
-        }
-        ConnectionConfig::Usb {
-            vendor_id,
-            product_id,
-        } => usb_missing(*vendor_id, *product_id),
-    }
-}
-
-pub(crate) fn usb_missing(vendor_id: Option<u16>, product_id: Option<u16>) -> Option<String> {
-    let (Some(vendor_id), Some(product_id)) = (vendor_id, product_id) else {
-        return None;
-    };
-    let devices = Path::new("/sys/bus/usb/devices");
-    let entries = fs::read_dir(devices).ok()?;
-    let wanted_vendor = format!("{vendor_id:04x}");
-    let wanted_product = format!("{product_id:04x}");
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let vendor = fs::read_to_string(path.join("idVendor")).unwrap_or_default();
-        let product = fs::read_to_string(path.join("idProduct")).unwrap_or_default();
-        if vendor.trim().eq_ignore_ascii_case(&wanted_vendor)
-            && product.trim().eq_ignore_ascii_case(&wanted_product)
-        {
-            return None;
-        }
-    }
-    Some(format!("usb {wanted_vendor}:{wanted_product}"))
+    binary_name.to_string()
 }
 
 #[cfg(test)]
@@ -888,7 +801,7 @@ mod prebuilt_tests {
     /// prebuilt lookup must read `target/<triple>/release` even when the triple
     /// equals the CLI host triple - a Linux host container-building its own
     /// arch previously collapsed to `target/debug` and missed the binary
-    /// (#936, round-2 finding 2).
+    /// for the selected target architecture.
     #[test]
     fn prebuilt_lookup_uses_the_explicit_target_dir_for_the_host_triple() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -1005,7 +918,7 @@ mod prebuilt_tests {
     /// The container path looks the brain's prebuilt binary up by its
     /// Cargo-metadata-derived bin target, and keys the result under the
     /// canonical `brain` identity - never the other way round
-    /// (organization#973).
+    /// ().
     #[test]
     fn prebuilt_lookup_uses_the_brains_metadata_bin_target_not_its_identity() -> Result<()> {
         let dir = tempfile::tempdir()?;

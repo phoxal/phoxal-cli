@@ -1,13 +1,13 @@
 //! Participants responsibilities for check.
 
+use crate::check::source::SourceParticipant;
+use crate::source::resolver::BundlePlan;
+use crate::source::resolver::ResolvedComponentDriver;
+use crate::source::resolver::ResolvedPlatformRuntime;
+use crate::source::resolver::official_binary_name;
+use crate::source::tooling::resolve_project_path;
 use anyhow::Result;
 use phoxal_cli_catalog::ArtifactKind;
-use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::project::resolver::BundlePlan;
-use phoxal_cli_core::project::resolver::ResolvedComponentDriver;
-use phoxal_cli_core::project::resolver::ResolvedPlatformRuntime;
-use phoxal_cli_core::project::resolver::official_binary_name;
-use phoxal_cli_core::project::tooling::resolve_project_path;
 use std::path::Path;
 
 /// One resolved official artifact `run_check_with_context` needs a
@@ -126,7 +126,7 @@ pub(crate) fn component_driver_runtimes_by_ref(
 
 pub(crate) fn check_artifact_refs_from_resolved(
     resolved: &BundlePlan,
-    drivers: phoxal_cli_core::project::intent::DriverSelection,
+    drivers: crate::source::intent::DriverSelection,
 ) -> Vec<PlatformArtifactRef> {
     let mut refs = platform_artifact_refs_from_resolved(resolved);
     refs.extend(
@@ -157,7 +157,7 @@ pub(crate) fn source_participants_from_resolved_with_drivers(
     // The mandatory root brain enters every selected source build first: it is
     // built, inspected, and staged on the same path as every other source
     // participant, with its Cargo package/bin target kept separate from its
-    // canonical `brain` identity (organization#973).
+    // canonical `brain` identity ().
     let mut participants = vec![SourceParticipant::brain(
         resolved.brain.crate_dir.clone(),
         resolved.brain.bin_target.clone(),
@@ -203,8 +203,7 @@ pub(crate) fn source_participants_from_resolved_with_drivers(
         .path_overrides
         .iter()
         .filter(|override_| {
-            override_.kind
-                == phoxal_cli_core::project::resolver::ResolvedPathOverrideKind::Simulator
+            override_.kind == crate::source::resolver::ResolvedPathOverrideKind::Simulator
         })
         .map(|override_| {
             SourceParticipant::simulator(

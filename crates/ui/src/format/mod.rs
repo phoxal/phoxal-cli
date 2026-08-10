@@ -1,6 +1,19 @@
 //! Human-readable formatting owned by terminal presentation.
 
-pub use phoxal_cli_core::runtime::format_duration as duration;
+#[must_use]
+pub fn duration(value: std::time::Duration) -> String {
+    if value < std::time::Duration::from_secs(1) {
+        return format!("{}ms", value.as_millis());
+    }
+    if value < std::time::Duration::from_secs(60) {
+        return format!("{:.1}s", value.as_secs_f64());
+    }
+    let seconds = value.as_secs();
+    if seconds < 60 * 60 {
+        return format!("{}m {:02}s", seconds / 60, seconds % 60);
+    }
+    format!("{}h {:02}m", seconds / (60 * 60), (seconds / 60) % 60)
+}
 pub use phoxal_cli_observation::sanitize_terminal_text;
 
 /// Format a byte count using IEC units, keeping exact bytes below one KiB.

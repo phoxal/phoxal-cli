@@ -1,4 +1,4 @@
-//! One tui-realm terminal loop for an attached Phoxal resident.
+//! One tui-realm terminal loop for an attached Phoxal execution.
 
 #![deny(clippy::print_stdout)]
 
@@ -93,7 +93,7 @@ pub async fn run(
     install_panic_hook();
     if !TerminalGuard::should_use_terminal(&io::stderr()) {
         anyhow::bail!(
-            "interactive resident sessions require a terminal; run this command in a TTY"
+            "interactive attachment sessions require a terminal; run this command in a TTY"
         );
     }
     let handle = Handle::current();

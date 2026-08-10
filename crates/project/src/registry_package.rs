@@ -574,7 +574,10 @@ fn offline_cached_package(
         entries.len(),
         package_dir.display()
     );
-    let (archive, checksum) = entries.into_iter().next().expect("checked length");
+    let (archive, checksum) = entries
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("verified package cache entry disappeared"))?;
     let checksum_matches = archive_checksum_matches(&archive, &checksum).with_context(|| {
         format!(
             "cached package {package}@{version} at {} is corrupt",

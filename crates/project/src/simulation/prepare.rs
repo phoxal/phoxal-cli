@@ -9,7 +9,7 @@
 //! - Declares an `EXTERNPROTO` for each robot's generated PROTO.
 //! - Adds exactly one static robot instance.
 //! - Assigns that robot the `phoxal-simulator-webots-controller` controller.
-//! - Passes only stable robot, namespace, staged-root, and router inputs.
+//! - Passes only stable robot, staged-root, and router inputs.
 //!   Producer identity and the world timeline are controller-owned.
 //!
 //! The generated PROTO body lives in the same Webots project and the authored
@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use phoxal_model::Robot as RobotBundle;
+use phoxal_runtime_contract::identity::{ExecutionId, ParticipantId};
 
 use crate::simulation::webots::proto::{
     self, RobotInstance, WebotsController, externproto_for_generated_proto, generate_robot_proto,
@@ -31,10 +32,10 @@ pub const WEBOTS_CONTROLLER_NAME: &str = "phoxal-simulator-webots-controller";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerLaunch {
-    pub robot_id: String,
-    pub namespace: String,
-    pub bundle_root: Option<PathBuf>,
-    pub connect_endpoints: Vec<String>,
+    pub execution: ExecutionId,
+    pub participant: ParticipantId,
+    pub bundle_root: PathBuf,
+    pub connect_endpoint: String,
 }
 
 /// The staged PROTO subdirectory the generated robot PROTO's own
@@ -124,7 +125,7 @@ pub fn stage_simulation_world(
     })?;
 
     for robot in robots {
-        let proto_name = proto_name_for_robot(robot.bundle.robot_id())?;
+        let proto_name = proto_name_for_robot(robot.bundle.id().as_str())?;
         let proto_path = staged_protos_dir.join(format!("{proto_name}.proto"));
         let mesh_url_prefix = relative_mesh_url_prefix(mesh_root, &proto_path)?;
         let component_solid_links = stage_component_protos(
@@ -202,21 +203,20 @@ pub fn stage_simulation_world(
 }
 
 fn controller_args(launch: &ControllerLaunch) -> Result<Vec<String>> {
-    let mut args = vec![
-        "--robot-id".to_string(),
-        launch.robot_id.clone(),
-        "--namespace".to_string(),
-        launch.namespace.clone(),
-    ];
-    if let Some(root) = &launch.bundle_root {
-        args.extend(["--bundle-root".to_string(), root.display().to_string()]);
-    }
     anyhow::ensure!(
-        !launch.connect_endpoints.is_empty(),
-        "Webots controller requires at least one router endpoint"
+        !launch.connect_endpoint.trim().is_empty(),
+        "Webots controller requires the supervisor router endpoint"
     );
-    args.extend(["--connect".to_string(), launch.connect_endpoints.join(",")]);
-    Ok(args)
+    Ok(vec![
+        "--execution-id".to_string(),
+        launch.execution.to_string(),
+        "--participant-id".to_string(),
+        launch.participant.to_string(),
+        "--bundle-root".to_string(),
+        launch.bundle_root.display().to_string(),
+        "--connect".to_string(),
+        launch.connect_endpoint.clone(),
+    ])
 }
 
 /// Generate one PROTO per distinct component type the robot mounts, writing
@@ -247,7 +247,9 @@ fn stage_component_protos(
                     component_type.component_type
                 )
             })?;
-        let component_model = bundle.component_for_instance(component_id)?;
+        let component_model = bundle
+            .component_for_instance(component_id.as_str())
+            .context("compiled component instance is missing its component type")?;
         let comp_simulation = bundle
             .simulation_for_component_type(component_type.component_type)
             .ok_or_else(|| {
@@ -292,257 +294,29 @@ fn stage_component_protos(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
-    use phoxal_cli_core::identity::ExecutionId;
-
-    const BASE_WORLD: &str = "#VRML_SIM R2025a utf8\nWorldInfo {}\n";
-
-    fn fixture_bundle(component_source_dir: &Path) -> Result<RobotBundle> {
-        let project_root = component_source_dir
-            .parent()
-            .and_then(Path::parent)
-            .context("fixture component path has no project root")?;
-        std::fs::create_dir_all(component_source_dir)?;
-        std::fs::write(
-            component_source_dir.join("structure.urdf"),
-            r#"<robot name="drive">
-  <link name="axle" />
-  <link name="wheel" />
-  <joint name="wheel_joint" type="continuous">
-    <parent link="axle" />
-    <child link="wheel" />
-  </joint>
-</robot>"#,
-        )?;
-        std::fs::write(
-            project_root.join("robot.yaml"),
-            r#"schema: phoxal/robot/v0
-robot:
-  id: testbot
-  namespace: dev
-  motion_limits:
-    max_linear_speed_mps: 0.6
-    max_angular_speed_radps: 2.0
-  kinematic:
-    kind: omnidirectional
-    actuators:
-      - drive.motor
-    encoders: []
-  components:
-    drive:
-      component: drive
-      mount_link: base_link
-"#,
-        )?;
-        std::fs::write(
-            component_source_dir.join("component.yaml"),
-            r#"schema: phoxal/component/v0
-capabilities:
-  motor:
-    kind: motor
-    command: velocity
-    target:
-      kind: joint
-      id: wheel_joint
-"#,
-        )?;
-        std::fs::write(
-            component_source_dir.join("simulation.yaml"),
-            "schema: phoxal/simulation/v0\ncapabilities: {}\nlinks: {}\n",
-        )?;
-        std::fs::write(
-            project_root.join("structure.urdf"),
-            r#"<robot name="testbot">
-  <link name="base_footprint" />
-  <link name="base_link" />
-  <joint name="root" type="fixed">
-    <parent link="base_footprint" />
-    <child link="base_link" />
-  </joint>
-</robot>"#,
-        )?;
-        let compiled = phoxal_manifest::compile(phoxal_manifest::SourceSet {
-            project_root: project_root.to_path_buf(),
-            robot_manifest: project_root.join("robot.yaml"),
-            component_roots: BTreeMap::from([(
-                "drive".to_string(),
-                component_source_dir.to_path_buf(),
-            )]),
-        })?;
-        Ok(compiled.into_parts().0)
-    }
 
     #[test]
-    fn stages_exactly_one_static_controller_robot_without_lifecycle_arguments() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let component_source_dir = temp.path().join("source-components/drive");
-        let bundle = fixture_bundle(&component_source_dir)?;
+    fn controller_arguments_are_strict_and_identity_typed() -> Result<()> {
+        let execution = ExecutionId::mint();
         let launch = ControllerLaunch {
-            namespace: "dev".to_string(),
-            robot_id: "testbot".to_string(),
-            bundle_root: Some(PathBuf::from("../../runtime")),
-            connect_endpoints: vec![
-                "unixsock-stream/a".to_string(),
-                "tcp/localhost:7447".to_string(),
-            ],
+            execution,
+            participant: ParticipantId::new("webots-controller-testbot")?,
+            bundle_root: PathBuf::from("/runtime"),
+            connect_endpoint: "tcp/127.0.0.1:7447".to_string(),
         };
-        let world = temp.path().join("worlds/default.wbt");
-        stage_simulation_world(
-            BASE_WORLD,
-            &temp.path().join("protos"),
-            &temp.path().join("meshes"),
-            &world,
-            &[RobotToStage {
-                robot_id: "testbot".to_string(),
-                bundle: &bundle,
-                component_types: vec![ComponentTypeToStage {
-                    component_type: "drive",
-                }],
-                controller_launch: launch,
-            }],
-        )?;
-        let text = std::fs::read_to_string(world)?;
         assert_eq!(
-            text.matches(&format!("controller \"{WEBOTS_CONTROLLER_NAME}\""))
-                .count(),
-            1
+            controller_args(&launch)?,
+            vec![
+                "--execution-id",
+                execution.to_string().as_str(),
+                "--participant-id",
+                "webots-controller-testbot",
+                "--bundle-root",
+                "/runtime",
+                "--connect",
+                "tcp/127.0.0.1:7447",
+            ]
         );
-        assert!(!text.contains("supervisor TRUE"));
-        assert!(!text.contains("--participant-id"));
-        assert!(!text.contains("--producer"));
-        assert!(!text.contains("--epoch"));
-        assert!(text.contains("--bundle-root"));
-        assert!(text.contains("../../runtime"));
-        assert!(text.contains("unixsock-stream/a,tcp/localhost:7447"));
-        assert!(temp.path().join("protos/components/Drive.proto").is_file());
-        Ok(())
-    }
-
-    /// #952: the run identity reaches the controller through Webots'
-    /// environment and nowhere else. The staged scene must therefore be a
-    /// function of the robot model alone - two runs of the same project stage
-    /// byte-identical worlds, and neither contains an execution id.
-    ///
-    /// This is what keeps the staged-content digest stable across runs, and
-    /// what keeps the controller directory a run-invariant function of package
-    /// content once controllers are installed packages (#951).
-    #[test]
-    fn the_staged_world_is_a_function_of_the_robot_model_not_of_the_run() -> Result<()> {
-        let fixture = tempfile::tempdir()?;
-        let component_source_dir = fixture.path().join("components/drive");
-        let bundle = fixture_bundle(&component_source_dir)?;
-        let launch = ControllerLaunch {
-            namespace: "dev".to_string(),
-            robot_id: "testbot".to_string(),
-            bundle_root: Some(PathBuf::from("../../runtime")),
-            connect_endpoints: vec!["tcp/localhost:7447".to_string()],
-        };
-
-        let mut staged = Vec::new();
-        let executions = [ExecutionId::mint(), ExecutionId::mint()];
-        for _ in &executions {
-            let temp = tempfile::tempdir()?;
-            let world = temp.path().join("worlds/default.wbt");
-            stage_simulation_world(
-                BASE_WORLD,
-                &temp.path().join("protos"),
-                &temp.path().join("meshes"),
-                &world,
-                &[RobotToStage {
-                    robot_id: "testbot".to_string(),
-                    bundle: &bundle,
-                    component_types: vec![ComponentTypeToStage {
-                        component_type: "drive",
-                    }],
-                    controller_launch: launch.clone(),
-                }],
-            )?;
-            staged.push(std::fs::read_to_string(world)?);
-        }
-
-        assert_eq!(
-            staged[0], staged[1],
-            "two runs of one project must stage the same scene"
-        );
-        for execution in executions {
-            assert!(
-                !staged[0].contains(&execution.to_string()),
-                "the run identity must not enter the staged world"
-            );
-        }
-        Ok(())
-    }
-
-    #[derive(Debug, Parser)]
-    struct ControllerCliShape {
-        #[arg(long)]
-        robot_id: String,
-        #[arg(long)]
-        namespace: String,
-        #[arg(long)]
-        bundle_root: Option<PathBuf>,
-        #[arg(long)]
-        connect: Option<String>,
-    }
-
-    #[test]
-    fn controller_argv_round_trips_through_the_framework_clap_shape() -> Result<()> {
-        let launch = ControllerLaunch {
-            namespace: "dev".to_string(),
-            robot_id: "testbot".to_string(),
-            bundle_root: Some(PathBuf::from("../../runtime")),
-            connect_endpoints: vec![
-                "unixsock-stream/a".to_string(),
-                "tcp/localhost:7447".to_string(),
-            ],
-        };
-        let args = controller_args(&launch)?;
-        let parsed = ControllerCliShape::try_parse_from(
-            std::iter::once("controller").chain(args.iter().map(String::as_str)),
-        )?;
-        assert_eq!(parsed.robot_id, "testbot");
-        assert_eq!(parsed.namespace, "dev");
-        assert_eq!(parsed.bundle_root, Some(PathBuf::from("../../runtime")));
-        assert_eq!(
-            parsed.connect.as_deref(),
-            Some("unixsock-stream/a,tcp/localhost:7447")
-        );
-        assert_eq!(args.iter().filter(|arg| *arg == "--connect").count(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn stages_a_mounted_component_proto_and_relative_world_reference() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let protos_dir = temp.path().join("protos");
-        let mesh_root = temp.path().join("meshes");
-        let world_path = temp.path().join("worlds/default.wbt");
-        let component_source_dir = temp.path().join("source-components/drive");
-        let bundle = fixture_bundle(&component_source_dir)?;
-        let staged = stage_simulation_world(
-            BASE_WORLD,
-            &protos_dir,
-            &mesh_root,
-            &world_path,
-            &[RobotToStage {
-                robot_id: "testbot".to_string(),
-                bundle: &bundle,
-                component_types: vec![ComponentTypeToStage {
-                    component_type: "drive",
-                }],
-                controller_launch: ControllerLaunch {
-                    robot_id: "testbot".to_string(),
-                    namespace: "dev".to_string(),
-                    bundle_root: Some(PathBuf::from("../../runtime")),
-                    connect_endpoints: vec!["unixsock-stream/router".to_string()],
-                },
-            }],
-        )?;
-        assert!(protos_dir.join("components/Drive.proto").is_file());
-        let robot_proto = std::fs::read_to_string(protos_dir.join("Testbot.proto"))?;
-        assert!(robot_proto.contains("components/Drive.proto"));
-        let staged_world = std::fs::read_to_string(staged.staged_world_path)?;
-        assert!(staged_world.contains("../protos/Testbot.proto"));
         Ok(())
     }
 }

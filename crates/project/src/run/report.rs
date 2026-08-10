@@ -1,10 +1,16 @@
 //! Report responsibilities for run.
 
-use super::{DriverDecision, DriversMode, RunOptions};
+use super::{DriversMode, RunOptions};
+use crate::source::intent::DriverSelection;
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::project::intent::DriverSelection;
 use std::collections::BTreeSet;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DriverDecision {
+    Launch,
+    Degraded(String),
+}
 
 #[derive(Debug)]
 pub(crate) struct DriverPolicy {
@@ -13,18 +19,11 @@ pub(crate) struct DriverPolicy {
 }
 
 impl DriverPolicy {
-    pub(crate) fn drivers_off_for_sim() -> Self {
-        Self {
-            mode: DriversMode::Off,
-            subset: BTreeSet::new(),
-        }
-    }
-
     /// Build the driver policy from the run options, validating a `--driver`
     /// subset against `available` - the full set of driven component-instance
     /// ids from the robot model. This must validate against every driven
     /// instance, not the constructed plan: the plan already has excluded drivers
-    /// removed (#936), so an unknown id would otherwise be reported against an
+    /// removed (), so an unknown id would otherwise be reported against an
     /// empty or narrowed list.
     pub(crate) fn from_options(options: &RunOptions, available: &BTreeSet<String>) -> Result<Self> {
         let subset = options
@@ -52,7 +51,7 @@ impl DriverPolicy {
     }
 
     /// The core plan-construction selection this policy maps onto: `run`/`start`
-    /// feed it into [`RuntimeLayout::construct_plan`](phoxal_cli_core::project::layout::RuntimeLayout::construct_plan)
+    /// write it into the canonical runtime bundle
     /// and [`stage_complete_bin_store`](super::participants::stage_complete_bin_store) so an
     /// excluded driver is never required, resolved, inspected, staged, or planned.
     pub(crate) fn selection(&self) -> DriverSelection {
@@ -65,9 +64,9 @@ impl DriverPolicy {
 
     /// The driven component instances this policy excludes from the plan, each
     /// with the operator-facing reason. The excluded drivers are never plan
-    /// participants (the plan constructor drops them, #936), so this is the only
+    /// participants because the plan constructor drops them, so this is the only
     /// place their absence is explained; [`report_excluded_drivers`] surfaces it
-    /// as a session-level informational summary (#936, finding 8).
+    /// as a session-level informational summary.
     pub(crate) fn excluded_drivers(&self, driven: &BTreeSet<String>) -> Vec<(String, String)> {
         driven
             .iter()
@@ -90,8 +89,8 @@ impl DriverPolicy {
 }
 
 /// Emit a session-level informational summary of the drivers the policy excludes
-/// from the plan, so an operator understands why hardware rows are absent (#936,
-/// finding 8). The excluded drivers are deliberately NOT plan participants; this
+/// from the plan, so an operator understands why hardware rows are absent. The
+/// excluded drivers are deliberately not plan participants; this
 /// is a one-line advisory into the session diagnostics stream, nothing more. No
 /// output when the policy launches every driver.
 pub(crate) fn report_excluded_drivers(
@@ -112,11 +111,11 @@ pub(crate) fn report_excluded_drivers(
 }
 
 /// Surface workspace runtime crates that are present but not declared in
-/// robot.yaml (#950): legal drift, not built or launched. One advisory line
+/// robot.yaml (): legal drift, not built or launched. One advisory line
 /// naming each crate and the map that would declare it, so authors notice a
 /// service they forgot to declare. No output when there is no drift.
 pub(crate) fn report_undeclared_runtimes(
-    undeclared: &[phoxal_cli_core::project::resolver::UndeclaredRuntime],
+    undeclared: &[crate::source::resolver::UndeclaredRuntime],
     ui: &dyn crate::Reporter,
 ) {
     if undeclared.is_empty() {
@@ -139,7 +138,7 @@ pub(crate) fn report_undeclared_runtimes(
 
 /// The full set of driven component-instance ids from a compiled robot model.
 /// A `--driver` subset is validated against this - not the constructed plan,
-/// which already drops the drivers the policy excludes (#936).
+/// which already drops the drivers the policy excludes ().
 pub(crate) fn driven_instances(
     robot: &phoxal_manifest::source::robot::v0::Manifest,
 ) -> BTreeSet<String> {

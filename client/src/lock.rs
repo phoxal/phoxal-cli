@@ -46,7 +46,7 @@ impl ProjectLockIdentity {
     #[must_use]
     pub fn resolve(project: &Path, operation: ProjectOperation) -> Self {
         let project = best_effort_absolute(project);
-        let entry = phoxal_cli_core::project::resolver::discover_robot_yaml(&project)
+        let entry = phoxal_cli_project::source::resolver::discover_robot_yaml(&project)
             .map(|entry| best_effort_absolute(&entry))
             .unwrap_or_else(|_| project.join("robot.yaml"));
         Self {
@@ -80,7 +80,7 @@ pub struct ProjectLock {
 impl ProjectLock {
     #[must_use]
     pub fn lock_path(project: &Path) -> PathBuf {
-        phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project).build_lock()
+        phoxal_cli_host::paths::RuntimePaths::for_root(project).build_lock()
     }
 
     pub fn acquire(identity: ProjectLockIdentity) -> Result<Self> {
@@ -100,7 +100,7 @@ impl ProjectLock {
             .truncate(false)
             .open(path)
             .with_context(|| format!("failed to open project-operation lock {}", path.display()))?;
-        if let Err(error) = phoxal_cli_core::advisory::try_advisory_lock(&file, true) {
+        if let Err(error) = phoxal_cli_host::advisory::try_advisory_lock(&file, true) {
             let active = read_identity(&mut file).ok();
             if let Some(active) = active {
                 bail!(
@@ -166,7 +166,7 @@ pub struct ExecutionHolder {
 /// Only when the lock exists but cannot be opened at all. A missing lock is
 /// not an error: it means no daemon has ever run here.
 pub fn execution_holder(root: &Path) -> Result<Option<ExecutionHolder>> {
-    let lock = phoxal_cli_core::runtime::paths::RuntimePaths::for_root(root).supervisor_lock();
+    let lock = phoxal_cli_host::paths::RuntimePaths::for_root(root).supervisor_lock();
     let mut file = match File::open(&lock) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -176,10 +176,10 @@ pub fn execution_holder(root: &Path) -> Result<Option<ExecutionHolder>> {
             });
         }
     };
-    if phoxal_cli_core::advisory::try_advisory_lock(&file, true).is_ok() {
+    if phoxal_cli_host::advisory::try_advisory_lock(&file, true).is_ok() {
         // Free. Release the probe at once: holding it would block the very
         // daemon this command is about to launch.
-        let _ = phoxal_cli_core::advisory::unlock_advisory(&file);
+        let _ = phoxal_cli_host::advisory::unlock_advisory(&file);
         return Ok(None);
     }
     let mut recorded = String::new();
@@ -222,7 +222,7 @@ impl Drop for ProjectLock {
     fn drop(&mut self) {
         // The inode is intentionally permanent. Unlinking a locked file lets a
         // competing process create and lock a different inode at the same path.
-        let _ = phoxal_cli_core::advisory::unlock_advisory(&self.file);
+        let _ = phoxal_cli_host::advisory::unlock_advisory(&self.file);
     }
 }
 
@@ -336,8 +336,7 @@ mod tests {
 
         // A daemon-style holder takes the supervisor lock for its whole life
         // and records its pid, exactly as `phoxald` does.
-        let lock_path =
-            phoxal_cli_core::runtime::paths::RuntimePaths::for_root(&project).supervisor_lock();
+        let lock_path = phoxal_cli_host::paths::RuntimePaths::for_root(&project).supervisor_lock();
         fs::create_dir_all(lock_path.parent().context("the run directory")?)?;
         let mut held = OpenOptions::new()
             .create(true)
@@ -345,7 +344,7 @@ mod tests {
             .write(true)
             .truncate(false)
             .open(&lock_path)?;
-        phoxal_cli_core::advisory::try_advisory_lock(&held, true)
+        phoxal_cli_host::advisory::try_advisory_lock(&held, true)
             .expect("the daemon-style holder takes the supervisor lock");
         writeln!(held, "4242")?;
         held.sync_data()?;
@@ -366,7 +365,7 @@ mod tests {
         drop(build);
 
         // Released: the probe finds it free and the mutation proceeds.
-        phoxal_cli_core::advisory::unlock_advisory(&held)
+        phoxal_cli_host::advisory::unlock_advisory(&held)
             .expect("the holder releases the supervisor lock");
         refuse_while_execution_is_live(&project)?;
         Ok(())
@@ -378,8 +377,7 @@ mod tests {
     fn an_abandoned_supervisor_lock_file_never_refuses_a_mutation() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let project = temp.path().join("project");
-        let lock_path =
-            phoxal_cli_core::runtime::paths::RuntimePaths::for_root(&project).supervisor_lock();
+        let lock_path = phoxal_cli_host::paths::RuntimePaths::for_root(&project).supervisor_lock();
         fs::create_dir_all(lock_path.parent().context("the run directory")?)?;
         fs::write(&lock_path, "999999\n")?;
 

@@ -27,9 +27,9 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             // The clock IS the mode: `clock: simulated` in the finalized
             // manifest is what selects the simulator, and the daemon passes it
             // through untouched.
-            let mode = match snapshot.mode {
-                phoxal_supervisor_api::ExecutionMode::Real => "real",
-                phoxal_supervisor_api::ExecutionMode::Simulated => "simulated",
+            let mode = match snapshot.clock {
+                phoxal_supervisor_api::Clock::Real => "real",
+                phoxal_supervisor_api::Clock::Simulated => "simulated",
             };
             let timeline = startup_timeline(
                 &snapshot.startup,
@@ -57,11 +57,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                 ]));
             }
             lines.extend([
-                Line::from(format!(
-                    "Robot: {}/{}",
-                    sanitize(snapshot.robot.namespace.as_str()),
-                    sanitize(snapshot.robot.id.as_str())
-                )),
+                Line::from(format!("Robot: {}", sanitize(snapshot.robot.as_str()))),
                 Line::from(format!("Execution: {}", snapshot.execution)),
                 Line::from(format!("Processes: {}", model.overview.processes.len())),
             ]);
@@ -75,32 +71,24 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         )),
         status,
     );
-    let stale = model
-        .overview
-        .freshness
-        .iter()
-        .filter(|(_, freshness)| matches!(freshness, phoxal_cli_observation::Freshness::Stale))
-        .map(|(source, _)| source.as_str())
-        .collect::<Vec<_>>();
     let source_states = model
         .overview
         .source_health
         .as_ref()
         .into_iter()
         .flat_map(|health| health.sources.iter())
-        .map(|(source, status)| format!("{}: {status:?}", sanitize(source)))
+        .map(|(source, status)| format!("{}: {status:?}", source.label()))
         .collect::<Vec<_>>();
     let ingress_dropped = model
         .overview
         .source_health
         .as_ref()
         .map_or(0, |health| health.ingress_dropped);
-    let health_text = if stale.is_empty() && source_states.is_empty() {
+    let health_text = if source_states.is_empty() {
         format!("All observed sources are fresh\nEpoch history shed: {ingress_dropped}")
     } else {
         format!(
-            "Stale: {}\nEpoch history shed: {ingress_dropped}\n{}",
-            stale.join(", "),
+            "Epoch history shed: {ingress_dropped}\n{}",
             source_states.join("\n")
         )
     };
@@ -140,8 +128,6 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
 fn startup_step_label(kind: StartupStepKind) -> &'static str {
     match kind {
         StartupStepKind::Bundle => "Bundle",
-        StartupStepKind::Requirements => "Requirements",
-        StartupStepKind::Binaries => "Binaries",
         StartupStepKind::Router => "Router",
         StartupStepKind::Participants => "Participants",
     }
@@ -185,7 +171,7 @@ fn startup_timeline(
     height: usize,
     unicode: bool,
 ) -> Vec<StartupTimelineLine> {
-    // The overview panel has room for all four typed steps only on a normal
+    // The overview panel has room for the fixed typed steps only on a normal
     // terminal. Preserve the compact active-step behaviour on short/narrow
     // displays so startup context never evicts controls or diagnostics.
     if height < 11 {
@@ -273,10 +259,6 @@ fn connection_label(connection: Option<&phoxal_cli_observation::ConnectionObserv
     match connection {
         None => "waiting".to_string(),
         Some(ConnectionObservation::Connected) => "connected".to_string(),
-        Some(ConnectionObservation::Reconnecting { attempt }) => {
-            format!("reconnecting (attempt {attempt})")
-        }
-        Some(ConnectionObservation::Terminal) => "terminal".to_string(),
         Some(ConnectionObservation::Lost { reason }) => {
             format!("lost: {}", sanitize(reason))
         }
@@ -292,8 +274,7 @@ mod startup_timeline_tests {
     use super::*;
     use phoxal_supervisor_api::Detail;
 
-    /// The daemon's own sequence, mid-flight: three steps behind it and two to
-    /// go.
+    /// The daemon's own sequence, including one failure and one pending step.
     fn timeline() -> Vec<StartupStep> {
         vec![
             StartupStep {
@@ -301,18 +282,6 @@ mod startup_timeline_tests {
                 state: StartupStepState::Done,
                 detail: Some(Detail::new(".phoxal/bundle")),
                 elapsed_ms: Some(125),
-            },
-            StartupStep {
-                kind: StartupStepKind::Requirements,
-                state: StartupStepState::Done,
-                detail: Some(Detail::new("6 participants")),
-                elapsed_ms: Some(4),
-            },
-            StartupStep {
-                kind: StartupStepKind::Binaries,
-                state: StartupStepState::Active,
-                detail: Some(Detail::new("validated 2/3")),
-                elapsed_ms: None,
             },
             StartupStep {
                 kind: StartupStepKind::Router,
@@ -340,12 +309,10 @@ mod startup_timeline_tests {
     #[test]
     fn normal_height_renders_all_typed_states_details_and_elapsed_time() {
         let rendered = rendered(&timeline(), 100, 20, true);
-        assert_eq!(rendered.lines().count(), 5);
+        assert_eq!(rendered.lines().count(), 3);
         assert!(rendered.contains("✓ Bundle"), "{rendered}");
-        assert!(rendered.contains("◐ Binaries"), "{rendered}");
         assert!(rendered.contains("✗ Router"), "{rendered}");
         assert!(rendered.contains("○ Participants"), "{rendered}");
-        assert!(rendered.contains("validated 2/3"), "{rendered}");
         assert!(rendered.contains("2.0s"), "{rendered}");
         assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
     }
@@ -353,18 +320,19 @@ mod startup_timeline_tests {
     #[test]
     fn narrow_height_keeps_every_state_and_label_without_detail() {
         let rendered = rendered(&timeline(), 30, 20, true);
-        assert_eq!(
-            rendered,
-            "✓ Bundle\n✓ Requirements\n◐ Binaries\n✗ Router\n○ Participants"
-        );
+        assert_eq!(rendered, "✓ Bundle\n✗ Router\n○ Participants");
     }
 
     #[test]
     fn short_height_falls_back_to_sanitized_active_summary() {
         let mut startup = timeline();
+        startup[2].state = StartupStepState::Active;
         startup[2].detail = Some(Detail::new("validate\nstep\u{1b}[2J"));
         let rendered = rendered(&startup, 100, 10, true);
-        assert!(rendered.starts_with("active: Binaries · "), "{rendered}");
+        assert!(
+            rendered.starts_with("active: Participants · "),
+            "{rendered}"
+        );
         assert!(!rendered.contains('\n'), "{rendered:?}");
         assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
     }
@@ -374,7 +342,7 @@ mod startup_timeline_tests {
         // A bordered status panel loses one cell on every edge. The timeline
         // must decide from its drawable inner rect, not the outer layout rect.
         assert_eq!(rendered(&timeline(), 40, 10, true).lines().count(), 1);
-        assert_eq!(rendered(&timeline(), 40, 11, true).lines().count(), 5);
+        assert_eq!(rendered(&timeline(), 40, 11, true).lines().count(), 3);
         let narrow = rendered(&timeline(), 41, 20, true);
         assert_eq!(narrow, rendered(&timeline(), 40, 20, true));
         for line in narrow.lines() {
@@ -408,15 +376,12 @@ mod startup_timeline_tests {
         for step in &mut startup {
             step.state = StartupStepState::Done;
         }
-        assert_eq!(rendered(&startup, 100, 10, true), "5 steps complete");
+        assert_eq!(rendered(&startup, 100, 10, true), "3 steps complete");
     }
 
     #[test]
     fn ascii_capability_uses_plain_state_markers_without_changing_labels() {
         let rendered = rendered(&timeline(), 30, 20, false);
-        assert_eq!(
-            rendered,
-            "[x] Bundle\n[x] Requirements\n[>] Binaries\n[!] Router\n[ ] Participants"
-        );
+        assert_eq!(rendered, "[x] Bundle\n[!] Router\n[ ] Participants");
     }
 }

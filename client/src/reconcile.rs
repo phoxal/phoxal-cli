@@ -4,11 +4,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cursor {
-    pub generation: String,
-    pub sequence: u64,
-}
+use phoxal_supervisor_api::payload::runtime::Cursor;
 
 pub trait Sequenced {
     fn cursor(&self) -> Cursor;
@@ -45,6 +41,7 @@ impl<T: Sequenced> Reconciler<T> {
         self.querying = true;
     }
 
+    #[cfg(test)]
     pub fn local_drop(&mut self) -> ReconcileOutcome<T> {
         self.begin_query();
         self.buffer.clear();
@@ -64,9 +61,7 @@ impl<T: Sequenced> Reconciler<T> {
             self.begin_query();
             return ReconcileOutcome::Requery;
         };
-        if next.generation != installed.generation
-            || next.sequence != installed.sequence.saturating_add(1)
-        {
+        if next.sequence != installed.sequence.saturating_add(1) {
             self.begin_query();
             self.buffer.clear();
             return ReconcileOutcome::Requery;
@@ -80,12 +75,10 @@ impl<T: Sequenced> Reconciler<T> {
         let mut replay = Vec::new();
         while let Some(item) = self.buffer.pop_front() {
             let next = item.cursor();
-            if next.generation != installed.generation {
-                self.begin_query();
-                self.buffer.clear();
-                return ReconcileOutcome::Requery;
+            if next.sequence < installed.sequence {
+                continue;
             }
-            if next.sequence <= installed.sequence {
+            if next.sequence == installed.sequence {
                 continue;
             }
             if next.sequence != installed.sequence.saturating_add(1) {
@@ -147,48 +140,52 @@ mod tests {
         }
     }
 
-    fn item(generation: &str, sequence: u64) -> Item {
-        Item(Cursor {
-            generation: generation.to_string(),
-            sequence,
-        })
+    fn item(sequence: u64) -> Item {
+        Item(Cursor { sequence })
     }
 
     #[test]
     fn subscribe_first_buffer_discards_covered_and_replays_newer() {
         let mut reconciler = Reconciler::new(4);
-        assert_eq!(reconciler.follow(item("a", 2)), ReconcileOutcome::Buffered);
-        assert_eq!(reconciler.follow(item("a", 3)), ReconcileOutcome::Buffered);
+        assert_eq!(reconciler.follow(item(2)), ReconcileOutcome::Buffered);
+        assert_eq!(reconciler.follow(item(3)), ReconcileOutcome::Buffered);
         assert_eq!(
-            reconciler.install(
-                Cursor {
-                    generation: "a".to_string(),
-                    sequence: 2,
-                },
-                vec![item("a", 1), item("a", 2)]
-            ),
+            reconciler.install(Cursor { sequence: 2 }, vec![item(1), item(2)]),
             ReconcileOutcome::Installed {
-                snapshot: vec![item("a", 1), item("a", 2)],
-                replay: vec![item("a", 3)],
+                snapshot: vec![item(1), item(2)],
+                replay: vec![item(3)],
             }
         );
         assert_eq!(
-            reconciler.follow(item("a", 4)),
-            ReconcileOutcome::Append(item("a", 4))
+            reconciler.follow(item(4)),
+            ReconcileOutcome::Append(item(4))
+        );
+    }
+
+    #[test]
+    fn snapshot_discards_every_covered_follow_record_and_keeps_following() {
+        let mut reconciler = Reconciler::new(8);
+        assert_eq!(reconciler.follow(item(5)), ReconcileOutcome::Buffered);
+        assert_eq!(reconciler.follow(item(6)), ReconcileOutcome::Buffered);
+
+        assert_eq!(
+            reconciler.install(Cursor { sequence: 6 }, vec![item(5), item(6)]),
+            ReconcileOutcome::Installed {
+                snapshot: vec![item(5), item(6)],
+                replay: Vec::new(),
+            }
+        );
+        assert_eq!(
+            reconciler.follow(item(7)),
+            ReconcileOutcome::Append(item(7))
         );
     }
 
     #[test]
     fn generation_gap_and_local_drop_require_requery() {
-        for next in [item("b", 1), item("a", 3)] {
+        for next in [item(0), item(3)] {
             let mut reconciler = Reconciler::new(4);
-            reconciler.install(
-                Cursor {
-                    generation: "a".to_string(),
-                    sequence: 1,
-                },
-                Vec::new(),
-            );
+            reconciler.install(Cursor { sequence: 1 }, Vec::new());
             assert_eq!(reconciler.follow(next), ReconcileOutcome::Requery);
         }
         let mut reconciler = Reconciler::<Item>::new(4);
@@ -198,19 +195,13 @@ mod tests {
     #[test]
     fn bounded_buffer_overflow_drops_oldest_and_installs_when_snapshot_covers_it() {
         let mut reconciler = Reconciler::new(1);
-        assert_eq!(reconciler.follow(item("a", 1)), ReconcileOutcome::Buffered);
-        assert_eq!(reconciler.follow(item("a", 2)), ReconcileOutcome::Buffered);
+        assert_eq!(reconciler.follow(item(1)), ReconcileOutcome::Buffered);
+        assert_eq!(reconciler.follow(item(2)), ReconcileOutcome::Buffered);
         assert_eq!(
-            reconciler.install(
-                Cursor {
-                    generation: "a".to_string(),
-                    sequence: 1,
-                },
-                vec![item("a", 1)]
-            ),
+            reconciler.install(Cursor { sequence: 1 }, vec![item(1)]),
             ReconcileOutcome::Installed {
-                snapshot: vec![item("a", 1)],
-                replay: vec![item("a", 2)],
+                snapshot: vec![item(1)],
+                replay: vec![item(2)],
             }
         );
     }
@@ -218,33 +209,24 @@ mod tests {
     #[test]
     fn overflow_requeries_only_when_surviving_buffer_exposes_a_hole() {
         let mut reconciler = Reconciler::new(1);
-        assert_eq!(reconciler.follow(item("a", 2)), ReconcileOutcome::Buffered);
-        assert_eq!(reconciler.follow(item("a", 3)), ReconcileOutcome::Buffered);
+        assert_eq!(reconciler.follow(item(2)), ReconcileOutcome::Buffered);
+        assert_eq!(reconciler.follow(item(3)), ReconcileOutcome::Buffered);
         assert_eq!(
-            reconciler.install(
-                Cursor {
-                    generation: "a".to_string(),
-                    sequence: 1,
-                },
-                vec![item("a", 1)]
-            ),
+            reconciler.install(Cursor { sequence: 1 }, vec![item(1)]),
             ReconcileOutcome::Requery
         );
     }
 
     #[test]
-    fn generation_change_buffered_during_query_requires_requery() {
+    fn an_older_buffered_record_is_covered_by_the_new_snapshot() {
         let mut reconciler = Reconciler::new(4);
-        assert_eq!(reconciler.follow(item("b", 1)), ReconcileOutcome::Buffered);
+        assert_eq!(reconciler.follow(item(1)), ReconcileOutcome::Buffered);
         assert_eq!(
-            reconciler.install(
-                Cursor {
-                    generation: "a".to_string(),
-                    sequence: 4,
-                },
-                vec![item("a", 4)]
-            ),
-            ReconcileOutcome::Requery
+            reconciler.install(Cursor { sequence: 4 }, vec![item(4)]),
+            ReconcileOutcome::Installed {
+                snapshot: vec![item(4)],
+                replay: Vec::new(),
+            }
         );
     }
 

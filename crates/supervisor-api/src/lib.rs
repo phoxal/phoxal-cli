@@ -1,317 +1,430 @@
-//! # phoxal-supervisor-api
+//! Supervisor-owned process protocol.
 //!
-//! The supervisor's process-boundary contract: connection, identity,
-//! lifecycle/process state, commands, bundle files, logs, and telemetry.
-//! Shared by `phoxal`, `phoxald`, and the future Operator client.
+//! This surface is intentionally independent of the robot API revision. A
+//! process can therefore report an unknown-but-valid `RobotApiVersion` without
+//! requiring a robot-domain compatibility adapter.
 //!
-//! This crate owns **documents, topics, bounds, and schema descriptors**. It
-//! owns no sessions, tasks, process manager, daemon state, or UI state - the
-//! attachment behavior lives in `phoxal-supervisor-client`, and the authority
-//! that produces these documents lives in `phoxald`.
-//!
-//! It is deliberately not part of `phoxal-api`: that crate owns the
-//! robot-domain contract, whose keys carry the API revision
-//! (`v0.1/drive/state`) and whose high-rate bodies carry no schema tag. The
-//! two are different contracts with different versioning rules, so they are
-//! different crates.
-//!
-//! # The protocol tree
-//!
-//! The surface is authored in `phoxal_api_tree!`'s **protocol mode**: one flat
-//! tree, no revision axis, relative keys, and developer-owned schema-tagged
-//! bodies. The protocol name is the leading key segment, so every key here is
-//! `supervisor/...` relative and composes under the host's execution-scoped bus
-//! root to `phoxal/{execution_id}/supervisor/...` - which is what
-//! [`phoxal_bus::Bus::full_key`] does with it.
-//!
-//! ```text
-//! supervisor/connect            query   connect::Request  => connect::Reply
-//! supervisor/identity           liveliness token (see `IDENTITY_KEY`)
-//! supervisor/snapshot           diagnostic snapshot::Update
-//! supervisor/snapshot/current   query   snapshot::CurrentRequest => snapshot::Current
-//! supervisor/command            query   command::Request  => command::Reply
-//! supervisor/bundle/get         query   bundle::GetRequest => bundle::GetReply
-//! supervisor/logs/snapshot      query   logs::SnapshotRequest => logs::Snapshot
-//! supervisor/logs/follow        diagnostic logs::Follow
-//! supervisor/telemetry/snapshot query   telemetry::SnapshotRequest => telemetry::Snapshot
-//! supervisor/telemetry/follow   diagnostic telemetry::Follow
-//! ```
-//!
-//! Every document is a serde-tagged enum whose variant *is* its schema version,
-//! and every tag **mirrors the routing above**:
-//! `phoxal/<relative-topic-path>[/<role>]/v0`. A tag read out of a capture
-//! therefore names the exact endpoint that produced it.
-//!
-//! Tags are unique **per structure**, not per topic: a request and its reply
-//! are different documents and never share a tag, which is what makes a tag
-//! identifying rather than merely descriptive. The role suffix disambiguates
-//! the structures sharing one topic, and the topic's primary document - the
-//! stream, or the reply for a query-only topic - carries no suffix. This is
-//! also why the snapshot stream and the `current` query, which carry the same
-//! [`model::Snapshot`] payload, are two distinct tags.
-//!
-//! Pre-v1 the current `V0` is edited in place and every binary is rebuilt; the
-//! macro neither infers a breaking change nor mints a version.
-//!
-//! The daemon publishes with the `diagnostic` role rather than `state`:
-//! `phoxald` is not a clocked graph participant, so it has no step token to
-//! stamp state with, and none of these documents expresses robot time.
-//!
-//! # Version identity is a type, not a string
-//!
-//! Every version this contract names - each document's schema, the bus ABI, the
-//! authored robot grammar, the robot API revision - is a serde enum whose
-//! variant rename is the canonical text. Nothing here holds a version string,
-//! and nothing compares two strings to decide compatibility: a foreign version
-//! fails to *deserialize*, and serde's error already names the tag it found and
-//! the set it expected. See [`schemas`].
-//!
-//! The three framework-owned identities - [`BusAbi`], [`RobotApi`],
-//! [`RobotSchema`] - are re-used from `phoxal-runtime-contract` rather than
-//! restated here, so this crate cannot advertise a spelling the framework does
-//! not speak.
-//!
-//! Document **tags** are not bus **keys**. Key building is untouched by any of
-//! this: robot-domain topics still route on the bare revision (`v0.1/...`) and
-//! this protocol on `supervisor/...`.
-//!
-//! # NEEDED-FROM-FRAMEWORK
-//!
-//! - `phoxal-api` imports `phoxal_api_tree!` privately (`use
-//!   phoxal_macros::phoxal_api_tree;`), so a downstream protocol tree cannot
-//!   reach it through the crate that documents it and must depend on
-//!   `phoxal-macros` directly. A `pub use` in `phoxal-api` would make the macro
-//!   reachable where its documentation lives.
+//! The crate root is the canonical facade for execution state and control
+//! values. Payload carrier modules remain available for generated endpoint
+//! signatures; consumers should import shared values from this root.
 
-pub mod bounds;
-pub mod model;
-pub mod schemas;
-pub mod text;
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 
-pub use bounds::{BoundsError, validate_bundle_path, validate_snapshot};
-pub use model::{
-    BundleGetOutcome, BundlePathRejection, Command, CommandOutcome, CommandRejection,
-    ComponentBinding, Cursor, DaemonFailure, DaemonFailureReason, DesiredState, ExecutionMode,
-    ExitStatus, Lifecycle, LogLevel, LogRecord, LogValue, Process, ProcessFailure,
-    ProcessFailureKind, ProcessKey, ProcessState, RobotIdentity, RuntimeBufferKind,
-    RuntimeDirection, RuntimeStep, RuntimeTopic, Snapshot, StartupRequirement, StartupStep,
-    StartupStepKind, StartupStepState, TelemetryRecord, WallTime,
+use phoxal_macros::phoxal_protocol;
+use serde::Deserialize;
+
+pub use phoxal_runtime_contract::clock::Clock;
+pub use phoxal_runtime_contract::identity::RobotId;
+
+mod execution;
+pub use execution::{
+    Command, CommandOutcome, CommandRejection, DaemonFailure, DaemonFailureReason, DesiredState,
+    Detail, DiagnosticText, ExitStatus, Lifecycle, MAX_DETAIL_BYTES, MAX_PROCESSES,
+    MAX_STDERR_TAIL_BYTES, Process, ProcessFailure, ProcessFailureKind, ProcessState, Snapshot,
+    SnapshotDocument, SnapshotError, StartupStep, StartupStepKind, StartupStepState, StderrTail,
+    WallTime, WallTimeError,
 };
-pub use schemas::{
-    BundleGetSchema, BusAbi, CommandSchema, LogsSchema, RobotApi, RobotSchema, SnapshotSchema,
-    SupervisorSchemas, TelemetrySchema,
-};
-pub use text::{Bounded, BundlePath, Detail, LogText, Name, StderrTail, TextTooLong};
 
-/// The protocol-relative liveliness key the supervisor declares its token on.
-///
-/// A liveliness token is not a topic, so it is not a leaf in the tree: nothing
-/// is ever published or queried here. Its loss is the disconnection signal.
-///
-/// Relative, like every key in this tree: both the daemon that declares the
-/// token and the client that observes it hold an execution-scoped session, and
-/// composing it under that session's root is `phoxal-bus`'s job, not this
-/// crate's. `relative_keys_compose_under_the_execution_root` pins the result.
-pub const IDENTITY_KEY: &str = "supervisor/identity";
+/// Execution-scoped supervisor presence lease. This is a Liveliness key, not
+/// an endpoint payload, and therefore deliberately sits outside the endpoint
+/// manifest. It composes under one already-known execution root and signals
+/// loss of that execution's control-plane authority; it performs no discovery.
+pub const PRESENCE_KEY: &str = "supervisor/presence";
 
-phoxal_macros::phoxal_api_tree! {
-    protocol supervisor {
-        connect {
-            /// A client's attachment request. It carries nothing: the client
-            /// has already learned the execution from the router it is
-            /// connected to, and it asserts no capability it wants the daemon
-            /// to trust.
-            #[serde(tag = "schema")]
-            enum Request {
-                #[serde(rename = "phoxal/supervisor/connect/request/v0")]
-                V0 {},
-            }
+pub(crate) fn deserialize_finite_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "expected a finite floating-point value",
+        ))
+    }
+}
 
-            /// What an attaching client needs and nothing else.
-            ///
-            /// No framework version or train, no router ZID, no execution id,
-            /// no supervisor generation, no manifest, no participant list, no
-            /// plan digest, no catalog information, and no internal participant
-            /// schema inventory. The execution is known from the router and the
-            /// key; the process set comes from the snapshot; the manifest comes
-            /// from `bundle/get`; the internal schemas are daemon and build
-            /// checks that never reach an attachment.
-            #[serde(tag = "schema")]
-            enum Reply {
-                #[serde(rename = "phoxal/supervisor/connect/reply/v0")]
-                V0 {
-                    robot: crate::model::RobotIdentity,
-                    api: crate::schemas::RobotApi,
-                    schemas: crate::schemas::SupervisorSchemas,
-                    mode: crate::model::ExecutionMode,
-                },
-            }
+/// Ordinary protocol payloads. The generated `supervisor` module below owns
+/// endpoint descriptors and topic builders; these modules own only wire data.
+pub mod payload {
+    pub mod snapshot {
+        #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct CurrentRequest {}
 
-            topic self: query Request => Reply;
+        /// Query this once before subscribing so a late joiner has a baseline;
+        /// then apply every value received from the snapshot stream.
+        pub type Current = crate::SnapshotDocument;
+        /// A complete replacement snapshot published after the baseline.
+        pub type Update = crate::SnapshotDocument;
+    }
+
+    pub mod command {
+        #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+        #[serde(tag = "schema")]
+        pub enum Request {
+            #[serde(rename = "phoxal/supervisor-control/request/v0")]
+            V0 { command: crate::Command },
         }
 
-        snapshot {
-            /// The pushed snapshot stream. A client subscribes here *before*
-            /// querying `current`, then keeps the highest revision it has seen,
-            /// so the query's answer can never be older than the stream it
-            /// installed.
-            #[serde(tag = "schema")]
-            enum Update {
-                #[serde(rename = "phoxal/supervisor/snapshot/v0")]
-                V0(crate::model::Snapshot),
-            }
-
-            topic self: diagnostic Update;
-
-            /// Asks for the authoritative current snapshot. It carries no
-            /// filter: the whole execution state is one bounded document.
-            #[serde(tag = "schema")]
-            enum CurrentRequest {
-                #[serde(rename = "phoxal/supervisor/snapshot/current/request/v0")]
-                V0 {},
-            }
-
-            /// The same document the stream carries, on its own key so a
-            /// client can ask for it instead of waiting for the next push.
-            #[serde(tag = "schema")]
-            enum Current {
-                #[serde(rename = "phoxal/supervisor/snapshot/current/v0")]
-                V0(crate::model::Snapshot),
-            }
-
-            topic current: query CurrentRequest => Current;
+        #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+        #[serde(tag = "schema")]
+        pub enum Reply {
+            #[serde(rename = "phoxal/supervisor-control/reply/v0")]
+            V0 { outcome: crate::CommandOutcome },
         }
 
-        command {
-            #[serde(tag = "schema")]
-            enum Request {
-                #[serde(rename = "phoxal/supervisor/command/request/v0")]
-                V0 { command: crate::model::Command },
-            }
+        #[cfg(test)]
+        mod tests {
+            use super::*;
 
-            /// Accepted or rejected with a typed reason. There is no
-            /// command-session, sequence, or resume surface: a query is
-            /// already one request with one answer.
-            #[serde(tag = "schema")]
-            enum Reply {
-                #[serde(rename = "phoxal/supervisor/command/reply/v0")]
-                V0 {
-                    outcome: crate::model::CommandOutcome,
-                },
-            }
+            #[test]
+            fn documents_round_trip_with_explicit_schema_tags() {
+                let request = Request::V0 {
+                    command: crate::Command::Stop,
+                };
+                let encoded = rmp_serde::to_vec_named(&request).expect("request encodes");
+                assert_eq!(rmp_serde::from_slice::<Request>(&encoded).unwrap(), request);
 
-            topic self: query Request => Reply;
+                let reply = Reply::V0 {
+                    outcome: crate::CommandOutcome::Accepted { at_revision: 18 },
+                };
+                let encoded = rmp_serde::to_vec_named(&reply).expect("reply encodes");
+                assert_eq!(rmp_serde::from_slice::<Reply>(&encoded).unwrap(), reply);
+            }
+        }
+    }
+
+    pub mod logs {
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Timestamp {
+            pub unix_seconds: i64,
+            pub nanos: u32,
         }
 
-        bundle {
-            /// Reads one file from the finalized bundle by its
-            /// bundle-relative path.
-            #[serde(tag = "schema")]
-            enum GetRequest {
-                #[serde(rename = "phoxal/supervisor/bundle/get/request/v0")]
-                V0 { path: crate::text::BundlePath },
-            }
-
-            #[serde(tag = "schema")]
-            enum GetReply {
-                #[serde(rename = "phoxal/supervisor/bundle/get/reply/v0")]
-                V0 {
-                    outcome: crate::model::BundleGetOutcome,
-                },
-            }
-
-            topic get: query GetRequest => GetReply;
+        #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum Level {
+            Error,
+            Warn,
+            Info,
+            Debug,
+            Trace,
         }
 
-        logs {
-            /// One backward page of the supervisor's bounded log history.
-            #[serde(tag = "schema")]
-            enum SnapshotRequest {
-                #[serde(rename = "phoxal/supervisor/logs/snapshot/request/v0")]
-                V0 {
-                    /// Exact participant filter. `None` selects every
-                    /// participant.
-                    participant: Option<crate::text::Name>,
-                    /// Newest records to return. Zero selects the supervisor's
-                    /// bounded default.
-                    limit: u32,
-                    /// Exclusive ingest-sequence upper bound for backward
-                    /// pagination. `None` starts at the newest record.
-                    before_sequence: Option<u64>,
-                },
-            }
-
-            #[serde(tag = "schema")]
-            enum Snapshot {
-                #[serde(rename = "phoxal/supervisor/logs/snapshot/v0")]
-                V0 {
-                    cursor: crate::model::Cursor,
-                    /// Cumulative samples the supervisor's own bounded ingest
-                    /// subscriber lost. An increase is unrecoverable source
-                    /// loss, distinct from a producer's `LogRecord::dropped`.
-                    ingest_dropped: u64,
-                    records: Vec<crate::model::LogRecord>,
-                    /// Pass as the next request's `before_sequence`. `None`
-                    /// means the retained matching history is complete.
-                    next_before_sequence: Option<u64>,
-                },
-            }
-
-            /// One live record following the snapshot. A consumer re-queries
-            /// when the cursor generation changes or the sequence is not
-            /// exactly one past its installed cursor.
-            #[serde(tag = "schema")]
-            enum Follow {
-                #[serde(rename = "phoxal/supervisor/logs/follow/v0")]
-                V0 {
-                    cursor: crate::model::Cursor,
-                    ingest_dropped: u64,
-                    record: crate::model::LogRecord,
-                },
-            }
-
-            topic snapshot: query SnapshotRequest => Snapshot;
-            topic follow: diagnostic Follow;
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        #[serde(untagged)]
+        pub enum LogValue {
+            Bool(bool),
+            I64(i64),
+            U64(u64),
+            F64(#[serde(deserialize_with = "crate::deserialize_finite_f64")] f64),
+            String(String),
         }
 
-        telemetry {
-            #[serde(tag = "schema")]
-            enum SnapshotRequest {
-                #[serde(rename = "phoxal/supervisor/telemetry/snapshot/request/v0")]
-                V0 {
-                    participant: Option<crate::text::Name>,
-                    limit: u32,
-                    before_sequence: Option<u64>,
-                },
-            }
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Event {
+            pub seq: u64,
+            pub time: Timestamp,
+            pub level: Level,
+            pub target: String,
+            pub message: String,
+            pub fields: ::std::collections::BTreeMap<String, LogValue>,
+            pub dropped: u32,
+            #[serde(default)]
+            pub truncated: u32,
+        }
 
-            #[serde(tag = "schema")]
-            enum Snapshot {
-                #[serde(rename = "phoxal/supervisor/telemetry/snapshot/v0")]
-                V0 {
-                    cursor: crate::model::Cursor,
-                    records: Vec<crate::model::TelemetryRecord>,
-                    /// Records evicted by the memory cap before their age
-                    /// horizon elapsed.
-                    capacity_evictions: u64,
-                    next_before_sequence: Option<u64>,
-                },
-            }
+        #[cfg(test)]
+        mod tests {
+            use super::LogValue;
 
-            #[serde(tag = "schema")]
-            enum Follow {
-                #[serde(rename = "phoxal/supervisor/telemetry/follow/v0")]
-                V0 {
-                    cursor: crate::model::Cursor,
-                    record: crate::model::TelemetryRecord,
-                },
+            #[test]
+            fn non_finite_floats_are_rejected_on_decode() {
+                let encoded = rmp_serde::to_vec_named(&LogValue::F64(f64::NAN))
+                    .expect("messagepack permits the hostile input");
+                assert!(rmp_serde::from_slice::<LogValue>(&encoded).is_err());
             }
+        }
+    }
 
-            topic snapshot: query SnapshotRequest => Snapshot;
-            topic follow: diagnostic Follow;
+    pub mod runtime {
+        use crate::{Clock, RobotId};
+        use phoxal_runtime_contract::version::RobotApiVersion;
+
+        /// Empty request for the immutable facts of one running bundle.
+        #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct InfoRequest {}
+
+        /// Runtime facts a supervisor advertises before an external client
+        /// selects an exact robot-API adapter.
+        #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct ManualDrive {
+            pub wheel_base_m: f64,
+            pub max_linear_speed_mps: f64,
+            pub max_angular_speed_radps: f64,
+        }
+
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct Info {
+            pub robot: RobotId,
+            pub clock: Clock,
+            pub robot_api: RobotApiVersion,
+            pub manual_drive: Option<ManualDrive>,
+        }
+
+        #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Cursor {
+            pub sequence: u64,
+        }
+
+        #[derive(
+            Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+        )]
+        #[serde(rename_all = "snake_case")]
+        pub enum Direction {
+            Publish,
+            Subscribe,
+            Mixed,
+        }
+
+        #[derive(
+            Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+        )]
+        #[serde(rename_all = "snake_case")]
+        pub enum BufferKind {
+            Outbound,
+            Latest,
+            Subscriber,
+            Mixed,
+        }
+
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Step {
+            pub target_period_ns: u64,
+            pub completed: u64,
+            pub errors: u64,
+            pub mean_duration_ns: u64,
+            pub max_duration_ns: u64,
+            pub mean_lateness_ns: u64,
+            pub max_lateness_ns: u64,
+            pub missed_ticks: u64,
+            pub overruns: u64,
+        }
+
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Topic {
+            pub topic: String,
+            pub direction: Direction,
+            pub buffer_kind: BufferKind,
+            pub count: u64,
+            pub rate_millihz: u64,
+            pub drops: u64,
+            pub latest_overwrites: u64,
+            pub bounded_evictions: u64,
+            pub capacity: u64,
+            pub current_depth: u64,
+            pub high_water_depth: u64,
+            pub decode_errors: u64,
+            pub timeline_filtered: u64,
+            pub overflowed_rows: u32,
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+
+            #[test]
+            fn info_preserves_an_unknown_robot_api_for_client_dispatch() {
+                let value = Info {
+                    robot: RobotId::new("rover").expect("robot id"),
+                    clock: Clock::Real,
+                    robot_api: RobotApiVersion::new(42, 7),
+                    manual_drive: None,
+                };
+                let encoded = rmp_serde::to_vec_named(&value).expect("info encodes");
+                let decoded: Info = rmp_serde::from_slice(&encoded).expect("info decodes");
+                assert_eq!(decoded.robot_api, RobotApiVersion::new(42, 7));
+            }
+        }
+    }
+
+    pub mod telemetry {
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Rollup {
+            pub window_ns: u64,
+            pub step: Option<crate::payload::runtime::Step>,
+            pub topics: Vec<crate::payload::runtime::Topic>,
+            pub overflow: Option<crate::payload::runtime::Topic>,
+        }
+
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct SnapshotRequest {
+            pub participant_id: Option<String>,
+            pub limit: u32,
+            pub before_sequence: Option<u64>,
+        }
+
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Record {
+            pub sequence: u64,
+            pub participant_id: String,
+            pub truncated: u32,
+            pub window_ns: u64,
+            pub step: Option<crate::payload::runtime::Step>,
+            pub topics: Vec<crate::payload::runtime::Topic>,
+            pub overflow: Option<crate::payload::runtime::Topic>,
+        }
+
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Snapshot {
+            pub cursor: crate::payload::runtime::Cursor,
+            pub records: Vec<Record>,
+            pub capacity_evictions: u64,
+            pub next_before_sequence: Option<u64>,
+        }
+
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Follow {
+            pub cursor: crate::payload::runtime::Cursor,
+            pub record: Record,
+        }
+    }
+
+    pub mod log {
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct SnapshotRequest {
+            pub participant_id: Option<String>,
+            pub limit: u32,
+            pub before_sequence: Option<u64>,
+        }
+
+        /// Logs use the same timestamp, severity and finite-value vocabulary
+        /// at ingestion and when the supervisor later serves retained records.
+        pub use crate::payload::logs::{Level, LogValue, Timestamp};
+
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Record {
+            pub sequence: u64,
+            pub participant_id: String,
+            pub source_sequence: u64,
+            pub time: Timestamp,
+            pub level: Level,
+            pub target: String,
+            pub message: String,
+            pub fields: ::std::collections::BTreeMap<String, LogValue>,
+            pub dropped: u32,
+            pub truncated: u32,
+        }
+
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Snapshot {
+            pub cursor: crate::payload::runtime::Cursor,
+            pub ingest_dropped: u64,
+            pub records: Vec<Record>,
+            pub next_before_sequence: Option<u64>,
+        }
+
+        #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        pub struct Follow {
+            pub cursor: crate::payload::runtime::Cursor,
+            pub ingest_dropped: u64,
+            pub record: Record,
         }
     }
 }
 
+phoxal_protocol! {
+    protocol supervisor {
+        logs(participant_id) {
+            topic self: Stream<crate::payload::logs::Event>;
+        }
+
+        runtime {
+            query info: crate::payload::runtime::InfoRequest => crate::payload::runtime::Info;
+        }
+
+        snapshot {
+            topic self: Stream<crate::payload::snapshot::Update>;
+            query current: crate::payload::snapshot::CurrentRequest => crate::payload::snapshot::Current;
+        }
+
+        control {
+            query self: crate::payload::command::Request => crate::payload::command::Reply;
+        }
+
+        telemetry {
+            topic rollup: Stream<crate::payload::telemetry::Rollup>;
+            query snapshot: crate::payload::telemetry::SnapshotRequest => crate::payload::telemetry::Snapshot;
+            topic follow: Stream<crate::payload::telemetry::Follow>;
+        }
+
+        log {
+            query snapshot: crate::payload::log::SnapshotRequest => crate::payload::log::Snapshot;
+            topic follow: Stream<crate::payload::log::Follow>;
+        }
+
+    }
+}
+
 #[cfg(test)]
-mod tests;
+mod tests {
+    use phoxal_bus::{EndpointDescriptor, EndpointKind};
+
+    use crate::supervisor;
+
+    #[test]
+    fn process_topics_are_protocol_qualified_not_robot_api_qualified() {
+        assert_eq!(
+            <supervisor::endpoint::telemetry::RollupEndpoint as EndpointDescriptor>::TOPIC,
+            "supervisor/telemetry/rollup"
+        );
+        assert_eq!(
+            <supervisor::endpoint::runtime::InfoEndpoint as EndpointDescriptor>::TOPIC,
+            "supervisor/runtime/info"
+        );
+        assert_eq!(
+            <supervisor::endpoint::snapshot::TopicEndpoint as EndpointDescriptor>::TOPIC,
+            "supervisor/snapshot"
+        );
+        assert_eq!(
+            <supervisor::endpoint::control::TopicEndpoint as EndpointDescriptor>::TOPIC,
+            "supervisor/control"
+        );
+        assert_eq!(
+            <supervisor::endpoint::telemetry::RollupEndpoint as EndpointDescriptor>::KIND,
+            EndpointKind::Stream
+        );
+        assert_eq!(
+            <supervisor::endpoint::snapshot::TopicEndpoint as EndpointDescriptor>::KIND,
+            EndpointKind::Stream
+        );
+        assert_eq!(
+            <supervisor::endpoint::snapshot::CurrentEndpoint as EndpointDescriptor>::TOPIC,
+            "supervisor/snapshot/current"
+        );
+        assert_eq!(
+            <supervisor::endpoint::control::TopicEndpoint as EndpointDescriptor>::KIND,
+            EndpointKind::Query
+        );
+        assert!(
+            crate::API_CONTRACT_MANIFEST
+                .iter()
+                .flat_map(|version| version.contracts)
+                .all(|contract| contract.topic != crate::PRESENCE_KEY),
+            "the presence lease must not collide with any protocol endpoint"
+        );
+    }
+}

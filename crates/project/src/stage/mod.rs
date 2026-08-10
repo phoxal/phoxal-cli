@@ -33,19 +33,19 @@
 //! `simulation::prepare_simulation`.
 
 mod candidate;
-mod finalize;
 mod participants;
 mod publish;
+mod runtime;
 
 pub(crate) use candidate::{begin_runtime_layout, copy_tree_into};
 pub(crate) use participants::{
-    MaterializeSettings, materialize_candidate_store, stage_named_binary, stage_participant_binary,
+    MaterializeSettings, materialize_candidate_store, stage_named_binary,
 };
 pub(crate) use publish::publish_runtime_layout;
+pub(crate) use runtime::write_runtime_document;
 
 #[cfg(test)]
-#[cfg(test)]
-pub(crate) use candidate::{compile_test_bundle, write_test_bundle};
+pub(crate) use candidate::compile_test_bundle;
 
 /// The exact embedded-metadata document a role macro writes, for tests that
 /// synthesize a participant binary.
@@ -62,11 +62,14 @@ pub(crate) fn test_metadata_payload(
         .expect("the fixture names a participant kind this train has");
     serde_json::to_vec(
         &phoxal_runtime_contract::emit::ParticipantMetadataRecord::V0 {
-            api: phoxal_runtime_contract::RobotApi::V0_1,
-            schemas: phoxal_cli_core::check::participant_metadata::CURRENT_SCHEMAS,
-            id,
-            kind,
-            config_schema,
+            contract: phoxal_runtime_contract::emit::ParticipantContractRecord {
+                api: phoxal_runtime_contract::version::RobotApiVersion::new(0, 1),
+                schemas: crate::check::participant_metadata::CURRENT_SCHEMAS,
+                id,
+                kind,
+                requirement: None,
+                config_schema,
+            },
         },
     )
     .expect("metadata serializes")

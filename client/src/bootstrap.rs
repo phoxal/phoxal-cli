@@ -17,7 +17,8 @@ use reqwest::blocking::Client;
 use semver::Version;
 use serde::Serialize;
 
-use crate::cli::{AppContext, Ui};
+use crate::cli::context::AppContext;
+use crate::cli::output::Ui;
 use crate::digest::sha256_file;
 
 const LATEST_RELEASE_URL: &str = "https://github.com/phoxal/phoxal-cli/releases/latest";
@@ -36,8 +37,6 @@ struct UpgradeOptions {
 pub enum UpgradeAction {
     /// The requested version matched the running binary and `--force` was not set.
     UpToDate,
-    /// The installed binary was replaced with an older release (`--version` pinned below current).
-    Switched,
     /// The installed binary was replaced with a newer release.
     Upgraded,
 }
@@ -76,6 +75,11 @@ fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<UpgradeOutcome> {
         }
     };
 
+    anyhow::ensure!(
+        requested_version >= current_version,
+        "refusing to replace phoxal-cli v{current_version} with older release v{requested_version}"
+    );
+
     if requested_version == current_version && !options.force {
         println!("already up to date (v{requested_version})");
         return Ok(UpgradeOutcome {
@@ -104,11 +108,6 @@ fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<UpgradeOutcome> {
         AssetDownload::Written => {
             verify_checksum(&archive_path, &checksum_path, &asset.archive_name)?;
         }
-        AssetDownload::Absent if options.force && pinned && requested_version < current_version => {
-            ui.warn(format!(
-                "release v{requested_version} has no checksum; continuing because --force pinned an older version"
-            ));
-        }
         AssetDownload::Absent => bail!(
             "release v{requested_version} has no checksum asset {}; refusing to self-upgrade",
             asset.checksum_name
@@ -126,13 +125,8 @@ fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<UpgradeOutcome> {
         .context("the running executable has no parent directory")?;
     install_pair(directory, &staged, &SelfReplaceInstaller)?;
 
-    let action = if requested_version < current_version {
-        UpgradeAction::Switched
-    } else {
-        UpgradeAction::Upgraded
-    };
+    let action = UpgradeAction::Upgraded;
     let verb = match action {
-        UpgradeAction::Switched => "switched",
         UpgradeAction::Upgraded => "upgraded",
         UpgradeAction::UpToDate => unreachable!("UpToDate returns earlier"),
     };
@@ -427,7 +421,6 @@ fn restore_daemon(had_daemon: bool, previous: &Path, daemon: &Path) {
     }
 }
 
-#[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -437,11 +430,6 @@ fn make_executable(path: &Path) -> Result<()> {
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions)
         .with_context(|| format!("failed to chmod {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 fn current_executable() -> Result<PathBuf> {
@@ -697,8 +685,7 @@ mod tests {
     }
 
     /// A mixed pair must be impossible: if the irreversible half fails, the
-    /// recoverable half is put back and the installation is unchanged
-    ///.
+    /// recoverable half is put back and the installation is unchanged.
     #[test]
     fn a_failed_client_replacement_restores_the_previous_daemon() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -810,10 +797,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(UpgradeAction::UpToDate).unwrap(),
             serde_json::json!("up_to_date")
-        );
-        assert_eq!(
-            serde_json::to_value(UpgradeAction::Switched).unwrap(),
-            serde_json::json!("switched")
         );
         assert_eq!(
             serde_json::to_value(UpgradeAction::Upgraded).unwrap(),

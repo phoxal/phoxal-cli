@@ -1,11 +1,11 @@
 use phoxal_cli_observation::{AttachmentEpoch, QueryToken, RuntimeRow, StoreRevision};
-use phoxal_supervisor_api::ProcessKey;
+use phoxal_runtime_contract::identity::ParticipantId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimesModel {
     pub rows: Vec<RuntimeRow>,
-    pub candidate: Option<ProcessKey>,
-    pub detail: Option<ProcessKey>,
+    pub candidate: Option<ParticipantId>,
+    pub detail: Option<ParticipantId>,
     pub scroll: usize,
     pub known_revision: StoreRevision,
     pub dirty_revision: Option<StoreRevision>,

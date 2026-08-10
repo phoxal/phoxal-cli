@@ -2,23 +2,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+pub use crate::source::host_target_triple;
+use crate::source::requirements::{SimulationMembership, derive_runtime_requirements};
+use crate::source::tooling::hash_tree;
 use anyhow::{Context, Result, anyhow};
 use phoxal_cli_catalog::{ArtifactKind, Catalog, OfficialRuntime};
-pub use phoxal_cli_core::project::host_target_triple;
-use phoxal_cli_core::project::tooling::hash_tree;
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 
 /// The provider every official Phoxal package uses in catalog identities.
 const PHOXAL_PROVIDER: &str = "phoxal";
 
-use phoxal_cli_core::project::resolver::{
+use crate::source::resolver::{
     BundlePlan, CompiledBundle, ResolveOptions, ResolvedBrain, ResolvedComponent,
     ResolvedComponentDriver, ResolvedPathOverride, ResolvedPathOverrideKind,
     ResolvedPlatformRuntime, ResolvedUserRuntime, UndeclaredRuntime,
 };
 
 /// Resolve a robot manifest against the CLI-internal official catalog
-/// (organization#951 WS4): no suite fetch, no vendored artifact store. Every
+/// with no suite fetch or vendored artifact store. Every
 /// official service and every component
 /// driver package materializes later via `cargo install` at exactly the
 /// locked framework train; component assets resolve directly from authored
@@ -54,11 +55,10 @@ pub(crate) fn resolve_with_train_using_registry_cache(
     options: ResolveOptions,
     resolved_train: impl FnOnce(&str),
 ) -> Result<BundlePlan> {
-    // Declaration invariants are the very first check (#950): an invalid
+    // Declaration invariants are the very first check (): an invalid
     // workspace lock must not mask a dual/official declaration error.
-    phoxal_cli_core::project::layout::validate_runtime_declarations(robot)?;
-    let project =
-        phoxal_cli_core::project::train::resolve_locked_project(project_root, options.offline)?;
+    validate_runtime_declarations(robot)?;
+    let project = crate::source::train::resolve_locked_project(project_root, options.offline)?;
     resolved_train(&project.train.version);
     resolve_with_locked_project_using_registry_cache(
         robot,
@@ -69,6 +69,15 @@ pub(crate) fn resolve_with_train_using_registry_cache(
     )
 }
 
+pub(crate) fn validate_runtime_declarations(robot: &Robot) -> Result<()> {
+    derive_runtime_requirements(
+        robot,
+        &SimulationMembership::default(),
+        &Catalog::official(),
+    )
+    .map(|_| ())
+}
+
 /// Resolve against a locked workspace the caller has already loaded. `check`
 /// uses this entry so structural workspace reporting and canonical compilation
 /// share one `cargo metadata --locked` result.
@@ -76,7 +85,7 @@ pub(crate) fn resolve_with_locked_project(
     robot: &Robot,
     project_root: &Path,
     options: ResolveOptions,
-    project: &phoxal_cli_core::project::train::LockedProject,
+    project: &crate::source::train::LockedProject,
 ) -> Result<BundlePlan> {
     resolve_with_locked_project_using_registry_cache(
         robot,
@@ -92,10 +101,10 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
     project_root: &Path,
     registry_cache_root: &Path,
     options: ResolveOptions,
-    project: &phoxal_cli_core::project::train::LockedProject,
+    project: &crate::source::train::LockedProject,
 ) -> Result<BundlePlan> {
     // The catalog below is one current snapshot, not per-train history
-    // (organization#951 WS4 review, medium 3): reject a locked train it
+    // so reject a locked train it
     // predates before applying it, rather than silently resolving an
     // official set that never existed for that train.
     let train = project.train.version.clone();
@@ -153,11 +162,12 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
         .collect::<BTreeMap<_, _>>();
     let robot_manifest = project_root.join("robot.yaml");
     let compiled = CompiledBundle::from_project(
-        phoxal_manifest::compile(phoxal_manifest::SourceSet {
+        phoxal_manifest::SourceSet {
             project_root: project_root.to_path_buf(),
             robot_manifest,
             component_roots,
-        })
+        }
+        .compile()
         .context("failed to compile the resolved source project")?,
     );
 
@@ -167,7 +177,7 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
         train,
         target,
         // The root package IS the brain; locked resolution already proved its
-        // exact Cargo shape (organization#973).
+        // exact Cargo shape ().
         brain: ResolvedBrain {
             crate_dir: project.brain.crate_dir.clone(),
             package: project.brain.package.clone(),
@@ -214,8 +224,8 @@ struct ComponentResolutionContext<'a> {
     registry_cache_root: &'a Path,
     train: &'a str,
     target: &'a str,
-    drivers: &'a phoxal_cli_core::project::intent::DriverSelection,
-    local_packages: &'a [phoxal_cli_core::project::train::WorkspaceComponentCrate],
+    drivers: &'a crate::source::intent::DriverSelection,
+    local_packages: &'a [crate::source::train::WorkspaceComponentCrate],
     offline: bool,
 }
 
@@ -275,10 +285,9 @@ fn resolve_components(
             continue;
         }
 
-        let assets_root = registry_roots
-            .get(component_id)
-            .expect("registry roots were resolved from every non-local component id")
-            .clone();
+        let assets_root = registry_roots.get(component_id).cloned().ok_or_else(|| {
+            anyhow::anyhow!("resolved registry component {component_id} has no materialized root")
+        })?;
         let driver =
             (declares_driver && context.drivers.includes_instance(instance_name)).then(|| {
                 ResolvedComponentDriver::Registry(ResolvedPlatformRuntime {
@@ -334,7 +343,7 @@ struct LocalComponent {
 
 fn discover_local_components_from_locked(
     project_root: &Path,
-    local_packages: &[phoxal_cli_core::project::train::WorkspaceComponentCrate],
+    local_packages: &[crate::source::train::WorkspaceComponentCrate],
 ) -> Result<BTreeMap<String, LocalComponent>> {
     let canonical_project_root = project_root.canonicalize().with_context(|| {
         format!(
@@ -429,7 +438,7 @@ fn discover_local_components_from_locked(
 }
 
 fn verify_local_driver_shape(
-    package: &phoxal_cli_core::project::train::WorkspaceComponentCrate,
+    package: &crate::source::train::WorkspaceComponentCrate,
 ) -> Result<()> {
     anyhow::ensure!(
         package.binary_names.len() == 1,
@@ -448,7 +457,7 @@ fn verify_local_driver_shape(
 fn apply_workspace_runtimes(
     robot: &Robot,
     project_root: &Path,
-    runtimes: &[phoxal_cli_core::project::train::WorkspaceRuntime],
+    runtimes: &[crate::source::train::WorkspaceRuntime],
     platform_runtimes: &mut [ResolvedPlatformRuntime],
     _simulators: &mut [ResolvedPlatformRuntime],
 ) -> Result<WorkspaceRuntimeResolution> {
@@ -481,7 +490,7 @@ fn apply_workspace_runtimes(
             });
         } else if robot.services.contains_key(&logical_name) {
             // Declared: the services map selects which discovered
-            // workspace services belong to the robot (#950).
+            // workspace services belong to the robot ().
             user_runtimes.push(ResolvedUserRuntime {
                 name: logical_name,
                 path: relative,
@@ -489,7 +498,7 @@ fn apply_workspace_runtimes(
             });
         } else {
             // Present but undeclared: legal, not built or launched;
-            // surfaced as a drift diagnostic (#950).
+            // surfaced as a drift diagnostic ().
             undeclared.push(UndeclaredRuntime {
                 name: logical_name,
                 family: "services",
@@ -534,11 +543,11 @@ fn discover_local_components(
     project_root: &Path,
     offline: bool,
 ) -> Result<BTreeMap<String, LocalComponent>> {
-    let project = phoxal_cli_core::project::train::resolve_locked_project(project_root, offline)?;
+    let project = crate::source::train::resolve_locked_project(project_root, offline)?;
     discover_local_components_from_locked(project_root, &project.local_components)
 }
 
-/// The workspace-runtime half of resolution (#950): the declared user
+/// The workspace-runtime half of resolution (): the declared user
 /// services, the drift records for undeclared crates, and the official-source
 /// overrides applied along the way.
 #[derive(Debug)]

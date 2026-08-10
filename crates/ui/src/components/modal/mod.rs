@@ -25,11 +25,10 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                 || "Attachment snapshot not received".to_string(),
                 |snapshot| {
                     format!(
-                        "project: {}\nrobot: {}/{}\nclock: {:?}\nexecution: {}\nrevision: {}",
+                        "project: {}\nrobot: {}\nclock: {:?}\nexecution: {}\nrevision: {}",
                         sanitize(&snapshot.project),
-                        sanitize(snapshot.robot.namespace.as_str()),
-                        sanitize(snapshot.robot.id.as_str()),
-                        snapshot.mode,
+                        sanitize(snapshot.robot.as_str()),
+                        snapshot.clock,
                         snapshot.execution,
                         snapshot.revision
                     )

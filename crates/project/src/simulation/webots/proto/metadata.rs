@@ -1,7 +1,7 @@
 use phoxal_model::component::capability::{
     CameraMode, Capability as PhysicalCapability, EncoderType, LidarOutput,
 };
-use phoxal_model::simulation::capability::{ActuatorType, Capability as SimulationCapability};
+use phoxal_model::simulation::{ActuatorType, Capability as SimulationCapability};
 
 use crate::simulation::webots::proto::scene::WebotsSceneDescription;
 
@@ -34,7 +34,7 @@ pub fn runtime_metadata_comments_for_capability(
     let controller = controller_metadata_json(physical, simulation);
     vec![format!(
         "# rf: capability={capability_id} controller={}",
-        serde_json::to_string(&controller).expect("controller metadata should serialize")
+        controller
     )]
 }
 
@@ -222,11 +222,11 @@ mod tests {
     use phoxal_model::component::capability::{
         Camera, Encoder, Lidar, Motor, MotorCommand, StructuralTarget,
     };
-    use phoxal_model::simulation::capability as simulation;
+    use phoxal_model::simulation;
 
     fn target() -> StructuralTarget {
         StructuralTarget::Link {
-            id: "sensor".to_string(),
+            id: "sensor".to_string().into(),
         }
     }
 

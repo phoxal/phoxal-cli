@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 
 #[derive(Debug, Args)]
 pub struct Start {

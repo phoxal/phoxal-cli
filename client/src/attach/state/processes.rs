@@ -22,38 +22,36 @@ impl ProcessStore {
             .processes
             .iter()
             .map(|row| {
-                let old = previous.get(&row.key);
+                let old = previous.get(&row.participant);
                 let restarted = old.is_some_and(|old| {
                     row.restarts > old.row.restarts
                         || (row.state == ProcessState::Restarting
-                            && old.state != ProcessState::Restarting)
+                            && old.row.state != ProcessState::Restarting)
                 });
-                let started_at = if restarted {
+                let observed_started_at = if restarted {
                     now
                 } else {
-                    old.map_or(now, |old| old.started_at)
+                    old.map_or(now, |old| old.observed_started_at)
                 };
-                let first_ready_at = if restarted {
+                let observed_first_ready_at = if restarted {
                     None
                 } else {
-                    old.and_then(|old| old.first_ready_at)
+                    old.and_then(|old| old.observed_first_ready_at)
                 }
                 .or((row.state == ProcessState::Ready).then_some(now));
-                let ended_at = if matches!(row.state, ProcessState::Failed | ProcessState::Stopped)
-                {
-                    old.and_then(|old| old.ended_at).or(Some(now))
-                } else {
-                    None
-                };
+                let observed_ended_at =
+                    if matches!(row.state, ProcessState::Failed | ProcessState::Stopped) {
+                        old.and_then(|old| old.observed_ended_at).or(Some(now))
+                    } else {
+                        None
+                    };
                 (
-                    row.key.clone(),
+                    row.participant.clone(),
                     ProcessObservation {
-                        key: row.key.clone(),
                         row: row.clone(),
-                        state: row.state,
-                        started_at,
-                        ended_at,
-                        first_ready_at,
+                        observed_started_at,
+                        observed_ended_at,
+                        observed_first_ready_at,
                     },
                 )
             })
@@ -64,32 +62,25 @@ impl ProcessStore {
 
 #[cfg(test)]
 mod tests {
-    use phoxal_runtime_contract::ProducerId;
-    use phoxal_supervisor_api::{
-        DesiredState, ExecutionMode, Lifecycle, Name, Process, ProcessKey, RobotIdentity,
-        StartupRequirement,
-    };
+    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
+    use phoxal_runtime_contract::metadata::ParticipantKind;
+    use phoxal_supervisor_api::{DesiredState, Lifecycle, Process};
 
     use super::*;
 
     fn snapshot(revision: u64, state: ProcessState, restarts: u64) -> Snapshot {
         Snapshot {
             revision,
-            robot: RobotIdentity {
-                id: Name::new("rover"),
-                namespace: Name::new("lab"),
-            },
-            mode: ExecutionMode::Real,
             lifecycle: Lifecycle::Ready,
             startup: Vec::new(),
             processes: vec![Process {
-                key: ProcessKey::Brain,
+                participant: ParticipantId::new("brain").expect("fixture participant"),
+                kind: ParticipantKind::Service,
                 component: None,
-                startup: StartupRequirement::Required,
                 desired: DesiredState::Running,
                 state,
                 pid: Some(42),
-                producer: Some(ProducerId::try_from(0x2b).unwrap()),
+                producer: Some(ProducerId::try_from((1_u128 << 124) | 43).unwrap()),
                 restarts,
                 failure: None,
             }],
@@ -101,15 +92,16 @@ mod tests {
     fn a_restart_resets_the_local_timings_a_steady_row_keeps() {
         let mut store = ProcessStore::default();
         let table = store.replace(&snapshot(1, ProcessState::Ready, 0));
-        let first_ready = table[&ProcessKey::Brain].first_ready_at;
+        let brain = ParticipantId::new("brain").expect("fixture participant");
+        let first_ready = table[&brain].observed_first_ready_at;
         assert!(first_ready.is_some());
-        assert!(table[&ProcessKey::Brain].present());
+        assert!(table[&brain].present());
 
         let steady = store.replace(&snapshot(2, ProcessState::Ready, 0));
-        assert_eq!(steady[&ProcessKey::Brain].first_ready_at, first_ready);
+        assert_eq!(steady[&brain].observed_first_ready_at, first_ready);
 
         let restarted = store.replace(&snapshot(3, ProcessState::Starting, 1));
-        assert_eq!(restarted[&ProcessKey::Brain].first_ready_at, None);
-        assert!(restarted[&ProcessKey::Brain].started_at > table[&ProcessKey::Brain].started_at);
+        assert_eq!(restarted[&brain].observed_first_ready_at, None);
+        assert!(restarted[&brain].observed_started_at > table[&brain].observed_started_at);
     }
 }

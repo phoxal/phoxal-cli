@@ -1,4 +1,4 @@
-//! `cargo install` materialization of official runtimes (organization#951 WS4).
+//! `cargo install` materialization of official runtimes.
 //!
 //! Cargo owns download, integrity, and compilation of every official service
 //! and every component driver package, against the static registry
@@ -193,7 +193,7 @@ pub fn build_install_args<'a>(
         "--config".to_string(),
         registry_config_arg(),
     ]);
-    let cross = target.filter(|triple| *triple != phoxal_cli_core::project::host_target_triple());
+    let cross = target.filter(|triple| *triple != crate::source::host_target_triple());
     if let Some(triple) = cross {
         args.push("--target".to_string());
         args.push(triple.to_string());
@@ -266,8 +266,8 @@ mod tests {
 
     #[test]
     fn cargo_package_name_matches_official_binary_name_for_every_kind() {
+        use crate::source::resolver::official_binary_name;
         use phoxal_cli_catalog::ArtifactKind;
-        use phoxal_cli_core::project::resolver::official_binary_name;
 
         let cases = [
             ("phoxal/service-drive", ArtifactKind::Service, "drive"),
@@ -369,12 +369,11 @@ mod tests {
 
     #[test]
     fn a_foreign_target_appends_the_cross_flag() {
-        let foreign =
-            if phoxal_cli_core::project::host_target_triple() == "aarch64-unknown-linux-gnu" {
-                "x86_64-unknown-linux-gnu"
-            } else {
-                "aarch64-unknown-linux-gnu"
-            };
+        let foreign = if crate::source::host_target_triple() == "aarch64-unknown-linux-gnu" {
+            "x86_64-unknown-linux-gnu"
+        } else {
+            "aarch64-unknown-linux-gnu"
+        };
         let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0")
             .with_target(Some(foreign.to_string()));
         let command = command_for(&spec, Path::new("/tmp/bundle"), false);
@@ -389,7 +388,7 @@ mod tests {
 
     #[test]
     fn a_target_matching_the_host_omits_the_cross_flag() {
-        let host = phoxal_cli_core::project::host_target_triple();
+        let host = crate::source::host_target_triple();
         let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0").with_target(Some(host));
         let command = command_for(&spec, Path::new("/tmp/bundle"), false);
         assert!(!args(&command).contains(&"--target".to_string()));

@@ -1,37 +1,30 @@
 use std::collections::BTreeSet;
 
+use crate::check::source::SourceParticipant;
+use crate::source::train::LockedProject;
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal_cli_catalog::{ArtifactKind, Catalog};
-use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::project::train::LockedProject;
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 
+use super::{ValidateRequest, ValidationComponent, ValidationReport, ValidationSource};
 use crate::validation::{
     CheckGraphContext, CheckOutcome, RawParticipantReport, build_participant_report_from_binary,
     ensure_check_outcome_ok, run_check_with_context,
 };
-use crate::{ValidateRequest, ValidationComponent, ValidationReport, ValidationSource};
 
-pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
+pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
     let target = match &request.source {
         ValidationSource::Project(target) => target,
         ValidationSource::Archive(archive) => {
             crate::bundle::archive::extract_build_archive(&archive.archive, &archive.destination)?;
-            let plan = crate::load::layout::validate_layout_plan(
+            let bundle = crate::load::layout::validate_runtime_bundle(
                 &archive.destination,
-                phoxal_cli_core::project::layout::LayoutInspection::Host,
-                phoxal_cli_core::project::launch_plan::RunIdentity::default(),
+                crate::check::participant_metadata::expected_target_for_host(),
             )
-            .context("runtime archive failed dry plan compilation")?;
-            let robot = plan
-                .robots
-                .first()
-                .context("runtime archive launch plan has no robot")?;
+            .context("runtime archive failed verification")?;
             return Ok(ValidationReport {
-                robot_path: archive
-                    .destination
-                    .join(phoxal_cli_core::project::layout::ROBOT_FILE),
-                robot: robot.id.clone(),
+                robot_path: archive.destination.join(phoxal_bundle::RUNTIME_FILE),
+                robot: bundle.robot_id().to_string(),
                 train: String::new(),
                 platform_services: Vec::new(),
                 services: Vec::new(),
@@ -54,16 +47,16 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         },
     )?;
 
-    // Declaration-only invariants first (#950), matching resolution's
+    // Declaration-only invariants first (), matching resolution's
     // ordering: a dual-name or official-identity declaration must fail
     // before any Cargo workspace reasoning, source-check or otherwise.
-    phoxal_cli_core::project::layout::validate_runtime_declarations(&robot)
+    crate::resolve::project::validate_runtime_declarations(&robot)
         .map_err(|error| anyhow!("Cargo workspace runtime discovery failed:\n{error:#}"))?;
 
     // Resolve the locked workspace once and share that result with canonical
     // compilation and config checking. Resolving component asset roots may
     // fetch packages from the Phoxal registry unless `--offline` was selected.
-    let project = phoxal_cli_core::project::train::resolve_locked_project(
+    let project = crate::source::train::resolve_locked_project(
             project_root,
             request.offline,
         )
@@ -75,7 +68,7 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
     let resolved = crate::resolve::project::resolve_with_locked_project(
         &robot,
         project_root,
-        phoxal_cli_core::project::resolver::ResolveOptions {
+        crate::source::resolver::ResolveOptions {
             offline: request.offline,
             ..Default::default()
         },
@@ -92,8 +85,7 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         workspace.problems.join("\n")
     );
 
-    // The mandatory root brain plus config-schema validation (#951 WS4
-    // follow-up): every declared user
+    // The mandatory root brain plus config-schema validation ensure every declared user
     // service's `services.<id>.config` must satisfy the JSON Schema its own
     // `#[phoxal::service(config = ...)]` type embeds. There is no schema
     // until that type compiles, so
@@ -106,8 +98,7 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         config_participants
             .iter()
             .filter(|participant| {
-                participant.kind
-                    == phoxal_cli_core::check::source::SourceParticipantKind::UserService
+                participant.kind == crate::check::source::SourceParticipantKind::UserService
             })
             .count(),
     ));
@@ -151,7 +142,7 @@ pub(crate) fn validate(request: ValidateRequest) -> Result<ValidationReport> {
 }
 
 /// What `validate` is about to compile, in prose. The root brain is always
-/// built (organization#973); declared service crates are built only when the
+/// built (); declared service crates are built only when the
 /// robot declares any, so the brain-only case must read naturally rather than
 /// announcing "0 declared service crates".
 fn compile_notice(declared_services: usize) -> String {
@@ -219,7 +210,7 @@ fn workspace_runtime_report(robot: &Robot, project: &LockedProject) -> Workspace
 /// The brain carries no config at all (`#[phoxal::brain]` fixes `Config = ()`),
 /// but it is built and inspected here anyway so `phoxal validate` proves the
 /// root package really is a brain - the right id, kind, and unit config schema -
-/// before anything else depends on it (organization#973).
+/// before anything else depends on it ().
 ///
 /// The config-bearing half is a `services/<id>` crate whose `<id>` is a declared key in
 /// `robot.services`. An official identity can never be a declared key
@@ -227,8 +218,8 @@ fn workspace_runtime_report(robot: &Robot, project: &LockedProject) -> Workspace
 /// filter alone is enough to exclude a workspace crate that path-overrides an
 /// official service - no separate "is this an official package name" lookup is
 /// needed here the way full graph resolution needs one. This scoping is the
-/// point (organization#951
-/// WS4 follow-up brief): `validate` must build ONLY the crates whose schema
+/// point (
+/// `validate` builds only the crates whose schema
 /// it actually needs to read, not the whole component/driver/official graph
 /// `build`/`run` resolve.
 fn declared_config_source_participants(
@@ -285,8 +276,8 @@ fn join_errors(errors: Vec<phoxal_manifest::source::robot::v0::ValidationError>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::train::{LockedTrain, WorkspaceRuntime};
     use crate::validation::{RawArtifact, RawParticipantReport};
-    use phoxal_cli_core::project::train::{LockedTrain, WorkspaceRuntime};
     use std::path::PathBuf;
 
     fn locked_project(runtimes: Vec<WorkspaceRuntime>) -> LockedProject {
@@ -294,7 +285,7 @@ mod tests {
             train: LockedTrain {
                 version: "0.42.0".to_string(),
             },
-            brain: phoxal_cli_core::project::train::RootBrainPackage {
+            brain: crate::source::train::RootBrainPackage {
                 package: "testbot-robot".to_string(),
                 crate_dir: PathBuf::from("/fake/project"),
                 bin_target: "testbot-robot".to_string(),
@@ -321,21 +312,23 @@ mod tests {
     const MINIMAL_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: bot
-  namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
     max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
-    actuators: []
+    actuators: [drive.motor]
     encoders: []
-  components: {}
+  components:
+    drive:
+      component: wheel
+      mount_link: base
 services:
   avoid: {}
 "#;
 
     fn minimal_robot() -> Robot {
-        phoxal_cli_core::project::resolver::parse_robot_from_string(MINIMAL_ROBOT)
+        crate::source::resolver::parse_robot_from_string(MINIMAL_ROBOT)
             .expect("minimal fixture robot.yaml parses")
     }
 
@@ -360,7 +353,7 @@ services:
     }
 
     /// The brain-only project is the common case for a fresh robot, so its
-    /// notice must not mention zero service crates (organization#973).
+    /// notice must not mention zero service crates ().
     #[test]
     fn the_compile_notice_reads_naturally_for_every_declared_service_count() {
         assert!(compile_notice(0).starts_with("compiling the root brain to validate"));
@@ -405,13 +398,13 @@ services:
         let participants = declared_config_source_participants(&robot, &project);
 
         // The mandatory root brain plus the one declared service - never the
-        // undeclared drift crate (organization#973, #950).
+        // undeclared drift crate (, ).
         assert_eq!(participants.len(), 2, "{participants:?}");
         let brain = &participants[0];
         assert_eq!(brain.name, "brain");
         assert_eq!(
             brain.kind,
-            phoxal_cli_core::check::source::SourceParticipantKind::Brain
+            crate::check::source::SourceParticipantKind::Brain
         );
         assert_eq!(brain.crate_dir, PathBuf::from("/fake/project"));
         assert_eq!(brain.bin_target.as_deref(), Some("testbot-robot"));
@@ -420,7 +413,7 @@ services:
                 .iter()
                 .any(|participant| participant.name == "avoid"
                     && participant.kind
-                        == phoxal_cli_core::check::source::SourceParticipantKind::UserService)
+                        == crate::check::source::SourceParticipantKind::UserService)
         );
     }
 

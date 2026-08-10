@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use phoxal_cli_observation::{
-    AttachmentEvent, ConnectionObservation, SourceStatus, SupervisorObservation,
+    AttachmentEvent, ConnectionObservation, ObservationSource, SourceStatus, SupervisorObservation,
 };
 use phoxal_supervisor_api::Snapshot;
 
@@ -15,7 +15,9 @@ use super::FeedContext;
 
 pub(crate) async fn run(context: FeedContext) {
     let mut snapshots = context.attachment.snapshots();
-    context.health("supervisor", SourceStatus::Live).await;
+    context
+        .health(ObservationSource::Supervisor, SourceStatus::Live)
+        .await;
     loop {
         let installed = snapshots.borrow_and_update().clone();
         if let Some(snapshot) = installed
@@ -72,8 +74,8 @@ fn observation(context: &FeedContext, snapshot: &Snapshot) -> SupervisorObservat
     SupervisorObservation {
         revision: snapshot.revision,
         execution: context.epoch.execution,
-        robot: snapshot.robot.clone(),
-        mode: snapshot.mode,
+        robot: context.attachment.connected().robot.clone(),
+        clock: context.attachment.connected().clock,
         project: context.project.clone(),
         lifecycle: snapshot.lifecycle,
         startup: snapshot.startup.clone(),

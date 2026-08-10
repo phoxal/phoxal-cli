@@ -5,14 +5,13 @@ use std::io::IsTerminal;
 use anyhow::{Result, bail};
 
 use super::args::{Cli, RootCommand};
-use super::{AppContext, Ui};
+use super::context::AppContext;
+use super::output::Ui;
 
 impl RootCommand {
     /// Whether this invocation mounts the terminal application.
     ///
-    /// There is no headless fallback any more: a command that attaches has
-    /// nothing to drive but the TUI, because the supervision loop it used to
-    /// fall back to now lives in a separate executable.
+    /// A command that attaches drives the TUI; supervision lives in `phoxald`.
     /// `start` is the headless verb - it launches, waits for readiness, and
     /// returns without ever attaching.
     fn requires_terminal(&self) -> bool {

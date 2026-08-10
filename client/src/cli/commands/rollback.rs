@@ -10,7 +10,7 @@ pub struct Rollback {
 }
 
 impl Rollback {
-    pub async fn run(&self, app: &crate::cli::AppContext) -> Result<()> {
+    pub async fn run(&self, app: &crate::cli::context::AppContext) -> Result<()> {
         crate::application::installation::rollback_command(app, self.to.as_deref()).await
     }
 }

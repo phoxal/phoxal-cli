@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
+use crate::source::train::RegistryStatus;
 use anyhow::{Context, Result, bail, ensure};
-use phoxal_cli_core::project::train::RegistryStatus;
 use serde::Deserialize;
 
 pub fn inspect_registry_train(version: &str) -> Result<RegistryStatus> {

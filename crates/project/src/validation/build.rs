@@ -1,13 +1,13 @@
 //! Build responsibilities for check.
 
 use super::{RawParticipantReport, raw_participant_report_from_extracted_metadata};
+use crate::check as graph_check;
+use crate::check::participant_metadata;
+use crate::check::source::SourceParticipant;
+use crate::check::source::SourceParticipantKind;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::check as graph_check;
-use phoxal_cli_core::check::participant_metadata;
-use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::check::source::SourceParticipantKind;
 use std::path::Path;
 
 /// Read a source participant's report from the exact executable Cargo selected
@@ -51,18 +51,23 @@ pub(crate) fn report_source_build_progress(ui: Option<&dyn crate::Reporter>, mes
 
 /// The expected `artifact.kind` label for a [`SourceParticipant`]'s kind.
 pub(crate) fn expected_kind_for_source_participant(kind: SourceParticipantKind) -> &'static str {
-    kind.shared_kind().label()
+    match kind.shared_kind() {
+        phoxal_runtime_contract::metadata::ParticipantKind::Brain => "brain",
+        phoxal_runtime_contract::metadata::ParticipantKind::Service => "service",
+        phoxal_runtime_contract::metadata::ParticipantKind::Driver => "driver",
+        phoxal_runtime_contract::metadata::ParticipantKind::Simulator => "simulator",
+    }
 }
 
 /// The root brain's `Config` is fixed to `()` by `#[phoxal::brain]`, so its
-/// embedded schema is exactly the unit schema (organization#973).
+/// embedded schema is exactly the unit schema ().
 ///
-/// This is the check-engine half of that gate. `RuntimeLayout::inspect_for`
+/// This is the check-engine half of that gate. Runtime-bundle verification
 /// enforces the identical rule over a staged `bin/brain`, which covers
 /// `run`/`start`/`build` and every extracted bundle; `phoxal validate` and the
 /// Webots simulation path never open a layout, so without this check a root
 /// binary hand-embedding a real config surface would pass validation and reach
-/// a resident. A binary claiming any config at all is not a brain, whatever
+/// the supervisor. A binary claiming any config at all is not a brain, whatever
 /// its id and kind declare.
 pub(crate) fn ensure_brain_declares_unit_config(
     participant: &SourceParticipant,

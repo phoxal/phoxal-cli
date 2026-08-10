@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use phoxal_runtime_contract::ParticipantKind;
-use phoxal_supervisor_api::{Process, ProcessKey, ProcessState};
+use phoxal_runtime_contract::identity::ParticipantId;
+use phoxal_runtime_contract::metadata::ParticipantKind;
+use phoxal_supervisor_api::Process;
 
 /// A snapshot row plus the local timing a client keeps for it.
 ///
@@ -15,19 +16,17 @@ use phoxal_supervisor_api::{Process, ProcessKey, ProcessState};
 /// to no one else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessObservation {
-    pub key: ProcessKey,
     pub row: Process,
-    pub state: ProcessState,
-    pub started_at: Instant,
-    pub ended_at: Option<Instant>,
-    pub first_ready_at: Option<Instant>,
+    pub observed_started_at: Instant,
+    pub observed_ended_at: Option<Instant>,
+    pub observed_first_ready_at: Option<Instant>,
 }
 
 impl ProcessObservation {
     /// The participant kind this row denotes, which its key already carries.
     #[must_use]
     pub const fn kind(&self) -> ParticipantKind {
-        self.key.kind()
+        self.row.kind
     }
 
     /// Whether the process has an open bus session, which is exactly whether
@@ -38,4 +37,4 @@ impl ProcessObservation {
     }
 }
 
-pub type ProcessTable = BTreeMap<ProcessKey, ProcessObservation>;
+pub type ProcessTable = BTreeMap<ParticipantId, ProcessObservation>;

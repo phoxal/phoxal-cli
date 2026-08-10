@@ -3,8 +3,7 @@
 //! Each module owns one domain, and no module owns two: the execution
 //! lifecycle, the terminal session, the simulation session, project builds,
 //! host installation, remote deployment, the systemd unit, host checks, and
-//! schema generation. They used to share one file, which is why they used to
-//! share nothing else.
+//! schema generation.
 
 pub(crate) mod build;
 pub(crate) mod daemon;

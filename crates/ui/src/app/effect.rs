@@ -1,8 +1,7 @@
 //! Typed commands emitted by the pure UI update function.
 
 use phoxal_cli_observation::{LogRead, RuntimeRead};
-use phoxal_runtime_contract::ProducerId;
-use phoxal_supervisor_api::ProcessKey;
+use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,7 +10,7 @@ pub struct DeviceId(pub String);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     Restart {
-        process: ProcessKey,
+        process: ParticipantId,
         expected_producer: ProducerId,
     },
     StopProject,

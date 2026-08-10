@@ -24,7 +24,7 @@ use phoxal_supervisor_client::{AttachError, Attachment, AttachmentConfig};
 use super::daemon::{self, LaunchedDaemon};
 use super::session::{self, Detachable};
 use crate::attach::{CLIENT_PARTICIPANT, Session};
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
 /// How long a client waits for a freshly launched daemon to answer connect.
@@ -144,20 +144,22 @@ async fn build_publish_and_launch(
         phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;
     let (reporter, signal_task) =
         crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
-    let prepared = phoxal_cli_project::prepare_run(phoxal_cli_project::PrepareRunRequest {
-        target: runtime_target,
-        run: phoxal_cli_core::project::launch_plan::RunIdentity::mint_or_adopt(None),
-        drivers: phoxal_cli_project::DriverRequest {
-            mode: match options.drivers {
-                DriversMode::On => phoxal_cli_project::DriverMode::On,
-                DriversMode::Off => phoxal_cli_project::DriverMode::Off,
+    let offline = app.offline;
+    let prepared = tokio::task::spawn_blocking(move || {
+        phoxal_cli_project::prepare_run(phoxal_cli_project::PrepareRunRequest {
+            target: runtime_target,
+            drivers: phoxal_cli_project::DriverRequest {
+                mode: match options.drivers {
+                    DriversMode::On => phoxal_cli_project::DriverMode::On,
+                    DriversMode::Off => phoxal_cli_project::DriverMode::Off,
+                },
+                subset: options.drivers_subset,
             },
-            subset: options.drivers_subset,
-        },
-        offline: app.offline,
-        reporter,
+            offline,
+            reporter,
+        })
     })
-    .await;
+    .await?;
     signal_task.abort();
     let prepared = prepared?;
 
@@ -220,14 +222,6 @@ async fn await_attachment(
         match Session::open(&target.endpoint, target.project.display().to_string()).await {
             Ok(session) => return Ok(session),
             Err(error) => {
-                // A handshake that failed because the daemon disagrees with
-                // this client is permanent: retrying cannot make an
-                // incompatible pair compatible.
-                if let Some(attach) = error.downcast_ref::<AttachError>()
-                    && matches!(attach, AttachError::Incompatible { .. })
-                {
-                    return Err(error);
-                }
                 if tokio::time::Instant::now() >= deadline {
                     if let Some(status) = launched.exited()? {
                         bail!(launched.early_exit_message(status));
@@ -255,37 +249,15 @@ async fn await_attachment(
 
 /// Wait for the graph to reach readiness, or fail with the reason it did not.
 async fn await_readiness(session: &Session, budget: Duration) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + budget;
-    let mut snapshots = session.snapshots();
-    loop {
-        let installed = snapshots.borrow_and_update().clone();
-        if let Some(snapshot) = installed {
-            match snapshot.lifecycle {
-                // Degraded is ready enough to hand back: an optional
-                // participant that failed does not make the robot unavailable.
-                Lifecycle::Ready | Lifecycle::Degraded => return Ok(()),
-                Lifecycle::Failed => bail!(failure_message(&snapshot)),
-                Lifecycle::Stopping | Lifecycle::Stopped => {
-                    bail!("the execution stopped before it became ready")
-                }
-                Lifecycle::Starting => {}
-            }
-        }
-        tokio::select! {
-            () = session.disconnected() => {
-                bail!("the supervisor's identity token was lost before the graph became ready")
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                bail!(
-                    "timed out after {}s waiting for the graph to become ready",
-                    budget.as_secs()
-                )
-            }
-            changed = snapshots.changed() => {
-                changed.context("the supervisor snapshot stream ended before readiness")?;
-            }
-        }
-    }
+    tokio::time::timeout(budget, session.wait_ready())
+        .await
+        .with_context(|| {
+            format!(
+                "timed out after {}s waiting for the graph to become ready",
+                budget.as_secs()
+            )
+        })??;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +307,9 @@ pub(crate) async fn stop_command(
 ) -> Result<()> {
     let (target, session) = open_existing(app, requested_target, endpoint).await?;
     let outcome = match session.ports.supervisor.stop().await {
-        Ok(phoxal_supervisor_api::CommandOutcome::Accepted) => await_terminal(&session).await,
+        Ok(phoxal_supervisor_api::CommandOutcome::Accepted { .. }) => {
+            await_terminal(&session).await
+        }
         Ok(phoxal_supervisor_api::CommandOutcome::Rejected { reason }) => {
             session.shutdown().await;
             bail!("the supervisor rejected the stop: {reason:?}")
@@ -407,7 +381,7 @@ pub(crate) async fn status_command(
     let snapshot = session
         .snapshot()
         .context("the supervisor answered connect but published no snapshot")?;
-    for line in render_status(&snapshot) {
+    for line in render_status(&snapshot, session.connected()) {
         println!("{line}");
     }
     session.shutdown().await;
@@ -419,13 +393,13 @@ pub(crate) async fn status_command(
 /// It is a pure function of the snapshot on purpose: the whole status surface
 /// is the authoritative document, so there is nothing to fetch and nothing to
 /// derive from local state.
-pub(crate) fn render_status(snapshot: &Snapshot) -> Vec<String> {
+pub(crate) fn render_status(
+    snapshot: &Snapshot,
+    connected: &phoxal_supervisor_client::Connected,
+) -> Vec<String> {
     let mut lines = vec![
-        format!(
-            "robot:     {}/{}",
-            snapshot.robot.namespace, snapshot.robot.id
-        ),
-        format!("clock:     {:?}", snapshot.mode).to_lowercase(),
+        format!("robot:     {}", connected.robot),
+        format!("clock:     {:?}", connected.clock).to_lowercase(),
         format!("lifecycle: {:?}", snapshot.lifecycle).to_lowercase(),
         format!("revision:  {}", snapshot.revision),
     ];
@@ -438,8 +412,7 @@ pub(crate) fn render_status(snapshot: &Snapshot) -> Vec<String> {
     }
     lines.push(format!("processes: {}", snapshot.processes.len()));
     for process in &snapshot.processes {
-        let mut row =
-            format!("  {:<24} {:?}", process.key.to_string(), process.state).to_lowercase();
+        let mut row = format!("  {:<24} {:?}", process.participant, process.state).to_lowercase();
         if let Some(pid) = process.pid {
             row.push_str(&format!(" pid={pid}"));
         }
@@ -462,9 +435,8 @@ pub(crate) async fn logs_command(
     follow: bool,
 ) -> Result<()> {
     let (_, session) = open_existing(app, requested_target, endpoint).await?;
-    let participant = participant.map(phoxal_supervisor_api::Name::new);
-    let page = session.logs(participant.clone(), 0, None).await?;
-    let phoxal_supervisor_api::supervisor::logs::Snapshot::V0 { records, .. } = page;
+    let page = session.logs(participant.clone(), 256, None).await?;
+    let records = page.records;
     if records.is_empty() {
         eprintln!("no retained log records");
     }
@@ -472,7 +444,7 @@ pub(crate) async fn logs_command(
         println!("{}", render_log(record));
     }
     if follow {
-        follow_logs(&session, participant.as_ref()).await;
+        follow_logs(&session, participant.as_deref()).await;
     }
     session.shutdown().await;
     Ok(())
@@ -484,7 +456,7 @@ pub(crate) async fn logs_command(
 /// is what following it was for; Ctrl+C is the operator saying they have seen
 /// enough. Neither is an error, and both leave through the same return so the
 /// session is shut down rather than abandoned at process exit.
-async fn follow_logs(session: &Session, participant: Option<&phoxal_supervisor_api::Name>) {
+async fn follow_logs(session: &Session, participant: Option<&str>) {
     let stream = match session.follow_logs().await {
         Ok(stream) => stream,
         Err(error) => {
@@ -507,19 +479,17 @@ async fn follow_logs(session: &Session, participant: Option<&phoxal_supervisor_a
             // end of the log, not a failure to read it.
             return;
         };
-        let phoxal_supervisor_api::supervisor::logs::Follow::V0 { record, .. } = observed.body;
-        if participant.is_none_or(|wanted| &record.participant == wanted) {
+        let record = observed.body.record;
+        if participant.is_none_or(|wanted| record.participant_id == wanted) {
             println!("{}", render_log(&record));
         }
     }
 }
 
-fn render_log(record: &phoxal_supervisor_api::LogRecord) -> String {
+fn render_log(record: &phoxal_supervisor_api::payload::log::Record) -> String {
     let mut line = format!(
         "[{}] {:?}: {}",
-        record.participant,
-        record.level,
-        record.message.as_str()
+        record.participant_id, record.level, record.message
     );
     if record.dropped > 0 {
         line.push_str(&format!(" (producer dropped {})", record.dropped));
@@ -561,10 +531,12 @@ pub(crate) fn report_outcome(
 
 #[cfg(test)]
 mod tests {
-    use phoxal_runtime_contract::ProducerId;
+    use phoxal_runtime_contract::clock::Clock;
+    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId, RobotId};
+    use phoxal_runtime_contract::metadata::ParticipantKind;
+    use phoxal_runtime_contract::version::RobotApiVersion;
     use phoxal_supervisor_api::{
-        DaemonFailure, DaemonFailureReason, DesiredState, Detail, ExecutionMode, Name, Process,
-        ProcessKey, ProcessState, RobotIdentity, StartupRequirement,
+        DaemonFailure, DaemonFailureReason, DesiredState, Detail, Process, ProcessState,
     };
 
     use super::*;
@@ -572,23 +544,18 @@ mod tests {
     fn snapshot(lifecycle: Lifecycle) -> Snapshot {
         Snapshot {
             revision: 7,
-            robot: RobotIdentity {
-                id: Name::new("rover"),
-                namespace: Name::new("lab"),
-            },
-            mode: ExecutionMode::Simulated,
             lifecycle,
             startup: Vec::new(),
             processes: vec![Process {
-                key: ProcessKey::Driver {
-                    instance: Name::new("base"),
-                },
+                participant: ParticipantId::new("base").expect("fixture participant"),
+                kind: ParticipantKind::Service,
                 component: None,
-                startup: StartupRequirement::Required,
                 desired: DesiredState::Running,
                 state: ProcessState::Ready,
                 pid: Some(4_242),
-                producer: Some(ProducerId::try_from(0x2b).expect("fixture producer")),
+                producer: Some(
+                    ProducerId::try_from((1_u128 << 124) | 43).expect("fixture producer"),
+                ),
                 restarts: 2,
                 failure: None,
             }],
@@ -596,17 +563,27 @@ mod tests {
         }
     }
 
+    fn connected() -> phoxal_supervisor_client::Connected {
+        phoxal_supervisor_client::Connected {
+            execution: phoxal_runtime_contract::identity::ExecutionId::mint(),
+            robot: RobotId::new("rover").expect("fixture robot"),
+            clock: Clock::Simulated,
+            robot_api: RobotApiVersion::new(0, 1),
+            manual_drive: None,
+        }
+    }
+
     /// `status` renders the authoritative snapshot and nothing else - there is
     /// no second source to reconcile it against.
     #[test]
     fn status_renders_the_snapshot_including_every_process_row() {
-        let rendered = render_status(&snapshot(Lifecycle::Ready)).join("\n");
-        assert!(rendered.contains("robot:     lab/rover"), "{rendered}");
+        let rendered = render_status(&snapshot(Lifecycle::Ready), &connected()).join("\n");
+        assert!(rendered.contains("robot:     rover"), "{rendered}");
         assert!(rendered.contains("clock:     simulated"), "{rendered}");
         assert!(rendered.contains("lifecycle: ready"), "{rendered}");
         assert!(rendered.contains("revision:  7"), "{rendered}");
         assert!(rendered.contains("processes: 1"), "{rendered}");
-        assert!(rendered.contains("driver:base"), "{rendered}");
+        assert!(rendered.contains("base"), "{rendered}");
         assert!(rendered.contains("pid=4242"), "{rendered}");
         assert!(rendered.contains("restarts=2"), "{rendered}");
     }
@@ -716,18 +693,18 @@ mod tests {
     fn a_failed_snapshot_renders_its_typed_reason_and_evidence() {
         let mut failed = snapshot(Lifecycle::Failed);
         failed.failure = Some(DaemonFailure {
-            reason: DaemonFailureReason::WorldClockMissing,
+            reason: DaemonFailureReason::ControlPlaneLost,
             detail: Detail::new("the world clock never became ready"),
         });
-        let rendered = render_status(&failed).join("\n");
-        assert!(rendered.contains("WorldClockMissing"), "{rendered}");
+        let rendered = render_status(&failed, &connected()).join("\n");
+        assert!(rendered.contains("ControlPlaneLost"), "{rendered}");
         assert!(
             rendered.contains("the world clock never became ready"),
             "{rendered}"
         );
         assert_eq!(
             failure_message(&failed),
-            "WorldClockMissing: the world clock never became ready"
+            "ControlPlaneLost: the world clock never became ready"
         );
     }
 }

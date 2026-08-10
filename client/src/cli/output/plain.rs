@@ -1,12 +1,11 @@
-use crate::cli::output::diagnostics::{RouteResult, try_route};
-use phoxal_cli_observation::{DiagnosticLevel, DiagnosticSource};
+use crate::cli::output::diagnostics::{DiagnosticLevel, DiagnosticSource, RouteResult, try_route};
 use phoxal_cli_ui::Theme;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Ui {
     interactive: bool,
     /// Prefix every line with a wall-clock timestamp. Set for the private
-    /// resident supervisor, whose stderr is the supervisor log file - a line
+    /// headless supervisor, whose stderr is the supervisor log file - a line
     /// there is diagnosed long after the fact, so it must date itself.
     timestamps: bool,
 }
@@ -187,7 +186,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_cli_observation::RuntimeEvent;
+    use crate::cli::output::diagnostics::RuntimeEvent;
 
     #[test]
     fn captured_command_lines_keep_dependency_diagnostic_ownership() {

@@ -32,7 +32,7 @@ name = "phoxal-cli-catalog"
 version_group = "phoxal-cli"
 
 [[package]]
-name = "phoxal-cli-core"
+name = "phoxal-cli-host"
 version_group = "phoxal-cli"
 
 [[package]]
