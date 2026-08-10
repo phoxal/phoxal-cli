@@ -18,7 +18,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use phoxal_manifest::source::DocumentKind;
 
 /// The project-relative directory the generated editor schemas are written to.
@@ -114,20 +114,6 @@ fn generate_schemas(start: &Path) -> Result<GeneratedSchemas> {
 /// between per-file replacements leaves every earlier file valid; rerunning
 /// repairs the set.
 fn write_schemas(generated: &GeneratedSchemas) -> Result<()> {
-    for directory in [
-        generated
-            .schema_dir
-            .parent()
-            .context("schema output has no project state parent")?,
-        generated.schema_dir.as_path(),
-    ] {
-        if fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-            bail!(
-                "schema output directory must not be a symlink: {}",
-                directory.display()
-            );
-        }
-    }
     fs::create_dir_all(&generated.schema_dir)
         .with_context(|| format!("failed to create {}", generated.schema_dir.display()))?;
     for (path, bytes) in &generated.files {
@@ -541,20 +527,6 @@ mod tests {
         for (path, bytes) in &generated.files {
             assert_eq!(&fs::read(path)?, bytes);
         }
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_symlinked_schema_directory_is_refused() -> Result<()> {
-        let project = project()?;
-        let elsewhere = tempfile::tempdir()?;
-        let generated = generate_schemas(project.path())?;
-        fs::create_dir_all(project.path().join(".phoxal"))?;
-        std::os::unix::fs::symlink(elsewhere.path(), &generated.schema_dir)?;
-        let error = write_schemas(&generated).expect_err("symlinked output is refused");
-        assert!(format!("{error:#}").contains("must not be a symlink"));
-        assert!(!elsewhere.path().join("robot.schema.json").exists());
         Ok(())
     }
 

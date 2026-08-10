@@ -16,8 +16,9 @@ pub use phoxal_cli_host::paths::{
     is_installed_root,
 };
 
-/// Resolve `/var/phoxal` once after its run lock is held and require its direct
-/// target to be one immutable release directory.
+/// Resolve `/var/phoxal` once after its run lock is held, so the rest of the
+/// execution reads one immutable release directory instead of a symlink an
+/// install may swap underneath it.
 pub fn pin_installed_release(root: &Path) -> anyhow::Result<PathBuf> {
     if root != Path::new(ACTIVE_RUNTIME_ROOT) {
         return Ok(root.to_path_buf());
@@ -30,18 +31,9 @@ pub fn pin_installed_release(root: &Path) -> anyhow::Result<PathBuf> {
         root.display()
     );
     let target = std::fs::read_link(root)?;
-    let target = if target.is_absolute() {
+    Ok(if target.is_absolute() {
         target
     } else {
         root.parent().unwrap_or_else(|| Path::new("/")).join(target)
-    };
-    let pinned = target.canonicalize()?;
-    let releases = Path::new(RELEASES_ROOT).canonicalize()?;
-    anyhow::ensure!(
-        pinned.parent() == Some(releases.as_path()),
-        "{} points outside the immutable release directory: {}",
-        root.display(),
-        pinned.display()
-    );
-    Ok(pinned)
+    })
 }

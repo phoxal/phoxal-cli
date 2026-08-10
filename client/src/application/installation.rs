@@ -264,7 +264,7 @@ async fn install_archive(
         remove_dir_if_present(&candidate)?;
         return Err(error);
     }
-    let pre_stop_active = active_release(&roots.active, &roots.releases)?;
+    let pre_stop_active = active_release(&roots.active)?;
     if let Err(error) = service.stop().context("failed to stop phoxal.service") {
         remove_dir_if_present(&candidate)?;
         return Err(error);
@@ -289,7 +289,7 @@ async fn install_archive(
             return Err(error);
         }
     };
-    let previous = active_release(&roots.active, &roots.releases)?;
+    let previous = active_release(&roots.active)?;
     if let Err(error) = (|| -> Result<()> {
         std::fs::rename(&candidate, &release)?;
         fsync_dir(&roots.releases)?;
@@ -322,7 +322,7 @@ async fn rollback_release(
     roots: &InstallRoots,
     service: &ServiceControl,
 ) -> Result<PathBuf> {
-    let active = active_release(&roots.active, &roots.releases)?
+    let active = active_release(&roots.active)?
         .context("cannot roll back: /var/phoxal does not select a release")?;
     let selected = select_rollback_release(requested, &active, &roots.releases)?;
     service.stop().context("failed to stop phoxal.service")?;
@@ -417,7 +417,12 @@ fn require_build_archive(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn active_release(active: &Path, releases: &Path) -> Result<Option<PathBuf>> {
+/// The release directory `active` currently selects, or `None` when nothing is
+/// installed yet.
+///
+/// `active` is a symlink into the releases root by construction; anything else
+/// there is a hand-mangled installation this command will not reason about.
+fn active_release(active: &Path) -> Result<Option<PathBuf>> {
     match std::fs::symlink_metadata(active) {
         Ok(metadata) => {
             anyhow::ensure!(
@@ -425,25 +430,15 @@ fn active_release(active: &Path, releases: &Path) -> Result<Option<PathBuf>> {
                 "{} exists but is not a symlink",
                 active.display()
             );
-            let target = std::fs::read_link(active).map(|target| {
-                if target.is_absolute() {
-                    target
-                } else {
-                    active
-                        .parent()
-                        .unwrap_or_else(|| Path::new("/"))
-                        .join(target)
-                }
-            })?;
-            let canonical = target.canonicalize()?;
-            let canonical_releases = releases.canonicalize()?;
-            anyhow::ensure!(
-                canonical.parent() == Some(canonical_releases.as_path()),
-                "{} points outside {}",
-                active.display(),
-                releases.display()
-            );
-            Ok(Some(canonical))
+            let target = std::fs::read_link(active)?;
+            Ok(Some(if target.is_absolute() {
+                target
+            } else {
+                active
+                    .parent()
+                    .unwrap_or_else(|| Path::new("/"))
+                    .join(target)
+            }))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),

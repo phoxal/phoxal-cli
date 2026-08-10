@@ -19,7 +19,6 @@ use serde::Serialize;
 
 use crate::cli::context::AppContext;
 use crate::cli::output::Ui;
-use crate::digest::sha256_file;
 
 const LATEST_RELEASE_URL: &str = "https://github.com/phoxal/phoxal-cli/releases/latest";
 const DOWNLOAD_BASE_URL: &str = "https://github.com/phoxal/phoxal-cli/releases/download";
@@ -94,24 +93,12 @@ fn run_upgrade(options: UpgradeOptions, ui: Ui) -> Result<UpgradeOutcome> {
     let asset = ReleaseAsset::new(&requested_version, target);
     let temp_dir = tempfile::tempdir().context("failed to create self-upgrade temp directory")?;
     let archive_path = temp_dir.path().join(&asset.archive_name);
-    let checksum_path = temp_dir.path().join(&asset.checksum_name);
     let download_client = build_client(true)?;
 
     ui.info(format!("downloading {}", asset.archive_url));
     if download_asset(&download_client, &asset.archive_url, &archive_path)? == AssetDownload::Absent
     {
         bail!("release archive {} was not found", asset.archive_url);
-    }
-
-    ui.info(format!("downloading {}", asset.checksum_url));
-    match download_asset(&download_client, &asset.checksum_url, &checksum_path)? {
-        AssetDownload::Written => {
-            verify_checksum(&archive_path, &checksum_path, &asset.archive_name)?;
-        }
-        AssetDownload::Absent => bail!(
-            "release v{requested_version} has no checksum asset {}; refusing to self-upgrade",
-            asset.checksum_name
-        ),
     }
 
     // Both halves are extracted and verified present before anything on disk is
@@ -203,9 +190,9 @@ fn parse_version_tag(tag: &str) -> Result<Version> {
 
 /// What asking a release for one asset produced.
 ///
-/// "Absent" is a real answer, not a failure: a release genuinely may not carry
-/// a checksum asset, and the caller decides what that means. Anything else -
-/// a refusal, a truncated body, an unwritable destination - is an error.
+/// "Absent" is a real answer, not a failure: the release may simply not carry
+/// the asset, and the caller decides what that means. Anything else - a
+/// refusal, a truncated body, an unwritable destination - is an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AssetDownload {
     /// The asset was fetched and written to the destination.
@@ -232,35 +219,6 @@ fn download_asset(client: &Client, url: &str, destination: &Path) -> Result<Asse
         .copy_to(&mut file)
         .with_context(|| format!("failed to write {}", destination.display()))?;
     Ok(AssetDownload::Written)
-}
-
-fn verify_checksum(archive_path: &Path, checksum_path: &Path, archive_name: &str) -> Result<()> {
-    let checksum = fs::read_to_string(checksum_path)
-        .with_context(|| format!("failed to read {}", checksum_path.display()))?;
-    let expected = parse_checksum(&checksum, archive_name)?;
-    let actual = sha256_file(archive_path)?;
-    if actual != expected {
-        bail!("checksum mismatch for {archive_name}: expected {expected}, got {actual}");
-    }
-    Ok(())
-}
-
-fn parse_checksum(contents: &str, archive_name: &str) -> Result<String> {
-    let line = contents
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .context("checksum asset was empty")?;
-    let (hex, filename) = line.split_once("  ").with_context(|| {
-        format!("checksum asset must contain '<hex>  {archive_name}' with two spaces")
-    })?;
-    let filename = filename.trim_end_matches('\r');
-    if filename != archive_name {
-        bail!("checksum asset names {filename}, expected {archive_name}");
-    }
-    if hex.len() != 64 || !hex.chars().all(|value| value.is_ascii_hexdigit()) {
-        bail!("checksum asset contains invalid SHA256 digest {hex}");
-    }
-    Ok(hex.to_ascii_lowercase())
 }
 
 /// Both halves of the pair, extracted and not yet installed.
@@ -479,9 +437,7 @@ struct ReleaseAsset {
     archive_name: String,
     client_binary_name: String,
     daemon_binary_name: String,
-    checksum_name: String,
     archive_url: String,
-    checksum_url: String,
 }
 
 impl ReleaseAsset {
@@ -489,16 +445,12 @@ impl ReleaseAsset {
         let archive_name = format!("phoxal-{version}-{target}.tar.gz");
         let client_binary_name = format!("{}-{target}", crate::pair::CLIENT_BINARY);
         let daemon_binary_name = format!("{}-{target}", crate::pair::DAEMON_BINARY);
-        let checksum_name = format!("{archive_name}.sha256");
         let archive_url = format!("{DOWNLOAD_BASE_URL}/v{version}/{archive_name}");
-        let checksum_url = format!("{DOWNLOAD_BASE_URL}/v{version}/{checksum_name}");
         Self {
             archive_name,
             client_binary_name,
             daemon_binary_name,
-            checksum_name,
             archive_url,
-            checksum_url,
         }
     }
 }

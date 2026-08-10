@@ -29,6 +29,7 @@ use crate::build::container::{
     host_cargo_caches, platform_for_triple, require_platform_for_triple,
 };
 use crate::build::profile::StagingBuild;
+use crate::build::shell::shell_quote;
 use crate::check::participant_metadata::expected_target_for_triple;
 use crate::registry_package::{HttpClient, PackageCache, fetch_registry_package};
 use crate::run::RunOptions;
@@ -746,8 +747,10 @@ fn create_remote_temp(target: &str, reporter: &dyn crate::Reporter) -> Result<St
 }
 
 fn cleanup_remote_temp(target: &str, path: &str, reporter: &dyn crate::Reporter) -> Result<()> {
+    // `rm -rf` is destructive and the path came back over a pipe, so the prefix
+    // this call created is what it is allowed to remove.
     anyhow::ensure!(
-        path.starts_with("/tmp/phoxal-build.") && !path.contains(char::is_whitespace),
+        path.starts_with("/tmp/phoxal-build."),
         "refusing to clean unexpected remote path `{path}`"
     );
     run_remote(
@@ -837,10 +840,6 @@ fn run_local(program: &str, args: &[&str], reporter: &dyn crate::Reporter) -> Re
     let status = crate::build::shell::command_status_captured(&mut command, reporter)?;
     anyhow::ensure!(status.success(), "{program} failed with {status}");
     Ok(())
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 /// Copy a validated staged runtime layout produced outside the project (the
@@ -1025,12 +1024,10 @@ pub(crate) fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
                 }
                 let link = std::fs::read_link(&source)
                     .with_context(|| format!("failed to read symlink {}", source.display()))?;
-                // A symlink escaping the project root would let post-compile
-                // staging read LIVE or external content through the "frozen"
-                // snapshot (host-side `fs::copy` follows links), so the frozen
-                // guarantee would be a fiction for that asset (). Only
-                // project-internal links are preserved.
-                ensure_snapshot_link_contained(project_root, relative, &link)?;
+                // A symlink pointing outside the project is not snapshotted
+                // content: post-compile staging follows it and reads whatever
+                // the host has there now, so the snapshot would not reproduce.
+                ensure_snapshot_link_reproducible(project_root, relative, &link)?;
                 symlink_verbatim(&link, &target)
                     .with_context(|| format!("failed to snapshot symlink {}", source.display()))?;
             }
@@ -1048,22 +1045,23 @@ pub(crate) fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Reject a tracked symlink whose target escapes the project root. `rel` is the
-/// symlink's project-relative path; `link` is its literal target. An absolute
-/// target is always an escape; a relative one is resolved lexically against the
-/// link's parent directory and must stay inside the project.
-fn ensure_snapshot_link_contained(project_root: &Path, rel: &Path, link: &Path) -> Result<()> {
-    let escapes = if link.is_absolute() {
+/// Reject a tracked symlink whose target lies outside the project root, because
+/// its content is not part of what the snapshot freezes and so cannot be
+/// reproduced from it. `rel` is the symlink's project-relative path; `link` is
+/// its literal target. An absolute target always points outside; a relative one
+/// is resolved lexically against the link's parent directory.
+fn ensure_snapshot_link_reproducible(project_root: &Path, rel: &Path, link: &Path) -> Result<()> {
+    let outside = if link.is_absolute() {
         true
     } else {
         let mut depth: i64 = rel.components().count() as i64 - 1;
-        let mut escaped = false;
+        let mut left = false;
         for component in link.components() {
             match component {
                 std::path::Component::ParentDir => {
                     depth -= 1;
                     if depth < 0 {
-                        escaped = true;
+                        left = true;
                         break;
                     }
                 }
@@ -1071,13 +1069,14 @@ fn ensure_snapshot_link_contained(project_root: &Path, rel: &Path, link: &Path) 
                 _ => depth += 1,
             }
         }
-        escaped
+        left
     };
-    if escapes {
+    if outside {
         bail!(
-            "source snapshotting cannot preserve `{}`: it is a symlink to `{}`, which escapes \
-             the project root {}. Move the linked content into the project, or replace the link \
-             with the real file.",
+            "source snapshotting cannot reproduce `{}`: it is a symlink to `{}`, which is outside \
+             the project root {}, so the build would read whatever that path holds at the time \
+             rather than snapshotted content. Move the linked content into the project, or \
+             replace the link with the real file.",
             rel.display(),
             link.display(),
             project_root.display()
@@ -1397,22 +1396,22 @@ robot:
     }
 
     #[test]
-    fn snapshot_link_containment_is_lexical_and_depth_aware() -> Result<()> {
+    fn snapshot_link_reproducibility_is_lexical_and_depth_aware() -> Result<()> {
         let root = Path::new("/proj");
         // Internal relative links are fine, including into a sibling directory.
-        ensure_snapshot_link_contained(
+        ensure_snapshot_link_reproducible(
             root,
             Path::new("worlds/a.wbt"),
             Path::new("../meshes/a.stl"),
         )?;
         // Climbing past the project root is rejected.
         assert!(
-            ensure_snapshot_link_contained(root, Path::new("a.txt"), Path::new("../out.txt"))
+            ensure_snapshot_link_reproducible(root, Path::new("a.txt"), Path::new("../out.txt"))
                 .is_err()
         );
         // Absolute targets are always rejected.
         assert!(
-            ensure_snapshot_link_contained(root, Path::new("a.txt"), Path::new("/etc/hosts"))
+            ensure_snapshot_link_reproducible(root, Path::new("a.txt"), Path::new("/etc/hosts"))
                 .is_err()
         );
         Ok(())

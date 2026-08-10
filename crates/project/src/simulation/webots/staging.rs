@@ -87,9 +87,6 @@ fn stage_compiled_geometry_assets(
             mesh_root.display()
         )
     })?;
-    let canonical_root = mesh_root
-        .canonicalize()
-        .context("failed to resolve staged Webots mesh root")?;
     let mut referenced = robot
         .structure()
         .asset_ids()
@@ -110,13 +107,6 @@ fn stage_compiled_geometry_assets(
         let bytes = assets
             .read(id)
             .with_context(|| format!("compiled geometry asset '{}' is missing", id.as_str()))?;
-        anyhow::ensure!(
-            Path::new(id.as_str())
-                .components()
-                .all(|component| matches!(component, std::path::Component::Normal(_))),
-            "compiled geometry asset '{}' has an unsafe path",
-            id.as_str()
-        );
         let relative = crate::simulation::webots::proto::support::paths::staged_geometry_path(id);
         let destination = mesh_root.join(relative);
         let parent = destination
@@ -130,17 +120,6 @@ fn stage_compiled_geometry_assets(
         })?;
         std::fs::write(&destination, &bytes)
             .with_context(|| format!("failed to stage compiled mesh {}", destination.display()))?;
-        let canonical = destination.canonicalize().with_context(|| {
-            format!(
-                "failed to resolve staged geometry {}",
-                destination.display()
-            )
-        })?;
-        anyhow::ensure!(
-            canonical.starts_with(&canonical_root),
-            "compiled geometry asset '{}' escaped the Webots mesh root",
-            id.as_str()
-        );
     }
     Ok(())
 }

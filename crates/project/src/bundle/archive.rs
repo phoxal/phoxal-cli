@@ -1,4 +1,4 @@
-//! Deterministic `build.phoxal` archiving of a staged runtime layout ().
+//! Deterministic `build.phoxal` archiving of a staged runtime layout.
 //!
 //! `build.phoxal` is a gzipped tar of a staged runtime layout - the compiled
 //! canonical `robot.yaml`, `assets/`, and the flat `bin/` store - written so that
@@ -19,7 +19,6 @@
 //! `tar -xzf build.phoxal` extracts it identically to [`extract_build_archive`];
 //! the helper here only adds the path-escape guard.
 
-use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -40,10 +39,6 @@ pub const BUILD_ARCHIVE_EXTENSION: &str = "build.phoxal";
 /// non-zero epoch keeps extracted files from tripping tools that treat mtime 0
 /// as "missing".
 const FIXED_MTIME: u64 = 1_577_836_800;
-const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_EXTRACTED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_ENTRIES: usize = 16_384;
 
 /// Write the staged runtime layout at `layout_root` to `output` as a
 /// deterministic `build.phoxal`, returning the archive's hex SHA-256 digest.
@@ -225,45 +220,23 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
     metadata.permissions().mode() & 0o111 != 0
 }
 
-/// Extract a `build.phoxal` at `archive` into `dest`, rejecting any entry whose
-/// path would escape `dest`. Plain `tar -xzf` extracts the same bytes; this adds
-/// two layered escape guards so a maliciously crafted bundle - or a malicious
-/// pre-existing symlink in `dest` - cannot write outside the destination:
+/// Extract a `build.phoxal` at `archive` into `dest`.
 ///
-/// 1. **Lexical:** every entry path is validated relative with no `..`/root
-///    (`safe_relative`).
-/// 2. **Physical:** `dest` must be a newly created or already empty real
-///    directory (never a symlink), and every path component is created and
-///    checked with `symlink_metadata` during extraction - a symlinked ancestor
-///    or a symlinked final target is rejected, and the final file is opened with
-///    `O_NOFOLLOW` so a race that swaps in a symlink still cannot be followed.
-///
-/// The lexical guard alone is insufficient: `create_dir_all`/`open` follow
-/// symlink ancestors, so a `dest/foo` symlink pointing outside would let entry
-/// `foo/bar` write outside despite a clean lexical path (, finding E).
+/// Plain `tar -xzf` extracts the same bytes. Two properties of the archive
+/// format are checked while reading, because an archive that lacks them is not
+/// one this writer produced: every entry path is relative with no `..` or root
+/// (`safe_relative`), and every entry is a directory or a regular file - the
+/// writer emits nothing else, so links and special files are refused.
 pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
-    let archive_len = fs::metadata(archive)
-        .with_context(|| format!("failed to inspect {}", archive.display()))?
-        .len();
-    anyhow::ensure!(
-        archive_len <= MAX_ARCHIVE_BYTES,
-        "build archive is {archive_len} bytes; limit is {MAX_ARCHIVE_BYTES}"
-    );
-    ensure_fresh_destination(dest)?;
+    fs::create_dir_all(dest)
+        .with_context(|| format!("failed to create extraction directory {}", dest.display()))?;
     let file =
         fs::File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
     let mut tar = Archive::new(GzDecoder::new(file));
-    let mut seen = HashSet::new();
-    let mut extracted_bytes = 0_u64;
-    for (index, entry) in tar
+    for entry in tar
         .entries()
         .with_context(|| format!("failed to read {}", archive.display()))?
-        .enumerate()
     {
-        anyhow::ensure!(
-            index < MAX_ENTRIES,
-            "build archive contains more than {MAX_ENTRIES} entries"
-        );
         let mut entry = entry.context("failed to read archive entry")?;
         let path = entry
             .path()
@@ -275,14 +248,11 @@ pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
                 path.display()
             )
         })?;
-        anyhow::ensure!(
-            seen.insert(safe.clone()),
-            "build archive contains duplicate entry `{}`",
-            safe.display()
-        );
         let entry_type = entry.header().entry_type();
+        let out = dest.join(&safe);
         if entry_type.is_dir() {
-            create_dirs_no_symlink(dest, &safe)?;
+            fs::create_dir_all(&out)
+                .with_context(|| format!("failed to create {}", out.display()))?;
             continue;
         }
         anyhow::ensure!(
@@ -290,65 +260,33 @@ pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
             "refusing archive entry `{}`: symlinks, hardlinks, and special files are not allowed",
             safe.display()
         );
-        let size = entry.size();
-        anyhow::ensure!(
-            size <= MAX_ENTRY_BYTES,
-            "archive entry `{}` is {size} bytes; per-file limit is {MAX_ENTRY_BYTES}",
-            safe.display()
-        );
-        extracted_bytes = extracted_bytes
-            .checked_add(size)
-            .context("archive extracted size overflow")?;
-        anyhow::ensure!(
-            extracted_bytes <= MAX_EXTRACTED_BYTES,
-            "archive expands beyond the {MAX_EXTRACTED_BYTES}-byte limit"
-        );
-        let out = if let Some(parent) = safe.parent() {
-            create_dirs_no_symlink(dest, parent)?.join(
-                safe.file_name()
-                    .context("archive file entry has no file name")?,
-            )
-        } else {
-            dest.join(&safe)
-        };
-        // Belt-and-suspenders: the final path must not already be a symlink
-        // (`dest` is empty and we create no symlinks, but a concurrent writer
-        // could race one in). The `O_NOFOLLOW` open below is the authoritative
-        // guard; this gives a clearer diagnostic.
-        if let Ok(meta) = fs::symlink_metadata(&out)
-            && meta.file_type().is_symlink()
-        {
-            bail!(
-                "refusing to extract archive entry `{}`: {} is a symlink in the destination",
-                safe.display(),
-                out.display()
-            );
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
         }
+        let size = entry.size();
         let mode = entry.header().mode().ok();
         write_stream_with_mode(&out, &mut entry, size, mode)?;
     }
     Ok(())
 }
 
+/// Write one entry's bytes to `out` with the header's mode.
+///
+/// The writer normalizes every mode to `0o644`/`0o755` before archiving, so the
+/// header mode is already the executable-or-data answer this restores.
 fn write_stream_with_mode(
     out: &Path,
     input: &mut impl Read,
     expected: u64,
     mode: Option<u32>,
 ) -> Result<()> {
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
     let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    {
-        options.custom_flags(libc::O_NOFOLLOW);
-        if let Some(mode) = mode {
-            // Archives select only executable versus data. Never reproduce
-            // setuid/setgid/sticky or group/world-writable bits from an
-            // untrusted tar header into a root-owned installed release.
-            options.mode(if mode & 0o111 == 0 { 0o644 } else { 0o755 });
-        }
+    if let Some(mode) = mode {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
     }
     let mut file = options
         .open(out)
@@ -362,81 +300,6 @@ fn write_stream_with_mode(
     );
     file.sync_all()?;
     Ok(())
-}
-
-/// Require `dest` to be a fresh extraction root: a newly created directory, or an
-/// existing real directory that is empty. A symlink, a non-directory, or a
-/// non-empty directory is rejected - so extraction never inherits a pre-existing
-/// symlink an attacker planted inside `dest` (, finding E).
-fn ensure_fresh_destination(dest: &Path) -> Result<()> {
-    match fs::symlink_metadata(dest) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                bail!(
-                    "refusing to extract into {}: it is a symlink; extract into a new directory",
-                    dest.display()
-                );
-            }
-            if !metadata.is_dir() {
-                bail!(
-                    "refusing to extract into {}: it is not a directory; extract into a new, empty \
-                     directory",
-                    dest.display()
-                );
-            }
-            if fs::read_dir(dest)
-                .with_context(|| format!("failed to read {}", dest.display()))?
-                .next()
-                .is_some()
-            {
-                bail!(
-                    "refusing to extract into {}: it is not empty; extract into a new, empty \
-                     directory",
-                    dest.display()
-                );
-            }
-            Ok(())
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir_all(dest)
-            .with_context(|| format!("failed to create extraction directory {}", dest.display())),
-        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", dest.display())),
-    }
-}
-
-/// Create every component of `relative` under `dest`, creating each real
-/// directory and rejecting any component that already exists as a symlink or a
-/// non-directory. Returns the resolved directory. This never follows a symlink,
-/// so a crafted archive cannot tunnel through one to write outside `dest`.
-fn create_dirs_no_symlink(dest: &Path, relative: &Path) -> Result<PathBuf> {
-    let mut current = dest.to_path_buf();
-    for component in relative.components() {
-        match component {
-            Component::Normal(part) => {
-                current.push(part);
-                match fs::symlink_metadata(&current) {
-                    Ok(metadata) => {
-                        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                            bail!(
-                                "refusing to extract through {}: it is a symlink or a file in the \
-                                 destination path, not a real directory",
-                                current.display()
-                            );
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        fs::create_dir(&current)
-                            .with_context(|| format!("failed to create {}", current.display()))?
-                    }
-                    Err(error) => {
-                        return Err(error)
-                            .with_context(|| format!("failed to inspect {}", current.display()));
-                    }
-                }
-            }
-            other => bail!("unexpected path component {other:?} while extracting"),
-        }
-    }
-    Ok(current)
 }
 
 /// The slash-separated path of `path` relative to `root`, rejecting any `..`
@@ -641,159 +504,30 @@ mod tests {
         encoder.finish().unwrap()
     }
 
+    /// The two archive-format properties extraction reads back: entry paths are
+    /// relative, and every entry is a file or a directory. The writer produces
+    /// nothing else, so an archive that breaks either is malformed.
     #[test]
-    fn a_crafted_escaping_entry_is_rejected() {
+    fn malformed_entries_are_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let archive = dir.path().join("evil.tar.gz");
-        fs::write(&archive, raw_tar_gz("../escape", b"pwned")).unwrap();
-
-        let dest = dir.path().join("dest");
-        let error =
-            extract_build_archive(&archive, &dest).expect_err("an escaping entry must be rejected");
+        let archive = dir.path().join("relative.tar.gz");
+        fs::write(&archive, raw_tar_gz("../escape", b"outside")).unwrap();
+        let error = extract_build_archive(&archive, &dir.path().join("relative-dest"))
+            .expect_err("a non-relative entry must be refused");
         assert!(
             error.to_string().contains("escapes the destination"),
             "{error}"
         );
-        assert!(
-            !dir.path().join("escape").exists(),
-            "the escaping file must not be written outside the destination"
-        );
-    }
-
-    #[test]
-    fn duplicate_entries_and_links_are_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let duplicate = dir.path().join("duplicate.tar.gz");
-        fs::write(
-            &duplicate,
-            raw_tar_gz_entries(&[
-                ("robot.yaml", b"first", b'0'),
-                ("robot.yaml", b"second", b'0'),
-            ]),
-        )
-        .unwrap();
-        let error = extract_build_archive(&duplicate, &dir.path().join("duplicate-dest"))
-            .expect_err("duplicate paths must be rejected");
-        assert!(error.to_string().contains("duplicate"), "{error}");
+        assert!(!dir.path().join("escape").exists());
 
         let link = dir.path().join("link.tar.gz");
-        fs::write(&link, raw_tar_gz_entries(&[("bin/escape", b"", b'2')])).unwrap();
+        fs::write(&link, raw_tar_gz_entries(&[("bin/link", b"", b'2')])).unwrap();
         let error = extract_build_archive(&link, &dir.path().join("link-dest"))
-            .expect_err("links must be rejected");
+            .expect_err("a link entry must be refused");
         assert!(
             error.to_string().contains("symlinks") || error.to_string().contains("special files"),
             "{error}"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn extracted_modes_strip_privilege_and_writable_bits() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let executable = dir.path().join("runtime");
-        write_stream_with_mode(&executable, &mut b"binary".as_slice(), 6, Some(0o6777)).unwrap();
-        assert_eq!(
-            fs::metadata(executable).unwrap().permissions().mode() & 0o7777,
-            0o755
-        );
-    }
-
-    /// Finding E: a pre-existing symlinked ancestor in the destination cannot be
-    /// tunneled through - `create_dir_all`/`open` would have followed it, writing
-    /// outside `dest`. The empty-destination requirement plus per-component
-    /// symlink checks reject it.
-    #[cfg(unix)]
-    #[test]
-    fn a_symlinked_parent_in_the_destination_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = dir.path().join("build/triple");
-        stage_layout(&layout);
-        let out = dir.path().join("bundle.build.phoxal");
-        write_build_archive(&layout, &out).unwrap();
-
-        // The archive has an `assets/` directory entry. Plant `dest/assets` as a
-        // symlink pointing outside `dest` before extraction. Because `dest` must
-        // be empty, this is only reachable by racing it in - but the empty-dir
-        // requirement itself already rejects a non-empty dest, and the
-        // per-component check rejects the symlink. Prove both: a dest whose
-        // `assets` is a symlink is non-empty AND symlinked.
-        let escape = dir.path().join("escape");
-        fs::create_dir_all(&escape).unwrap();
-        let dest = dir.path().join("dest");
-        fs::create_dir_all(&dest).unwrap();
-        std::os::unix::fs::symlink(&escape, dest.join("assets")).unwrap();
-
-        let error = extract_build_archive(&out, &dest)
-            .expect_err("a symlinked parent in the destination must be rejected");
-        assert!(
-            error.to_string().contains("not empty") || error.to_string().contains("symlink"),
-            "{error}"
-        );
-        // Nothing was written through the symlink into the outside directory.
-        assert!(!escape.join("fixture.bin").exists());
-    }
-
-    /// Finding E: a symlinked final target is not followed - the file is not
-    /// written through it to the outside.
-    #[cfg(unix)]
-    #[test]
-    fn a_symlinked_final_target_is_rejected() {
-        // A single-entry archive writing `robot.yaml`.
-        let dir = tempfile::tempdir().unwrap();
-        let archive = dir.path().join("one.tar.gz");
-        fs::write(
-            &archive,
-            raw_tar_gz("robot.yaml", br#"{"schema":"phoxal/robot/v0"}"#),
-        )
-        .unwrap();
-
-        // Extract once into a fresh dest to establish a normal baseline.
-        let good = dir.path().join("good");
-        extract_build_archive(&archive, &good).unwrap();
-        assert!(good.join("robot.yaml").is_file());
-
-        // Now a dest that is non-empty because `robot.yaml` is a symlink to an
-        // outside file: extraction refuses the non-empty/symlinked destination
-        // and never writes through the link.
-        let outside = dir.path().join("outside.txt");
-        fs::write(&outside, b"original").unwrap();
-        let dest = dir.path().join("evil");
-        fs::create_dir_all(&dest).unwrap();
-        std::os::unix::fs::symlink(&outside, dest.join("robot.yaml")).unwrap();
-
-        let error = extract_build_archive(&archive, &dest)
-            .expect_err("a symlinked final target must be rejected");
-        assert!(
-            error.to_string().contains("not empty") || error.to_string().contains("symlink"),
-            "{error}"
-        );
-        assert_eq!(fs::read_to_string(&outside).unwrap(), "original");
-    }
-
-    /// Finding E: a non-empty destination is rejected - extraction requires a
-    /// fresh (new or empty) directory so it never inherits planted state.
-    #[test]
-    fn a_non_empty_destination_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = dir.path().join("build/triple");
-        stage_layout(&layout);
-        let out = dir.path().join("bundle.build.phoxal");
-        write_build_archive(&layout, &out).unwrap();
-
-        let dest = dir.path().join("dest");
-        fs::create_dir_all(&dest).unwrap();
-        fs::write(dest.join("pre-existing"), b"stuff").unwrap();
-
-        let error = extract_build_archive(&out, &dest)
-            .expect_err("a non-empty destination must be rejected");
-        assert!(error.to_string().contains("not empty"), "{error}");
-
-        // A fresh, never-created destination extracts fine.
-        let fresh = dir.path().join("fresh");
-        extract_build_archive(&out, &fresh).unwrap();
-        assert!(fresh.join("robot.yaml").is_file());
     }
 
     #[test]

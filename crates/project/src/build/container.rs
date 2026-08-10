@@ -82,6 +82,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::build::shell::shell_quote;
+
 /// The default toolchain image: a pinned official Docker Hub `rust` image. The
 /// `bookworm` variant ships glibc 2.36; for older devices (e.g. jetson L4T r36,
 /// glibc 2.35) override with `--builder-image rust:1.88-bullseye` (glibc 2.31).
@@ -373,18 +375,6 @@ impl ContainerBuildSpec {
     }
 }
 
-fn shell_quote(value: &str) -> String {
-    if !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(byte, b'/' | b'.' | b'-' | b'_' | b':' | b',' | b'=' | b'@')
-        })
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 /// Execute a rendered invocation, streaming output through the session UI.
 /// Rendering stays separate so every engine argument remains unit-testable
 /// without starting a container.
@@ -569,7 +559,7 @@ mod tests {
         assert!(joined.contains("rust:1.88-bookworm"), "{joined}");
         // Native compilation for the target, with the locked lockfile enforced.
         assert!(
-            joined.contains("cargo build --package robot-service --package robot-tool --locked --release --target aarch64-unknown-linux-gnu --target-dir /phoxal/src/target"),
+            joined.contains("cargo build --package 'robot-service' --package 'robot-tool' --locked --release --target 'aarch64-unknown-linux-gnu' --target-dir /phoxal/src/target"),
             "{joined}"
         );
         // Every official installs, pinned to its exact train, into the
@@ -586,7 +576,7 @@ mod tests {
             "{joined}"
         );
         assert_eq!(
-            joined.matches("cargo install").count(),
+            joined.matches("'cargo' 'install'").count(),
             1,
             "all officials must share one Cargo invocation: {joined}"
         );
@@ -630,7 +620,8 @@ mod tests {
         // The snapshot mount and cargo build survive.
         assert!(joined.contains(CONTAINER_WORKDIR), "{joined}");
         assert!(
-            joined.contains("cargo build --package robot-service --package robot-tool --locked"),
+            joined
+                .contains("cargo build --package 'robot-service' --package 'robot-tool' --locked"),
             "{joined}"
         );
     }
@@ -640,7 +631,7 @@ mod tests {
         let mut spec = spec();
         spec.officials = Vec::new();
         let joined = spec.invocation().args.join(" ");
-        assert!(!joined.contains("cargo install"), "{joined}");
+        assert!(!joined.contains("'cargo' 'install'"), "{joined}");
         assert!(!joined.contains(CONTAINER_OFFICIALS), "{joined}");
     }
 
@@ -724,7 +715,8 @@ mod tests {
             "{joined}"
         );
         assert!(
-            joined.contains("cargo build --package robot-service --package robot-tool --locked"),
+            joined
+                .contains("cargo build --package 'robot-service' --package 'robot-tool' --locked"),
             "{joined}"
         );
     }

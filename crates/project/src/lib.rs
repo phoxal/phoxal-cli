@@ -35,6 +35,7 @@ mod target;
 mod validation;
 
 pub use build::container::ContainerEngine;
+pub use build::shell::shell_quote;
 pub use build::{BuildBackend, BuildBundleRequest, BuiltBundle, build_bundle};
 pub use paths::runtime::{
     ACTIVE_RUNTIME_ROOT, INSTALL_ROOT, INSTALLED_BINARY_ROOT, INSTALLED_CLIENT_BINARY,
