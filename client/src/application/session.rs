@@ -9,8 +9,8 @@ use std::path::Path;
 
 use crate::cli::output::diagnostics::RuntimeEvent;
 use anyhow::{Context, Result};
+use phoxal_api::supervisor::command::CommandOutcome;
 use phoxal_cli_ui::{AttachmentOutcome, Effect, EffectSenders, SessionInput, UiOptions};
-use phoxal_supervisor_api::CommandOutcome;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
@@ -298,8 +298,8 @@ fn accepted(outcome: CommandOutcome) -> Result<()> {
     }
 }
 
-fn rejection(reason: phoxal_supervisor_api::CommandRejection) -> &'static str {
-    use phoxal_supervisor_api::CommandRejection;
+fn rejection(reason: phoxal_api::supervisor::command::CommandRejection) -> &'static str {
+    use phoxal_api::supervisor::command::CommandRejection;
     match reason {
         CommandRejection::UnknownParticipant => {
             "no process in the current snapshot has that key; the graph moved on"
@@ -308,7 +308,13 @@ fn rejection(reason: phoxal_supervisor_api::CommandRejection) -> &'static str {
             "the target's producer is not the one you saw - it has already been replaced, or the \
              fresh incarnation has not opened its session yet"
         }
+        CommandRejection::RevisionStale => {
+            "the snapshot the command fenced on is no longer current; the execution moved on"
+        }
         CommandRejection::Busy => "the supervisor is already applying another lifecycle command",
+        CommandRejection::UnsupportedHostAction => {
+            "the supervisor does not manage the host this execution runs on"
+        }
         CommandRejection::ControlClosed => "the supervisor lifecycle loop has already ended",
         CommandRejection::Unknown => "the supervisor returned an unknown rejection",
     }
@@ -349,7 +355,7 @@ impl Drop for DiagnosticGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_supervisor_api::CommandRejection;
+    use phoxal_api::supervisor::command::CommandRejection;
 
     /// The operator sees the supervisor's own reason, not "command failed".
     #[test]

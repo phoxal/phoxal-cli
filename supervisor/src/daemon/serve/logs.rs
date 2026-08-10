@@ -1,14 +1,17 @@
 //! Bounded participant-log retention owned by the supervisor process.
+//!
+//! Every participant publishes on one live `runtime/logs` key, so ingestion is
+//! one subscription and the producing participant is the bus envelope's source
+//! attribution. The retained view this module serves is the supervisor's own
+//! replayable projection of that stream.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
+use phoxal_api::{runtime, supervisor};
 use phoxal_bus::{BusHandle, StreamEvent, StreamPublisher, StreamReceiver};
-use phoxal_supervisor_api::{payload, supervisor};
 use tokio::task::JoinSet;
-
-use crate::daemon::roster::Roster;
 
 const RETAINED_RECORDS: usize = 1_000;
 const RECORD_TEXT_BYTES: usize = 8 * 1_024;
@@ -20,16 +23,16 @@ const MAX_PAGE: usize = 256;
 struct History {
     sequence: u64,
     ingest_dropped: u64,
-    records: VecDeque<payload::log::Record>,
+    records: VecDeque<supervisor::logs::Record>,
 }
 
 impl History {
     fn ingest(
         &mut self,
         participant_id: &str,
-        event: payload::logs::Event,
+        event: runtime::logs::Event,
         gap: u64,
-    ) -> Option<payload::log::Follow> {
+    ) -> Option<supervisor::logs::Follow> {
         self.ingest_dropped = self.ingest_dropped.saturating_add(gap);
         let Some(sequence) = self.sequence.checked_add(1) else {
             self.ingest_dropped = self.ingest_dropped.saturating_add(1);
@@ -41,14 +44,14 @@ impl History {
         if self.records.len() > RETAINED_RECORDS {
             self.records.pop_front();
         }
-        Some(payload::log::Follow {
-            cursor: payload::runtime::Cursor { sequence },
+        Some(supervisor::logs::Follow {
+            cursor: supervisor::logs::Cursor { sequence },
             ingest_dropped: self.ingest_dropped,
             record,
         })
     }
 
-    fn snapshot(&self, request: &payload::log::SnapshotRequest) -> payload::log::Snapshot {
+    fn snapshot(&self, request: &supervisor::logs::SnapshotRequest) -> supervisor::logs::Snapshot {
         let limit = if request.limit == 0 {
             DEFAULT_PAGE
         } else {
@@ -56,7 +59,7 @@ impl History {
                 .unwrap_or(MAX_PAGE)
                 .min(MAX_PAGE)
         };
-        let matches = |record: &&payload::log::Record| {
+        let matches = |record: &&supervisor::logs::Record| {
             request
                 .participant_id
                 .as_ref()
@@ -83,8 +86,8 @@ impl History {
                 .any(|record| record.sequence < first.sequence)
                 .then_some(first.sequence)
         });
-        payload::log::Snapshot {
-            cursor: payload::runtime::Cursor {
+        supervisor::logs::Snapshot {
+            cursor: supervisor::logs::Cursor {
                 sequence: self.sequence,
             },
             ingest_dropped: self.ingest_dropped,
@@ -97,8 +100,8 @@ impl History {
 fn retain(
     sequence: u64,
     participant_id: &str,
-    event: payload::logs::Event,
-) -> payload::log::Record {
+    event: runtime::logs::Event,
+) -> supervisor::logs::Record {
     let mut remaining = RECORD_TEXT_BYTES;
     let mut truncated = event.truncated;
     let participant_id = take(participant_id, &mut remaining, &mut truncated);
@@ -112,14 +115,14 @@ fn retain(
         }
         remaining -= name.len();
         let value = match value {
-            payload::logs::LogValue::String(value) => {
-                payload::logs::LogValue::String(take(&value, &mut remaining, &mut truncated))
+            runtime::logs::LogValue::String(value) => {
+                runtime::logs::LogValue::String(take(&value, &mut remaining, &mut truncated))
             }
             value => value,
         };
         fields.insert(name, value);
     }
-    payload::log::Record {
+    supervisor::logs::Record {
         sequence,
         participant_id,
         source_sequence: event.seq,
@@ -145,19 +148,20 @@ fn take(value: &str, remaining: &mut usize, truncated: &mut u32) -> String {
     value[..end].to_string()
 }
 
-pub(super) async fn run(bus: BusHandle, roster: Roster) -> Result<()> {
+pub(super) async fn run(bus: BusHandle) -> Result<()> {
     let history = Arc::new(Mutex::new(History::default()));
-    let follow = StreamPublisher::new(bus.clone(), &supervisor::topic::owner().log().follow())?;
+    let follow = StreamPublisher::new(bus.clone(), &supervisor::topic::owner().logs().follow())?;
+    let events = StreamReceiver::new(&bus, &runtime::topic::client().logs().topic()).await?;
     let mut tasks = JoinSet::new();
 
     let query_bus = bus.clone();
     let query_history = Arc::clone(&history);
     tasks.spawn(async move {
         let server =
-            super::declare::<supervisor::endpoint::log::SnapshotEndpoint>(&query_bus).await?;
+            super::declare::<supervisor::endpoint::logs::SnapshotEndpoint>(&query_bus).await?;
         loop {
             let incoming = server.recv().await?;
-            let request: payload::log::SnapshotRequest = match super::decode(&incoming).await? {
+            let request: supervisor::logs::SnapshotRequest = match super::decode(&incoming).await? {
                 Some(request) => request,
                 None => continue,
             };
@@ -171,42 +175,36 @@ pub(super) async fn run(bus: BusHandle, roster: Roster) -> Result<()> {
         Ok::<(), anyhow::Error>(())
     });
 
-    for entry in roster.entries() {
-        let participant = entry.key.participant().clone();
-        let topic = supervisor::topic::client().logs(&participant)?.topic();
-        let receiver = StreamReceiver::new(&bus, &topic).await?;
-        let history = Arc::clone(&history);
-        let follow = follow.clone();
-        tasks.spawn(async move {
-            loop {
-                let (observed, gap) = match receiver.recv_event().await? {
-                    StreamEvent::Item(observed) => (observed, 0),
-                    StreamEvent::Gap {
-                        expected,
-                        observed,
-                        item,
-                    } => (item, observed.saturating_sub(expected)),
-                };
-                let Some(source) = observed.metadata.source.participant_source() else {
-                    continue;
-                };
-                if source.participant != participant {
-                    continue;
-                }
-                let retained = history
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .ingest(participant.as_str(), observed.body, gap);
-                if let Some(retained) = retained
-                    && let Err(error) = follow.send(retained)
-                {
-                    tracing::debug!(%error, "log follow publication was dropped");
-                }
+    let ingest_history = Arc::clone(&history);
+    tasks.spawn(async move {
+        loop {
+            let (observed, gap) = match events.recv_event().await? {
+                StreamEvent::Item(observed) => (observed, 0),
+                StreamEvent::Gap {
+                    expected,
+                    observed,
+                    item,
+                } => (item, observed.saturating_sub(expected)),
+            };
+            // One key carries every producer, so attribution is the envelope's
+            // source and nothing else. An event that names no participant
+            // source cannot be attributed at all and is dropped.
+            let Some(source) = observed.metadata.source.participant_source() else {
+                continue;
+            };
+            let retained = ingest_history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .ingest(source.participant.as_str(), observed.body, gap);
+            if let Some(retained) = retained
+                && let Err(error) = follow.send(retained)
+            {
+                tracing::debug!(%error, "log follow publication was dropped");
             }
-            #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
-        });
-    }
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    });
 
     match tasks.join_next().await {
         Some(Ok(Ok(()))) => bail!("a log collector task ended unexpectedly"),
@@ -220,14 +218,14 @@ pub(super) async fn run(bus: BusHandle, roster: Roster) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn event(message: &str) -> payload::logs::Event {
-        payload::logs::Event {
+    fn event(message: &str) -> runtime::logs::Event {
+        runtime::logs::Event {
             seq: 7,
-            time: payload::logs::Timestamp {
+            time: runtime::logs::Timestamp {
                 unix_seconds: 1,
                 nanos: 2,
             },
-            level: payload::logs::Level::Info,
+            level: runtime::logs::Level::Info,
             target: "test".to_string(),
             message: message.to_string(),
             fields: BTreeMap::new(),
@@ -243,7 +241,7 @@ mod tests {
             history.ingest("brain", event(&index.to_string()), u64::from(index == 2));
         }
         assert_eq!(history.records.len(), RETAINED_RECORDS);
-        let snapshot = history.snapshot(&payload::log::SnapshotRequest {
+        let snapshot = history.snapshot(&supervisor::logs::SnapshotRequest {
             participant_id: None,
             limit: u32::MAX,
             before_sequence: None,

@@ -4,21 +4,26 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use phoxal_api::supervisor;
+use phoxal_api::supervisor::bundle::GetResponse;
+use phoxal_api::supervisor::command::{Command, CommandOutcome, CommandRejection};
+use phoxal_api::supervisor::connect::{ConnectReply, PRESENCE_KEY};
+use phoxal_api::supervisor::snapshot::Lifecycle;
 use phoxal_bundle::{
     AssetIndex, BinaryReference, BinarySource, BundlePath, BundleWriter, ParticipantClock, Runtime,
     RuntimeBundle, RuntimeDocument, RuntimeParticipant,
 };
-use phoxal_bus::{BusConfig, BusOwner, SourceLabel};
+use phoxal_bus::{
+    BusConfig, BusOwner, Codec, DEFAULT_QUERY_TIMEOUT, EndpointDescriptor, MessagePack, Querier,
+    SourceLabel,
+};
 use phoxal_model::RobotBuilder;
 use phoxal_runtime_contract::identity::{
     ExecutionId, ParticipantArtifactId, ParticipantId, ProducerId,
 };
-use phoxal_runtime_contract::metadata::{
-    ParticipantContract, ParticipantKind as ContractKind, ParticipantSchemas,
-};
-use phoxal_runtime_contract::version::{BusAbi, LaunchAbi, RobotApiVersion, RuntimeSchema};
-use phoxal_supervisor_api::{CommandOutcome, Lifecycle, PRESENCE_KEY};
-use phoxal_supervisor_client::{Attachment, AttachmentConfig};
+use phoxal_runtime_contract::metadata::{ParticipantContract, ParticipantKind as ContractKind};
+use phoxal_runtime_contract::version::FrameworkVersion;
+use phoxal_supervisor_client::{AttachError, Attachment, AttachmentConfig};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -127,7 +132,8 @@ async fn a_real_attachment_observes_state_queries_diagnostics_and_stops() {
                 .is_some_and(|snapshot| {
                     snapshot.processes.iter().any(|process| {
                         process.participant.as_str() == "brain"
-                            && process.state == phoxal_supervisor_api::ProcessState::Ready
+                            && process.state
+                                == phoxal_api::supervisor::snapshot::ProcessState::Ready
                     })
                 })
             {
@@ -138,6 +144,68 @@ async fn a_real_attachment_observes_state_queries_diagnostics_and_stops() {
     .await
     .expect("state publication");
 
+    let bus = attachment.port().bus().clone();
+
+    // The bundle endpoint answers out of the daemon's own root: a file it
+    // holds, a name it does not, and the three shapes of path it refuses to
+    // resolve at all.
+    let files = Querier::new(
+        bus.clone(),
+        &supervisor::topic::client().bundle().get(),
+        DEFAULT_QUERY_TIMEOUT,
+    )
+    .expect("bundle querier");
+    let found = bundle_entry(&files, "runtime.json").await;
+    assert!(
+        matches!(&found, GetResponse::Found { bytes } if !bytes.is_empty()),
+        "{found:?}"
+    );
+    for (path, expected) in [
+        ("assets/nothing-here", GetResponse::Missing),
+        ("../outside", GetResponse::InvalidPath),
+        ("/etc/passwd", GetResponse::InvalidPath),
+        ("", GetResponse::InvalidPath),
+    ] {
+        assert_eq!(bundle_entry(&files, path).await, expected, "path {path:?}");
+    }
+
+    // Stop is a compare-and-swap on the snapshot revision, and the two host
+    // operations are not this supervisor's to perform at all.
+    let commands = Querier::new(
+        bus,
+        &supervisor::topic::client().command().topic(),
+        DEFAULT_QUERY_TIMEOUT,
+    )
+    .expect("command querier");
+    for (command, reason) in [
+        (
+            Command::Stop {
+                expected_revision: u64::MAX,
+            },
+            CommandRejection::RevisionStale,
+        ),
+        (
+            Command::Reboot {
+                expected_revision: 0,
+            },
+            CommandRejection::UnsupportedHostAction,
+        ),
+        (
+            Command::Poweroff {
+                expected_revision: 0,
+            },
+            CommandRejection::UnsupportedHostAction,
+        ),
+    ] {
+        assert_eq!(
+            issue(&commands, command.clone()).await,
+            CommandOutcome::Rejected { reason },
+            "{command:?}"
+        );
+    }
+
+    // The port fences on the revision it has actually installed, so the same
+    // command the operator issues is the one that is accepted.
     assert!(matches!(
         attachment.port().stop().await.expect("stop reply"),
         CommandOutcome::Accepted { .. }
@@ -148,6 +216,137 @@ async fn a_real_attachment_observes_state_queries_diagnostics_and_stops() {
     drop(identity);
     assert!(owner.close().await.is_clean());
     router.close().await.expect("router closes");
+}
+
+async fn bundle_entry(
+    querier: &Querier<supervisor::bundle::GetRequest, GetResponse>,
+    path: &str,
+) -> GetResponse {
+    querier
+        .query(supervisor::bundle::GetRequest {
+            path: path.to_string(),
+        })
+        .await
+        .expect("the bundle endpoint answers")
+}
+
+async fn issue(
+    querier: &Querier<supervisor::command::Request, supervisor::command::Reply>,
+    command: Command,
+) -> CommandOutcome {
+    let supervisor::command::Reply::V0 { outcome } = querier
+        .query(supervisor::command::Request::V0 { command })
+        .await
+        .expect("the command endpoint answers");
+    outcome
+}
+
+/// A client refuses a robot from another framework train at the bootstrap,
+/// before it asks for anything else.
+///
+/// The stub answers `supervisor/connect` and nothing at all besides, so an
+/// attachment that got past the gate could not have completed: the refusal is
+/// the only way this can end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_foreign_framework_train_is_refused_at_the_bootstrap() {
+    let robot = FrameworkVersion::new(9, 9, 9);
+    let reply =
+        MessagePack::encode(&ConnectReply::V0 { framework: robot }).expect("the reply encodes");
+    let error = attach_to_bootstrap_stub(reply).await;
+    let AttachError::IncompatibleFramework {
+        robot: reported,
+        client,
+    } = &error
+    else {
+        panic!("a foreign train must be reported as one: {error}");
+    };
+    assert_eq!(*reported, robot);
+    assert_eq!(*client, FrameworkVersion::CURRENT);
+    let rendered = error.to_string();
+    assert!(rendered.contains("Robot framework: 9.9.9"), "{rendered}");
+    assert!(rendered.contains("phoxal self upgrade"), "{rendered}");
+}
+
+/// A bootstrap reply this client cannot decode is the same answer by another
+/// route, and the schema tag the robot sent survives into the diagnostic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreadable_bootstrap_reply_names_the_foreign_schema_tag() {
+    const FOREIGN: &str = "phoxal/supervisor-connect/v1";
+    let reply = MessagePack::encode(&serde_json::json!({
+        "schema": FOREIGN,
+        "framework": "9.9.9",
+    }))
+    .expect("the foreign reply encodes");
+    let error = attach_to_bootstrap_stub(reply).await;
+    let AttachError::UnreadableConnectReply { detail } = &error else {
+        panic!("an unreadable bootstrap must be reported as a contract mismatch: {error}");
+    };
+    assert!(detail.contains(FOREIGN), "{detail}");
+}
+
+/// Drive the real attachment gate against a supervisor that answers the frozen
+/// bootstrap with exactly `reply` and serves no other endpoint.
+///
+/// It exists because no two binaries built from this workspace can disagree
+/// about the train: the peer the gate is written for has to be stood up
+/// deliberately.
+async fn attach_to_bootstrap_stub(reply: Vec<u8>) -> AttachError {
+    let socket = tempfile::Builder::new()
+        .prefix("phoxal-connect-")
+        .tempdir_in("/tmp")
+        .expect("short socket directory");
+    let endpoint = format!("unixsock-stream/{}", socket.path().join("s.sock").display());
+    let execution = ExecutionId::mint();
+    let router = crate::router::start_embedded_router(
+        execution,
+        endpoint.clone(),
+        None,
+        Arc::new(|_| {}) as crate::router::RouterLost,
+    )
+    .await
+    .expect("embedded router");
+    let (owner, bus) = BusOwner::open(BusConfig::for_external(
+        execution,
+        Some(SourceLabel::new("phoxald-stub").expect("source label")),
+        vec![endpoint.clone()],
+    ))
+    .await
+    .expect("stub supervisor bus");
+
+    let server_bus = bus.clone();
+    let served = tokio::spawn(async move {
+        let server = server_bus
+            .declare_server(
+                <supervisor::endpoint::connect::TopicEndpoint as EndpointDescriptor>::TOPIC,
+            )
+            .await
+            .expect("bootstrap server");
+        loop {
+            let incoming = server.recv().await.expect("a bootstrap query");
+            incoming
+                .reply(&server_bus, reply.clone())
+                .await
+                .expect("the stub answers");
+        }
+    });
+
+    let config = AttachmentConfig::new(&endpoint, "test-client");
+    let mut refusal = None;
+    for _ in 0..100 {
+        match Attachment::open(&config).await {
+            Ok(_) => panic!("a foreign bootstrap must never produce an attachment"),
+            Err(error) if error.is_framework_mismatch() => {
+                refusal = Some(error);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+
+    served.abort();
+    assert!(owner.close().await.is_clean());
+    router.close().await.expect("router closes");
+    refusal.expect("the stub bootstrap answered and the gate refused it")
 }
 
 async fn attach(endpoint: &str) -> Attachment {
@@ -174,14 +373,9 @@ fn bundle() -> (tempfile::TempDir, RuntimeBundle) {
     let reference = BinaryReference::from_source(
         binary_path.clone(),
         ParticipantContract {
+            framework: FrameworkVersion::CURRENT,
             id: artifact_id.clone(),
             kind: ContractKind::Brain,
-            api: RobotApiVersion::new(0, 1),
-            schemas: ParticipantSchemas {
-                bus: BusAbi::V0,
-                launch: LaunchAbi::V0,
-                runtime: RuntimeSchema::V0,
-            },
             requirement: None,
             config_schema: serde_json::json!({"type": "null"}),
         },

@@ -4,11 +4,30 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use phoxal_bundle::RuntimeBundle;
+use phoxal_runtime_contract::version::FrameworkVersion;
 
 const PROJECT_BUNDLE_SUFFIX: [&str; 2] = [".phoxal", "bundle"];
 
+/// A bundle built from a framework train this daemon does not execute.
+///
+/// Two Phoxal binaries speak the same contracts exactly when they were built
+/// from the same train, so `phoxald` refuses a bundle whose train is not its
+/// own before it launches a single process. Agreement among the bundle's own
+/// participants is already proven when its document is read; this is the other
+/// half of that invariant, between the bundle and its executor.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "this bundle was built from phoxal framework {bundle}, but this phoxald executes framework \
+     {daemon}; rebuild the bundle on {daemon}, or run the phoxald that ships with {bundle}"
+)]
+pub(crate) struct IncompatibleBundle {
+    bundle: FrameworkVersion,
+    daemon: FrameworkVersion,
+}
+
 /// Open and integrity-check the canonical `runtime.json + assets/ + bin/`
-/// boundary. Authored source documents are never consulted here.
+/// boundary, then require its framework train to be exactly this daemon's.
+/// Authored source documents are never consulted here.
 pub(crate) fn open(requested: &Path) -> Result<RuntimeBundle> {
     let metadata = std::fs::symlink_metadata(requested).with_context(|| {
         format!(
@@ -25,12 +44,21 @@ pub(crate) fn open(requested: &Path) -> Result<RuntimeBundle> {
         }
         bail!("{} is not a runtime bundle directory", requested.display());
     }
-    RuntimeBundle::open_verified(requested).with_context(|| {
+    let bundle = RuntimeBundle::open_verified(requested).with_context(|| {
         format!(
             "{} is not a valid compiled runtime bundle",
             requested.display()
         )
-    })
+    })?;
+    let (bundle_framework, daemon) = (bundle.document().framework(), FrameworkVersion::CURRENT);
+    if bundle_framework != daemon {
+        return Err(IncompatibleBundle {
+            bundle: bundle_framework,
+            daemon,
+        })
+        .with_context(|| format!("{} cannot be executed here", requested.display()));
+    }
+    Ok(bundle)
 }
 
 /// The root whose volatile run directory owns this bundle.

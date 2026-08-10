@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use phoxal_supervisor_api::{
+use phoxal_api::supervisor::snapshot::{
     DaemonFailure, DaemonFailureReason, Detail, Snapshot, StartupStep, StartupStepKind,
     StartupStepState,
 };
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(failure.detail.as_str(), "the router went away");
         assert_eq!(
             snapshot.lifecycle,
-            phoxal_supervisor_api::Lifecycle::Failed,
+            phoxal_api::supervisor::snapshot::Lifecycle::Failed,
             "the store's lifecycle and the typed reason are one update"
         );
     }
@@ -342,7 +342,8 @@ mod tests {
             snapshot
                 .processes
                 .iter()
-                .any(|process| process.state == phoxal_supervisor_api::ProcessState::Ready)
+                .any(|process| process.state
+                    == phoxal_api::supervisor::snapshot::ProcessState::Ready)
         );
     }
 }

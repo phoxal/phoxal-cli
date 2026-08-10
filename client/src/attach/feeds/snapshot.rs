@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
+use phoxal_api::supervisor::snapshot::Snapshot;
 use phoxal_cli_observation::{
     AttachmentEvent, ConnectionObservation, ObservationSource, SourceStatus, SupervisorObservation,
 };
-use phoxal_supervisor_api::Snapshot;
 
 use super::FeedContext;
 

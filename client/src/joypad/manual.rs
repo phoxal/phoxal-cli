@@ -4,8 +4,8 @@
 //! [`ManualDriveUnsupported`] the UI renders, rather than an empty device list
 //! or a sentence composed on another machine.
 
+use phoxal_api::supervisor::info;
 use phoxal_cli_observation::ManualDriveUnsupported;
-use phoxal_supervisor_api::payload::runtime;
 
 /// Parameters that turn a normalized trigger deflection into a physical
 /// differential-drive command.
@@ -23,9 +23,7 @@ impl ManualDrive {
     /// # Errors
     ///
     /// The typed reason this robot rules manual input out.
-    pub(crate) fn derive(
-        drive: Option<runtime::ManualDrive>,
-    ) -> Result<Self, ManualDriveUnsupported> {
+    pub(crate) fn derive(drive: Option<info::ManualDrive>) -> Result<Self, ManualDriveUnsupported> {
         let Some(drive) = drive else {
             return Err(ManualDriveUnsupported::NoDifferentialBase);
         };
@@ -56,8 +54,8 @@ impl ManualDrive {
 mod tests {
     use super::*;
 
-    fn drive(wheel_base_m: f64, linear: f64, angular: f64) -> runtime::ManualDrive {
-        runtime::ManualDrive {
+    fn drive(wheel_base_m: f64, linear: f64, angular: f64) -> info::ManualDrive {
+        info::ManualDrive {
             wheel_base_m,
             max_linear_speed_mps: linear,
             max_angular_speed_radps: angular,

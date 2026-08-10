@@ -7,8 +7,8 @@ license.workspace = true
 publish = ["phoxal-internal"]
 
 [dependencies]
+phoxal-api = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
-phoxal-supervisor-api = { workspace = true }
 
 [lints]
 workspace = true

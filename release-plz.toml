@@ -51,9 +51,5 @@ name = "phoxal-cli-ui"
 version_group = "phoxal-cli"
 
 [[package]]
-name = "phoxal-supervisor-api"
-version_group = "phoxal-cli"
-
-[[package]]
 name = "phoxal-supervisor-client"
 version_group = "phoxal-cli"

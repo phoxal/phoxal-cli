@@ -7,11 +7,12 @@
 //! The catalog is **internal data with no identity token**. It never crosses a
 //! process boundary: `phoxal` and `phoxald` ship as one exact pair, participants
 //! never read it, and an attaching client derives topology from the supervisor
-//! snapshot rather than from a catalog. Every mismatch a catalog identity would
-//! have caught is caught by something more concrete - a named requirement
-//! derivation error before the build, or the embedded compatibility record of
-//! each built binary afterwards. There is consequently no `CatalogId`, no
-//! catalog constant in any wire contract, and no framework-train floor.
+//! snapshot rather than from a catalog. Compatibility at a process boundary is
+//! the framework train version each binary was built from, compared for exact
+//! equality, so a catalog identity would be a second claim about the same
+//! thing. There is consequently no `CatalogId` and no catalog constant in any
+//! wire contract: this remains an identity-free index of where official
+//! participants live.
 
 #![cfg_attr(
     test,

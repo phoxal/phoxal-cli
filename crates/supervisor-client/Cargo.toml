@@ -15,9 +15,9 @@ name = "phoxal_supervisor_client"
 path = "src/lib.rs"
 
 [dependencies]
+phoxal-api = { workspace = true }
 phoxal-bus = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
-phoxal-supervisor-api = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 

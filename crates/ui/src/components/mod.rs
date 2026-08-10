@@ -65,7 +65,7 @@ mod tests {
         });
         model.runtimes.rows.push(RuntimeRow {
             sample: RuntimePerformanceSample {
-                record: phoxal_supervisor_api::payload::telemetry::Record {
+                record: phoxal_api::supervisor::telemetry::Record {
                     sequence: 1,
                     participant_id: "runtime-token".to_string(),
                     truncated: 0,

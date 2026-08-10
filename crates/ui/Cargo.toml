@@ -9,9 +9,9 @@ publish = ["phoxal-internal"]
 [dependencies]
 anyhow = { workspace = true }
 console = { workspace = true }
+phoxal-api = { workspace = true }
 phoxal-cli-observation = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
-phoxal-supervisor-api = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 tracing = { workspace = true }
 tuirealm = { workspace = true }

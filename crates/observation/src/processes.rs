@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use phoxal_api::supervisor::snapshot::Process;
 use phoxal_runtime_contract::identity::ParticipantId;
 use phoxal_runtime_contract::metadata::ParticipantKind;
-use phoxal_supervisor_api::Process;
 
 /// A snapshot row plus the local timing a client keeps for it.
 ///

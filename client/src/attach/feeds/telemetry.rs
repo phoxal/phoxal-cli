@@ -6,12 +6,12 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use phoxal_api::runtime::telemetry::Cursor;
+use phoxal_api::supervisor::telemetry;
 use phoxal_cli_observation::{
     AttachmentEvent, ObservationSource, RuntimeFeedStatus, RuntimePerformanceSample, SourceStatus,
     StoreChanged, sanitize_terminal_text,
 };
-use phoxal_supervisor_api::payload;
-use phoxal_supervisor_api::payload::runtime::Cursor;
 
 use super::FeedContext;
 use crate::reconcile::{ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
@@ -36,7 +36,7 @@ async fn feed(context: &FeedContext) -> Result<()> {
 
     'query: loop {
         reconciler.begin_query();
-        let payload::telemetry::Snapshot {
+        let telemetry::Snapshot {
             cursor,
             records,
             capacity_evictions,
@@ -65,7 +65,7 @@ async fn feed(context: &FeedContext) -> Result<()> {
 
         loop {
             let received = subscriber.recv().await?;
-            let payload::telemetry::Follow { cursor, record } = received.body;
+            let telemetry::Follow { cursor, record } = received.body;
             let outcome = reconciler.follow(Follow {
                 cursor: Cursor {
                     sequence: cursor.sequence,
@@ -122,7 +122,7 @@ async fn apply(
 #[derive(Debug, Clone)]
 struct Follow {
     cursor: Cursor,
-    record: payload::telemetry::Record,
+    record: telemetry::Record,
 }
 
 impl Sequenced for Follow {
@@ -138,7 +138,7 @@ fn bounded_remote_text(text: &str) -> String {
         .collect()
 }
 
-fn sample(record: payload::telemetry::Record) -> RuntimePerformanceSample {
+fn sample(record: telemetry::Record) -> RuntimePerformanceSample {
     let mut record = record;
     record.participant_id = bounded_remote_text(&record.participant_id);
     record.topics.iter_mut().for_each(sanitize_topic);
@@ -148,7 +148,7 @@ fn sample(record: payload::telemetry::Record) -> RuntimePerformanceSample {
     RuntimePerformanceSample { record }
 }
 
-fn sanitize_topic(value: &mut payload::runtime::Topic) {
+fn sanitize_topic(value: &mut telemetry::Topic) {
     value.topic = if value.topic.is_empty() {
         "Other/unobserved topics".to_string()
     } else {

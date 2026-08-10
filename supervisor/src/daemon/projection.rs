@@ -3,9 +3,9 @@
 use std::time::SystemTime;
 
 use crate::model as core;
-use phoxal_supervisor_api::{
-    DaemonFailure, DesiredState, Lifecycle, Process, ProcessFailure, ProcessFailureKind,
-    ProcessState, Snapshot, StartupStep, WallTime,
+use phoxal_api::supervisor::snapshot::{
+    DaemonFailure, DesiredState, ExitStatus, Lifecycle, Process, ProcessFailure,
+    ProcessFailureKind, ProcessState, Snapshot, StartupStep, WallTime,
 };
 
 use super::roster::Roster;
@@ -90,11 +90,8 @@ const fn failure_kind(value: core::ProcessFailureKind) -> ProcessFailureKind {
 fn process_failure(value: &core::ProcessFailure) -> ProcessFailure {
     let exit = value.exit.as_ref().and_then(|exit| {
         exit.code
-            .map(|code| phoxal_supervisor_api::ExitStatus::Code { code })
-            .or_else(|| {
-                exit.signal
-                    .map(|signal| phoxal_supervisor_api::ExitStatus::Signal { signal })
-            })
+            .map(|code| ExitStatus::Code { code })
+            .or_else(|| exit.signal.map(|signal| ExitStatus::Signal { signal }))
     });
     ProcessFailure::new(
         failure_kind(value.kind),

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use phoxal_api::v0_1 as api;
+use phoxal_api::robot as api;
 use phoxal_bus::SetpointPublisher;
 use phoxal_cli_observation::{
     AttachmentEvent, ManualDriveUnsupported, ObservationSource, SourceStatus,

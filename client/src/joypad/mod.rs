@@ -15,7 +15,7 @@ mod registry;
 use std::collections::HashSet;
 
 use gilrs::{Button, EventType, Gamepad, Gilrs};
-use phoxal_api::v0_1 as api;
+use phoxal_api::robot as api;
 use phoxal_cli_observation::{JoypadDevicesSample, ManualDriveUnsupported};
 
 use manual::ManualDrive;

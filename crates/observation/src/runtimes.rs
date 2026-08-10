@@ -1,13 +1,13 @@
 use crate::{ObservationQuery, ObservationWindow, WindowDirection};
 
-pub use phoxal_supervisor_api::payload::runtime::{
+pub use phoxal_api::runtime::telemetry::{
     BufferKind as RuntimeBufferKind, Direction as RuntimeDirection, Step as RuntimeStepSample,
     Topic as RuntimeTopicSample,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimePerformanceSample {
-    pub record: phoxal_supervisor_api::payload::telemetry::Record,
+    pub record: phoxal_api::supervisor::telemetry::Record,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn runtime_summary_derives_portable_rate_budget_headroom_and_pressure() {
         let sample = RuntimePerformanceSample {
-            record: phoxal_supervisor_api::payload::telemetry::Record {
+            record: phoxal_api::supervisor::telemetry::Record {
                 sequence: 1,
                 participant_id: "drive".to_string(),
                 truncated: 0,
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn event_driven_runtime_keeps_message_rate_without_inventing_a_budget() {
         let sample = RuntimePerformanceSample {
-            record: phoxal_supervisor_api::payload::telemetry::Record {
+            record: phoxal_api::supervisor::telemetry::Record {
                 sequence: 1,
                 participant_id: "camera".to_string(),
                 truncated: 0,
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn runtime_pressure_is_clamped_when_hostile_depth_exceeds_capacity() {
         let sample = RuntimePerformanceSample {
-            record: phoxal_supervisor_api::payload::telemetry::Record {
+            record: phoxal_api::supervisor::telemetry::Record {
                 sequence: 1,
                 participant_id: "drive".to_string(),
                 truncated: 0,

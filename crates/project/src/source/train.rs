@@ -8,9 +8,10 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 /// The exact framework version a robot project's Cargo graph locks. It is
-/// provenance for diagnostics and package resolution only: no compatibility
-/// decision reads it, because the embedded record of each built binary is the
-/// only compatibility artifact.
+/// provenance for diagnostics and package resolution: the compatibility
+/// decision is made against the train embedded in each built binary, which is
+/// what a process boundary actually compares, rather than against what the
+/// lockfile intended to build.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LockedTrain {
     pub version: String,

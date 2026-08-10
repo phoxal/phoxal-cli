@@ -7,7 +7,7 @@ use tuirealm::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tuirealm::ratatui::text::{Line, Span, Text};
 use tuirealm::ratatui::widgets::Paragraph;
 
-use phoxal_supervisor_api::{StartupStep, StartupStepKind, StartupStepState};
+use phoxal_api::supervisor::snapshot::{StartupStep, StartupStepKind, StartupStepState};
 
 use crate::Theme;
 use crate::app::AppModel;
@@ -28,8 +28,8 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             // manifest is what selects the simulator, and the daemon passes it
             // through untouched.
             let mode = match snapshot.clock {
-                phoxal_supervisor_api::Clock::Real => "real",
-                phoxal_supervisor_api::Clock::Simulated => "simulated",
+                phoxal_runtime_contract::clock::Clock::Real => "real",
+                phoxal_runtime_contract::clock::Clock::Simulated => "simulated",
             };
             let timeline = startup_timeline(
                 &snapshot.startup,
@@ -193,7 +193,7 @@ fn startup_timeline(
                     text: step
                         .detail
                         .as_ref()
-                        .map(phoxal_supervisor_api::Detail::as_str)
+                        .map(phoxal_api::supervisor::snapshot::Detail::as_str)
                         .map_or_else(
                             || format!("active: {}", startup_step_label(step.kind)),
                             |detail| {
@@ -272,7 +272,7 @@ fn sanitize(value: &str) -> String {
 #[cfg(test)]
 mod startup_timeline_tests {
     use super::*;
-    use phoxal_supervisor_api::Detail;
+    use phoxal_api::supervisor::snapshot::Detail;
 
     /// The daemon's own sequence, including one failure and one pending step.
     fn timeline() -> Vec<StartupStep> {
