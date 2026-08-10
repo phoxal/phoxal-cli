@@ -1,5 +1,5 @@
 //! `phoxal build` - stage a runtime layout for a target and archive it as a
-//! deterministic `build.phoxal` (#936).
+//! deterministic `build.phoxal` ().
 //!
 //! `build` resolves once and converges with `run` at the shared
 //! `refresh_staging_resolved` materialization entry, but for the selected target
@@ -18,24 +18,21 @@
 //!
 //! Every backend produces the identical deterministic `build.phoxal`.
 
-use phoxal_cli_core::project::launch_plan::RunIdentity;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::{BuildBackend, BuildBundleRequest, BuiltBundle};
 use crate::build::builder_image::{prepare_builder_image, reference_for};
 use crate::build::container::{
     ContainerBuildSpec, ContainerEngine, ContainerOfficial, default_builder_image,
     host_cargo_caches, platform_for_triple, require_platform_for_triple,
 };
 use crate::build::profile::StagingBuild;
+use crate::check::participant_metadata::expected_target_for_triple;
 use crate::registry_package::{HttpClient, PackageCache, fetch_registry_package};
 use crate::run::RunOptions;
-use crate::{BuildBackend, BuildBundleRequest, BuiltBundle};
 use anyhow::{Context, Result, bail};
-use phoxal_cli_core::check::participant_metadata::expected_target_for_triple;
-use phoxal_cli_core::project::launch_plan::runtime_layout_dir;
-use phoxal_cli_core::project::layout::LayoutInspection;
 
 const REMOTE_TOOLCHAIN_PATH: &str = r#"export PATH="$HOME/.cargo/bin:$PATH""#;
 const REMOTE_PHOXAL: &str = "/usr/local/bin/phoxal";
@@ -121,7 +118,7 @@ enum BuildStagingInput {
     Resolved(Box<crate::run::prepare::ResolvedStagingInput>),
 }
 
-pub(crate) fn build_bundle(request: BuildBundleRequest) -> Result<BuiltBundle> {
+pub fn build_bundle(request: BuildBundleRequest) -> Result<BuiltBundle> {
     let backend = select_backend(request.backend.clone())?;
     let (engine, image) = match &request.backend {
         BuildBackend::Container { engine, image, .. } => (*engine, image.clone()),
@@ -177,7 +174,7 @@ impl Worker {
                     shell_quote(&target),
                     shell_quote(&remote_archive),
                     // Forward --offline to the nested remote `phoxal build`
-                    // invocation (organization#951 WS4 review, round 2): the
+                    // invocation: the
                     // remote process has no way to know the local invocation
                     // requested it otherwise.
                     if self.request.offline {
@@ -205,10 +202,9 @@ impl Worker {
                 .prefix("phoxal-ssh-layout-")
                 .tempdir()?;
             crate::bundle::archive::extract_build_archive(pulled.path(), extracted.path())?;
-            crate::load::layout::validate_layout_plan(
+            crate::load::layout::validate_runtime_bundle(
                 extracted.path(),
-                LayoutInspection::Target(expected_target_for_triple(&target)?),
-                RunIdentity::default(),
+                expected_target_for_triple(&target)?,
             )?;
             let staged_root = self
                 .request
@@ -250,7 +246,7 @@ impl Worker {
     /// staging, validation, and archive with the container-built binaries. The
     /// command adapter already holds the Build lock, so the snapshot, the
     /// compile, and the staging that reads that same frozen snapshot all happen
-    /// under one lock (#936, finding B).
+    /// under one lock (, finding B).
     fn build_container(
         &self,
         project_root: &Path,
@@ -262,7 +258,7 @@ impl Worker {
         // `resolved`; it must remain alive until staging consumes that value.
 
         // Stage manifests, assets, AND binaries from the SAME frozen snapshot the
-        // container compiled, never the live tree (#936, finding B): the container
+        // container compiled, never the live tree (, finding B): the container
         // wrote the target binaries into the project's Cargo target directory,
         // mounted at `<snapshot>/target`, and staging reads
         // robot.yaml and assets from `<snapshot>` too, so a bundle can never pair
@@ -270,8 +266,7 @@ impl Worker {
         // every catalog service/tool/the router, AND every registry-sourced
         // component driver this robot declares - was materialized natively
         // INSIDE the container too, into `officials_root`; host-side staging
-        // reads that and never cross-compiles anything itself (organization
-        // #951 WS4; blocker 2 of the review). The default output stays a
+        // reads that and never cross-compiles anything itself. The default output stays a
         // sibling of the real project's staged directory.
         let staging = StagingBuild::prebuilt_native_bundle(
             target.to_string(),
@@ -292,9 +287,7 @@ impl Worker {
     /// `target` inside the toolchain image - which also materializes the
     /// COMPLETE official set (every catalog service/tool/router plus every
     /// registry-sourced component driver this robot declares) via `cargo
-    /// install`, natively on the container's own platform (organization#951
-    /// WS4; blocker 2 of the review closes the "component drivers install
-    /// host-side, cross-compiled" gap) - returning the snapshot directory,
+    /// install`, natively on the container's own platform, returning the snapshot directory,
     /// persistent project Cargo target directory, and the officials root (with
     /// its `bin/` populated the identical way, so
     /// host-side staging never needs to cross-compile anything). The command
@@ -365,7 +358,7 @@ impl Worker {
 
         // The deterministic, robot-independent official set - every catalog
         // service ("every official always runs" per
-        // #945) - is known from the catalog alone. Its train comes from the
+        // ) - is known from the catalog alone. Its train comes from the
         // same frozen resolution as robot-specific drivers, so a live-tree edit
         // cannot split one container install batch across two trains.
         let officials = selected_registry_officials(resolved.resolved());
@@ -383,8 +376,7 @@ impl Worker {
                 participant.name,
                 participant.crate_dir.display()
             );
-            let package =
-                phoxal_cli_core::project::tooling::cargo_package_name(&participant.crate_dir)?;
+            let package = crate::source::tooling::cargo_package_name(&participant.crate_dir)?;
             workspace_manifests
                 .entry(package)
                 .or_insert_with(|| participant.crate_dir.join("Cargo.toml"));
@@ -398,10 +390,11 @@ impl Worker {
                     manifest_path.display()
                 )
             })?;
-            let requirements = phoxal_manifest::build_requirements::requirements_from_manifest(
-                &source,
-                &manifest_path.display().to_string(),
-            )?;
+            let requirements =
+                phoxal_manifest::build_requirements::BuildRequirements::from_manifest(
+                    &source,
+                    &manifest_path.display().to_string(),
+                )?;
             attributed.insert(package.clone(), requirements.apt);
         }
 
@@ -420,10 +413,11 @@ impl Worker {
                 self.request.offline,
             )?
             .manifest()?;
-            let requirements = phoxal_manifest::build_requirements::requirements_from_manifest(
-                &source,
-                &format!("{}@{}", official.package, official.train),
-            )?;
+            let requirements =
+                phoxal_manifest::build_requirements::BuildRequirements::from_manifest(
+                    &source,
+                    &format!("{}@{}", official.package, official.train),
+                )?;
             attributed.insert(official.package.clone(), requirements.apt);
         }
         let merged = merge_requirements(&attributed);
@@ -521,12 +515,11 @@ impl Worker {
         // authoritative, and a cross target's Linux-only crates need not
         // compile on the build host. Shared staging validates the compiled
         // layout against its declared target signature and publishes only
-        // after that succeeds (organization#951 WS4 review).
+        // after that succeeds.
         let staged = match input {
             BuildStagingInput::Resolved(resolved) => crate::run::prepare::refresh_staging_resolved(
                 *resolved,
                 false,
-                RunIdentity::default(),
                 self.request.reporter.as_ref(),
             ),
             BuildStagingInput::Source(build) => {
@@ -540,7 +533,6 @@ impl Worker {
                     &options,
                     &build,
                     false,
-                    RunIdentity::default(),
                     self.request.reporter.as_ref(),
                 )
             }
@@ -550,7 +542,7 @@ impl Worker {
         // deleted when the snapshot guard drops. Publish the validated staged
         // root into the real project's `.phoxal/bundle/` so every
         // backend leaves the same persistent staged runtime layout the command
-        // reports and the docs promise (#936); the archive is then written
+        // reports and the docs promise (); the archive is then written
         // from that published root.
         let staged_root = if staged.staged_root.starts_with(project_root) {
             staged.staged_root.clone()
@@ -594,8 +586,7 @@ pub(crate) fn resolve_container_staging(
 
 /// Every distinct registry-sourced component driver package a resolved robot
 /// declares, as [`ContainerOfficial`] entries at that driver's own resolved
-/// train - the pure decision half of blocker 2's fix (organization#951 WS4
-/// review): the container cannot know component drivers from the catalog
+/// train. The container cannot know component drivers from the catalog
 /// alone, so `compile_in_container` resolves the robot graph first and hands
 /// the result here to learn which drivers to install alongside the static
 /// catalog set. Deduplicates by package (multiple component instances can
@@ -603,7 +594,7 @@ pub(crate) fn resolve_container_staging(
 /// entirely - that one is staged from its own build output, in the container
 /// or on the host, and never reaches `cargo install` either way.
 fn component_driver_officials(
-    resolved: &phoxal_cli_core::project::resolver::BundlePlan,
+    resolved: &crate::source::resolver::BundlePlan,
 ) -> Vec<ContainerOfficial> {
     let mut seen_packages = std::collections::BTreeSet::new();
     crate::validation::component_driver_runtimes_by_ref(resolved)
@@ -620,7 +611,7 @@ fn component_driver_officials(
 /// A path override is compiled from the snapshot and must never also be fetched
 /// from the registry, even when its package identity matches the catalog.
 fn selected_registry_officials(
-    resolved: &phoxal_cli_core::project::resolver::BundlePlan,
+    resolved: &crate::source::resolver::BundlePlan,
 ) -> Vec<ContainerOfficial> {
     let overridden = resolved
         .platform_runtimes
@@ -857,7 +848,7 @@ fn shell_quote(value: &str) -> String {
 /// replacing any previous layout via the same candidate-then-rename swap the
 /// stager uses, so a crashed publish never leaves a half-written layout.
 fn publish_staged_root(project_root: &Path, target: &str, source: &Path) -> Result<PathBuf> {
-    let destination = runtime_layout_dir(project_root);
+    let destination = crate::paths::runtime::runtime_bundle_root(project_root);
     let parent = destination
         .parent()
         .context("staged runtime layout has no parent directory")?;
@@ -910,7 +901,7 @@ fn publish_staged_root(project_root: &Path, target: &str, source: &Path) -> Resu
 /// `<project>/.phoxal/<triple>.build.phoxal`, never inside the staged
 /// `.phoxal/bundle/` tree it archives.
 fn default_output(project_root: &Path, target: &str) -> PathBuf {
-    let staged = runtime_layout_dir(project_root);
+    let staged = crate::paths::runtime::runtime_bundle_root(project_root);
     let parent = staged
         .parent()
         .map(Path::to_path_buf)
@@ -939,7 +930,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 /// How a `git ls-files` entry materializes on disk, deciding how the snapshot
-/// treats it (#936, finding B).
+/// treats it (, finding B).
 enum SnapshotEntry {
     /// A regular file - copied byte for byte.
     File,
@@ -985,7 +976,7 @@ fn classify_snapshot_entry(source: &Path) -> Result<SnapshotEntry> {
 /// project to be a git working tree.
 ///
 /// Symlinks are preserved as symlinks (never dereferenced), so the container
-/// compiles against a faithful copy of the tree (#936, finding B). A submodule
+/// compiles against a faithful copy of the tree (, finding B). A submodule
 /// is rejected with a precise error: v0 does not include submodule working trees
 /// in the snapshot, so a build that would silently drop submodule sources fails
 /// loudly instead.
@@ -1037,7 +1028,7 @@ pub(crate) fn snapshot_source(project_root: &Path, dest: &Path) -> Result<()> {
                 // A symlink escaping the project root would let post-compile
                 // staging read LIVE or external content through the "frozen"
                 // snapshot (host-side `fs::copy` follows links), so the frozen
-                // guarantee would be a fiction for that asset (#936). Only
+                // guarantee would be a fiction for that asset (). Only
                 // project-internal links are preserved.
                 ensure_snapshot_link_contained(project_root, relative, &link)?;
                 symlink_verbatim(&link, &target)
@@ -1096,56 +1087,45 @@ fn ensure_snapshot_link_contained(project_root: &Path, rel: &Path, link: &Path) 
 }
 
 /// Recreate a symlink `link_target` at `at`, verbatim, without following it.
-#[cfg(unix)]
 fn symlink_verbatim(link_target: &Path, at: &Path) -> Result<()> {
     std::os::unix::fs::symlink(link_target, at).map_err(Into::into)
-}
-
-/// The CLI and framework publish no non-unix complete-runtime target, so there
-/// is no real producer for a non-unix snapshot symlink; refusing is honest,
-/// where the old "best-effort copy" was both speculative and incorrect (it
-/// resolved relative targets against the process cwd) (#936).
-#[cfg(not(unix))]
-fn symlink_verbatim(_link_target: &Path, at: &Path) -> Result<()> {
-    bail!(
-        "cannot snapshot the symlink at {}: symlink-preserving snapshots are not supported on          this platform",
-        at.display()
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_cli_catalog::ArtifactKind;
-    use phoxal_cli_core::project::resolver::{
+    use crate::source::resolver::{
         BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
     };
+    use phoxal_cli_catalog::ArtifactKind;
 
     fn minimal_bundle_plan() -> BundlePlan {
         let yaml = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
-  namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
     max_angular_speed_radps: 2.0
   kinematic:
     kind: omnidirectional
-    actuators: []
+    actuators: [drive.motor]
     encoders: []
-  components: {}
+  components:
+    drive:
+      component: wheel
+      mount_link: base
 "#;
         BundlePlan {
-            source_manifest: phoxal_cli_core::project::resolver::parse_robot_from_string(yaml)
+            source_manifest: crate::source::resolver::parse_robot_from_string(yaml)
                 .expect("minimal fixture robot.yaml parses"),
             compiled: crate::stage::compile_test_bundle(
-                &phoxal_cli_core::project::resolver::parse_robot_from_string(yaml)
+                &crate::source::resolver::parse_robot_from_string(yaml)
                     .expect("minimal fixture robot.yaml parses"),
             )
             .expect("the fixture project compiles"),
             train: "0.36.0".to_string(),
             target: "aarch64-unknown-linux-gnu".to_string(),
-            brain: phoxal_cli_core::project::resolver::ResolvedBrain {
+            brain: crate::source::resolver::ResolvedBrain {
                 crate_dir: std::path::PathBuf::from("/tmp/robot"),
                 package: "testbot-robot".to_string(),
                 bin_target: "testbot-robot".to_string(),
@@ -1190,8 +1170,7 @@ robot:
         }
     }
 
-    /// Blocker 2 of the organization#951 WS4 review: the container used to
-    /// materialize only the static catalog set, silently skipping
+    /// The container materializes more than the static catalog set, including
     /// robot-specific component driver packages and leaving them to
     /// cross-compile host-side. `component_driver_officials` is the pure
     /// decision that closes the gap - proven here without touching a
@@ -1413,7 +1392,7 @@ robot:
             Path::new("/proj/.phoxal/aarch64-unknown-linux-gnu.build.phoxal")
         );
         // The sibling file is never inside the staged directory it archives.
-        let staged = runtime_layout_dir(Path::new("/proj"));
+        let staged = crate::paths::runtime::runtime_bundle_root(Path::new("/proj"));
         assert!(!output.starts_with(&staged));
     }
 

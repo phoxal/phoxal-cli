@@ -22,7 +22,7 @@ impl WebotsSceneDescription {
         let joint_from_parent = self
             .joints
             .values()
-            .find(|joint| joint.child() == root_link_id);
+            .find(|joint| joint.child().as_str() == root_link_id);
         let mut fields = vec![
             NodeBodyElement::Field(NodeField::new(
                 "translation".to_string(),
@@ -178,7 +178,7 @@ impl WebotsSceneDescription {
             .find(|joint| joint.child() == link_id)
             .ok_or_else(|| anyhow!("missing parent joint for link '{link_id}'"))?;
 
-        let parent_transform = self.transform_from_rendered_root(joint.parent())?;
+        let parent_transform = self.transform_from_rendered_root(joint.parent().as_str())?;
         Ok(parent_transform * pose_to_isometry(joint.origin()))
     }
 }

@@ -2,7 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-pub use phoxal_cli_core::runtime::paths::{
+pub(crate) const RUNTIME_BUNDLE_ROOT_RELATIVE: &str = ".phoxal/bundle";
+
+#[must_use]
+pub(crate) fn runtime_bundle_root(project_root: &Path) -> PathBuf {
+    project_root.join(RUNTIME_BUNDLE_ROOT_RELATIVE)
+}
+
+pub use phoxal_cli_host::paths::{
     ACTIVE_RUNTIME_ROOT, INSTALL_ROOT, INSTALLED_BINARY_ROOT, INSTALLED_CLIENT_BINARY,
     INSTALLED_DAEMON_BINARY, INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT, RELEASES_ROOT,
     RuntimePaths, SYSTEMD_ACTIVE_ROOT, SYSTEMD_UNIT, SYSTEMD_UNIT_PATH, SYSTEMD_UNIT_ROOT,

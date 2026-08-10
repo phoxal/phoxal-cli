@@ -5,7 +5,7 @@ use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 
 pub(crate) const REMOTE_PHOXAL: &str = phoxal_cli_project::INSTALLED_CLIENT_BINARY;
 pub(crate) const REMOTE_PHOXALD: &str = phoxal_cli_project::INSTALLED_DAEMON_BINARY;
@@ -82,18 +82,20 @@ impl DeployRequest {
         .context("failed to acquire the project lock for deploy")?;
         let (reporter, signal_task) =
             crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
-        let built = phoxal_cli_project::build_bundle(phoxal_cli_project::BuildBundleRequest {
-            target,
-            backend: phoxal_cli_project::BuildBackend::Ssh {
-                host: self.target.clone(),
-                target: None,
-            },
-            output: Some(output.to_path_buf()),
-            publish: false,
-            offline: app.offline,
-            reporter,
+        let host = self.target.clone();
+        let output = output.to_path_buf();
+        let offline = app.offline;
+        let built = tokio::task::spawn_blocking(move || {
+            phoxal_cli_project::build_bundle(phoxal_cli_project::BuildBundleRequest {
+                target,
+                backend: phoxal_cli_project::BuildBackend::Ssh { host, target: None },
+                output: Some(output),
+                publish: false,
+                offline,
+                reporter,
+            })
         })
-        .await;
+        .await?;
         signal_task.abort();
         built.context("remote source build failed")
     }
@@ -129,7 +131,8 @@ pub(crate) fn require_remote_phoxal(target: &str) -> Result<()> {
         target,
         &format!(
             "test -x {REMOTE_PHOXAL} && sudo -n test -x {REMOTE_PHOXAL} && \
-             test -x {REMOTE_PHOXALD} && sudo -n test -x {REMOTE_PHOXALD}"
+             test -x {REMOTE_PHOXALD} && sudo -n test -x {REMOTE_PHOXALD} && \
+             {REMOTE_PHOXAL} --version && {REMOTE_PHOXALD} --version"
         ),
     )?;
     anyhow::ensure!(
@@ -138,6 +141,34 @@ pub(crate) fn require_remote_phoxal(target: &str) -> Result<()> {
          install together: place both verified Linux release binaries as `{REMOTE_PHOXAL}` and \
          `{REMOTE_PHOXALD}`, then run `sudo {REMOTE_PHOXAL} service install` and \
          `{REMOTE_PHOXAL} service status`; deploy never provisions the device"
+    );
+    verify_remote_pair_output(target, &output.stdout)
+}
+
+fn verify_remote_pair_output(target: &str, stdout: &[u8]) -> Result<()> {
+    let stdout =
+        String::from_utf8(stdout.to_vec()).context("remote version output was not UTF-8")?;
+    let versions = stdout.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        let binary = fields.next()?;
+        matches!(binary, "phoxal" | "phoxald").then(|| (binary, fields.next()))
+    });
+    let mut client = None;
+    let mut daemon = None;
+    for (binary, version) in versions {
+        match binary {
+            "phoxal" => client = version,
+            "phoxald" => daemon = version,
+            _ => {}
+        }
+    }
+    let expected = env!("CARGO_PKG_VERSION");
+    anyhow::ensure!(
+        client == Some(expected) && daemon == Some(expected),
+        "{target} has a mixed or unsupported CLI pair: expected phoxal and phoxald {expected}, \
+         found phoxal {} and phoxald {}",
+        client.unwrap_or("<unreported>"),
+        daemon.unwrap_or("<unreported>")
     );
     Ok(())
 }
@@ -237,6 +268,29 @@ mod tests {
         assert_eq!(
             remote_install_command("/tmp/phoxal-deploy.ABC/build.phoxal"),
             "sudo -n /usr/local/bin/phoxal install '/tmp/phoxal-deploy.ABC/build.phoxal'"
+        );
+    }
+
+    #[test]
+    fn remote_pair_requires_both_exact_versions() {
+        assert!(
+            verify_remote_pair_output(
+                "robot@host",
+                format!(
+                    "phoxal {} (linux-aarch64)\nphoxald {}\n",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("CARGO_PKG_VERSION")
+                )
+                .as_bytes(),
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_remote_pair_output(
+                "robot@host",
+                format!("phoxal {}\nphoxald 0.0.0\n", env!("CARGO_PKG_VERSION")).as_bytes(),
+            )
+            .is_err()
         );
     }
 }

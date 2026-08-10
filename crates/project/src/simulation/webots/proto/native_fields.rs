@@ -3,7 +3,7 @@
 //! Only values that map to real Webots node fields belong here.
 
 use anyhow::{Result, anyhow};
-use phoxal_model::simulation::capability::Capability as SimulationCapability;
+use phoxal_model::simulation::Capability as SimulationCapability;
 
 /// A semantic value for a native Webots field.
 #[derive(Debug, Clone, PartialEq)]
@@ -176,15 +176,11 @@ pub fn native_webots_fields_for_capability(
                     field_name: "projection".to_string(),
                     value: NativeValue::String(
                         match projection {
-                            phoxal_model::simulation::capability::CameraProjection::Planar => {
-                                "planar"
-                            }
-                            phoxal_model::simulation::capability::CameraProjection::Cylindrical => {
+                            phoxal_model::simulation::CameraProjection::Planar => "planar",
+                            phoxal_model::simulation::CameraProjection::Cylindrical => {
                                 "cylindrical"
                             }
-                            phoxal_model::simulation::capability::CameraProjection::Spherical => {
-                                "spherical"
-                            }
+                            phoxal_model::simulation::CameraProjection::Spherical => "spherical",
                         }
                         .to_string(),
                     ),
@@ -295,7 +291,7 @@ pub fn native_webots_fields_for_capability(
             }
             fields
         }
-        // Mmwave removed for now as it is not currently applied in renderer (Finding 6).
+        // Millimeter-wave capabilities are not rendered without a native field mapping.
         SimulationCapability::Mmwave(_)
         | SimulationCapability::Range(_)
         | SimulationCapability::Motor(_)
@@ -308,7 +304,7 @@ pub fn native_webots_fields_for_capability(
 
 /// Emits the native Webots motor-specific fields (acceleration, controlPID).
 pub fn native_webots_motor_fields(
-    cfg: &phoxal_model::simulation::capability::Motor,
+    cfg: &phoxal_model::simulation::Motor,
 ) -> Result<NativeWebotsFields> {
     let mut fields = NativeWebotsFields::default();
     if let Some(acc) = cfg.acceleration_radps2 {

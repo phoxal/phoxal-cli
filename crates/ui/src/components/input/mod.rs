@@ -16,8 +16,11 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
         .areas(area);
     let observation = model.input.observation.as_ref();
-    let input_stale =
-        model.overview.freshness.get("input") == Some(&phoxal_cli_observation::Freshness::Stale);
+    let input_stale = model.overview.source_health.as_ref().and_then(|health| {
+        health
+            .sources
+            .get(&phoxal_cli_observation::ObservationSource::Input)
+    }) == Some(&phoxal_cli_observation::SourceStatus::Failed);
     let rows = observation
         .into_iter()
         .flat_map(|observation| observation.joypads.available.iter())

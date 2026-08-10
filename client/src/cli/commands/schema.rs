@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 
 /// The exact comments a project commits, printed after generation. Each
 /// association sits on its own line so it can be selected and pasted.
@@ -153,8 +153,8 @@ mod tests {
             EDITOR_COMMENTS.contains(directory),
             "printed comments must name `{directory}`"
         );
-        for kind in phoxal_manifest::schema::DocumentKind::ALL {
-            let name = kind.file_name();
+        for kind in phoxal_manifest::source::DocumentKind::ALL {
+            let name = kind.schema_file_name();
             assert!(
                 EDITOR_COMMENTS.contains(name),
                 "printed comments must associate `{name}`"

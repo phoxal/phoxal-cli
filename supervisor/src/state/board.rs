@@ -10,14 +10,11 @@
 
 use std::collections::BTreeMap;
 
-use phoxal_cli_core::runtime::{ProcessEntry, ProcessKey, ProjectLifecycle};
+use crate::model::{ProcessEntry, ProcessKey, ProjectLifecycle};
 
-/// Everything the process machinery authoritatively knows, at one revision.
+/// Everything the process machinery authoritatively knows.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Board {
-    /// Monotonic within this process. It orders the store's own updates; the
-    /// revision a client sees is assigned by the publication point, not here.
-    pub(crate) revision: u64,
     pub(crate) lifecycle: ProjectLifecycle,
     pub(crate) processes: BTreeMap<ProcessKey, ProcessEntry>,
     /// The first supervision-level failure reason, when no single process is
@@ -29,7 +26,6 @@ pub(crate) struct Board {
 impl Default for Board {
     fn default() -> Self {
         Self {
-            revision: 0,
             lifecycle: ProjectLifecycle::Starting,
             processes: BTreeMap::new(),
             failure: None,

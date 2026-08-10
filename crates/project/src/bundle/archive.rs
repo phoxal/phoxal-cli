@@ -1,4 +1,4 @@
-//! Deterministic `build.phoxal` archiving of a staged runtime layout (#936).
+//! Deterministic `build.phoxal` archiving of a staged runtime layout ().
 //!
 //! `build.phoxal` is a gzipped tar of a staged runtime layout - the compiled
 //! canonical `robot.yaml`, `assets/`, and the flat `bin/` store - written so that
@@ -220,15 +220,9 @@ fn normalized_mode(entry: &Entry) -> u32 {
     }
 }
 
-#[cfg(unix)]
 fn is_executable(metadata: &fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
     metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn is_executable(_metadata: &fs::Metadata) -> bool {
-    false
 }
 
 /// Extract a `build.phoxal` at `archive` into `dest`, rejecting any entry whose
@@ -246,7 +240,7 @@ fn is_executable(_metadata: &fs::Metadata) -> bool {
 ///
 /// The lexical guard alone is insufficient: `create_dir_all`/`open` follow
 /// symlink ancestors, so a `dest/foo` symlink pointing outside would let entry
-/// `foo/bar` write outside despite a clean lexical path (#936, finding E).
+/// `foo/bar` write outside despite a clean lexical path (, finding E).
 pub fn extract_build_archive(archive: &Path, dest: &Path) -> Result<()> {
     let archive_len = fs::metadata(archive)
         .with_context(|| format!("failed to inspect {}", archive.display()))?
@@ -366,8 +360,6 @@ fn write_stream_with_mode(
         "archive entry {} declared {expected} bytes but produced {copied}",
         out.display()
     );
-    #[cfg(not(unix))]
-    if let Some(_mode) = mode {}
     file.sync_all()?;
     Ok(())
 }
@@ -375,7 +367,7 @@ fn write_stream_with_mode(
 /// Require `dest` to be a fresh extraction root: a newly created directory, or an
 /// existing real directory that is empty. A symlink, a non-directory, or a
 /// non-empty directory is rejected - so extraction never inherits a pre-existing
-/// symlink an attacker planted inside `dest` (#936, finding E).
+/// symlink an attacker planted inside `dest` (, finding E).
 fn ensure_fresh_destination(dest: &Path) -> Result<()> {
     match fs::symlink_metadata(dest) {
         Ok(metadata) => {
@@ -515,10 +507,7 @@ mod tests {
             b"schema: phoxal/robot/v0\nclock: real\n",
         )
         .unwrap();
-        #[cfg(unix)]
         write_executable(&root.join("bin/mission"), b"\x7fELF-ish-binary");
-        #[cfg(not(unix))]
-        fs::write(root.join("bin/mission"), b"\x7fELF-ish-binary").unwrap();
         fs::write(root.join("assets/fixture.bin"), b"asset").unwrap();
     }
 

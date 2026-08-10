@@ -1,10 +1,10 @@
+use crate::{RuntimeAuthority, RuntimeTarget};
 use anyhow::{Context, Result};
-use phoxal_cli_core::runtime::{ResidentAuthority, RuntimeTarget};
 use std::path::{Path, PathBuf};
 
 use crate::paths::runtime::RuntimePaths;
 
-pub(crate) fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<RuntimeTarget> {
+pub fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<RuntimeTarget> {
     let selected = explicit.unwrap_or(fallback);
     let preserve_installed_identity =
         selected == Path::new(crate::paths::runtime::ACTIVE_RUNTIME_ROOT);
@@ -30,7 +30,7 @@ pub(crate) fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<Runtim
             Some(selected),
         )
     } else {
-        let entry = phoxal_cli_core::project::resolver::discover_robot_yaml(&selected)
+        let entry = crate::source::resolver::discover_robot_yaml(&selected)
             .with_context(|| format!("failed to find robot.yaml from {}", selected.display()))?;
         (
             entry
@@ -43,11 +43,11 @@ pub(crate) fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<Runtim
     let paths = RuntimePaths::for_root(&root);
     let logical_root = paths.ownership_root.clone();
     let authority = if crate::paths::runtime::is_installed_root(&root) {
-        ResidentAuthority::SystemdUnit {
+        RuntimeAuthority::SystemdUnit {
             unit: crate::paths::runtime::SYSTEMD_UNIT.to_string(),
         }
     } else {
-        ResidentAuthority::DetachedSession
+        RuntimeAuthority::DetachedSession
     };
     // The daemon's Zenoh listen endpoint IS the supervisor socket: one stable
     // path locates the current execution, and the per-boot identity is learned
@@ -89,7 +89,7 @@ mod tests {
             target.supervisor_socket,
             root.join(".phoxal/run/supervisor.sock")
         );
-        assert_eq!(target.authority, ResidentAuthority::DetachedSession);
+        assert_eq!(target.authority, RuntimeAuthority::DetachedSession);
         Ok(())
     }
 
@@ -98,7 +98,7 @@ mod tests {
         let target = resolve(Some(Path::new("/var/phoxal")), Path::new("/unused"))?;
         assert_eq!(
             target.authority,
-            ResidentAuthority::SystemdUnit {
+            RuntimeAuthority::SystemdUnit {
                 unit: "phoxal.service".to_string()
             }
         );

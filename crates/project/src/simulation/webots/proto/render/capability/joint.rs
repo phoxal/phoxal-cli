@@ -6,7 +6,7 @@ use crate::simulation::webots::proto::native_fields::{
 };
 use crate::simulation::webots::proto::scene::WebotsSceneDescription;
 use phoxal_model::component::capability::Capability as PhysicalCapability;
-use phoxal_model::simulation::capability::Capability as SimulationCapability;
+use phoxal_model::simulation::Capability as SimulationCapability;
 
 impl WebotsSceneDescription {
     pub fn render_joint_capabilities(&self, joint_id: &str) -> Vec<Node> {

@@ -1,15 +1,15 @@
-//! Minimal, dependency-free `sd_notify` for the headless `phoxal start` resident
-//! under systemd (#936).
+//! Minimal, dependency-free `sd_notify` for the headless `phoxald` process
+//! under systemd ().
 //!
 //! `phoxal start` under systemd (`Type=notify`) is the in-process foreground
-//! resident that owns readiness and watchdog signalling. Rather than add an
+//! supervisor that owns readiness and watchdog signalling. Rather than add an
 //! `sd_notify` crate for two one-line datagrams, this hand-rolls the protocol: a
 //! `AF_UNIX`/`SOCK_DGRAM` socket sending `READY=1` once the supervised graph is
 //! ready and `WATCHDOG=1` on a timer while it runs. It supports both address
 //! forms systemd hands out in `NOTIFY_SOCKET` - a filesystem path and the Linux
 //! abstract-namespace form (`@name`) - and reads the watchdog interval from
-//! `WATCHDOG_USEC`/`WATCHDOG_PID`. Full systemd/install integration is #930; this
-//! is only the notify wire the resident needs.
+//! `WATCHDOG_USEC`/`WATCHDOG_PID`. Full systemd/install integration is ; this
+//! is only the notify wire the supervisor needs.
 
 use std::ffi::OsStr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 /// A connected notify channel to `$NOTIFY_SOCKET`. Owns an unbound datagram
-/// socket and the resolved destination address; `Send` so the resident can move
+/// socket and the resolved destination address; `Send` so the supervisor can move
 /// it into the background readiness/watchdog task.
 #[derive(Debug)]
 pub struct SdNotify {

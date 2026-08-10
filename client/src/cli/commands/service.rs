@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 
 #[derive(Debug, Args)]
 pub struct Service {
@@ -33,15 +33,9 @@ pub struct ServiceStatus {}
 impl Service {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         match &self.command {
-            ServiceSubcommand::Install(_) => {
-                crate::application::service::service_install_command(app).await
-            }
-            ServiceSubcommand::Uninstall(_) => {
-                crate::application::service::service_uninstall_command(app).await
-            }
-            ServiceSubcommand::Status(_) => {
-                crate::application::service::service_status_command(app).await
-            }
+            ServiceSubcommand::Install(_) => crate::application::service::install(app).await,
+            ServiceSubcommand::Uninstall(_) => crate::application::service::uninstall(app).await,
+            ServiceSubcommand::Status(_) => crate::application::service::status(app).await,
         }
     }
 }

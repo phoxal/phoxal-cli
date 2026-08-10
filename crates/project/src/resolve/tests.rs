@@ -14,7 +14,7 @@ fn locked_project_root() -> anyhow::Result<tempfile::TempDir> {
         "[package]\nname = \"robot\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\nmembers = [\".\", \"components/fixture\"]\nresolver = \"2\"\n\n[dependencies]\nphoxal = { path = \"train/phoxal\" }\n",
     )?;
     // The root package IS the mandatory brain: one auto-discovered bin target
-    // and no library (organization#973).
+    // and no library ().
     std::fs::write(root.path().join("src/main.rs"), "fn main() {}")?;
     std::fs::write(
         root.path().join("train/phoxal/Cargo.toml"),
@@ -92,11 +92,10 @@ fn minimal_robot_with_components(components: &str, extra: &str) -> anyhow::Resul
     } else {
         (components, "[left_drive.motor]")
     };
-    phoxal_cli_core::project::resolver::parse_robot_from_string(&format!(
+    crate::source::resolver::parse_robot_from_string(&format!(
         r#"schema: phoxal/robot/v0
 robot:
   id: testbot
-  namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
     max_angular_speed_radps: 2.0
@@ -115,7 +114,7 @@ robot:
 /// resolution fork. Keeping the source tree explicit exercises the same
 /// single compiler path as `check`, `run`, `simulate`, and `build`.
 fn write_compiler_sources(root: &std::path::Path, robot: &Robot) -> anyhow::Result<()> {
-    phoxal_cli_core::project::resolver::write_robot_to_dir(robot, root)?;
+    crate::source::resolver::write_robot_to_dir(robot, root)?;
     let structure = root.join(&robot.robot.structure);
     if let Some(parent) = structure.parent() {
         std::fs::create_dir_all(parent)?;
@@ -239,7 +238,7 @@ fn container_snapshot_uses_the_live_registry_cache_for_components_and_metadata()
         "",
     )?;
     let snapshot = locked_project_root()?;
-    phoxal_cli_core::project::resolver::write_robot_to_dir(&robot, snapshot.path())?;
+    crate::source::resolver::write_robot_to_dir(&robot, snapshot.path())?;
     std::fs::write(
         snapshot.path().join("structure.urdf"),
         r#"<robot name="fixture"><link name="base_footprint"/><link name="base_link"/><link name="base"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="base_mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
@@ -321,7 +320,7 @@ fn container_snapshot_uses_the_live_registry_cache_for_components_and_metadata()
 
 #[test]
 fn an_invalid_declaration_fails_before_locked_project_resolution() -> anyhow::Result<()> {
-    // The declaration validator is the first operation in `resolve` (#950):
+    // The declaration validator is the first operation in `resolve` ():
     // an official identity in a map must fail with the declaration error even
     // when there is no Cargo project at all (which would otherwise be the
     // first failure) - proving the ordering, not just the presence, of the
@@ -590,13 +589,12 @@ fn direct_component_scan_distinguishes_asset_only_and_invalid_driver_shapes() ->
 {
     let project = locked_project_root()?;
     let fixture = project.path().join("components/fixture");
-    let package =
-        |bins: &[&str], has_library| phoxal_cli_core::project::train::WorkspaceComponentCrate {
-            manifest_path: fixture.join("Cargo.toml").canonicalize().unwrap(),
-            crate_dir: fixture.canonicalize().unwrap(),
-            binary_names: bins.iter().map(|name| (*name).to_string()).collect(),
-            has_library,
-        };
+    let package = |bins: &[&str], has_library| crate::source::train::WorkspaceComponentCrate {
+        manifest_path: fixture.join("Cargo.toml").canonicalize().unwrap(),
+        crate_dir: fixture.canonicalize().unwrap(),
+        binary_names: bins.iter().map(|name| (*name).to_string()).collect(),
+        has_library,
+    };
     std::fs::remove_file(fixture.join("Cargo.toml"))?;
     std::fs::remove_dir_all(fixture.join("src"))?;
     let discovered = discover_local_components_from_locked(project.path(), &[])?;
@@ -812,7 +810,7 @@ fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_dr
 "#,
         "",
     )?;
-    phoxal_cli_core::project::resolver::write_robot_to_dir(&robot, project.path())?;
+    crate::source::resolver::write_robot_to_dir(&robot, project.path())?;
     std::fs::write(
         project.path().join("structure.urdf"),
         r#"<robot name="fixture"><link name="base_footprint"/><link name="base_link"/><link name="base"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="base_mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
@@ -822,7 +820,7 @@ fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_dr
         project.path(),
         ResolveOptions {
             offline: true,
-            drivers: phoxal_cli_core::project::intent::DriverSelection::None,
+            drivers: crate::source::intent::DriverSelection::None,
             ..Default::default()
         },
     )?;
@@ -876,7 +874,7 @@ fn components_root_symlink_is_rejected() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The driver policy gates resolution itself (#936): an excluded driver
+/// The driver policy gates resolution itself (): an excluded driver
 /// instance resolves no driver package at all, so nothing downstream ever
 /// requires, builds, or installs a binary for it. Authored intent remains on
 /// `source_manifest` for reporting.
@@ -914,7 +912,7 @@ fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
         &robot,
         project.path(),
         ResolveOptions {
-            drivers: phoxal_cli_core::project::intent::DriverSelection::None,
+            drivers: crate::source::intent::DriverSelection::None,
             ..ResolveOptions::default()
         },
     )?;

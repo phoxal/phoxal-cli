@@ -1,13 +1,13 @@
 //! Supervised child-process lifecycle and restart handling.
 
-use super::{
-    ParticipantSpec, ProcessState, RestartPolicy, SupervisorState, ensure_process_group_stopped,
-    join_reader, send_process_group_signal, send_process_signal, spawn_output_reader, stop_child,
-};
-use crate::ManagedChild;
+use super::child::ManagedChild;
+use super::output::{join_reader, spawn_output_reader};
+use super::signals::{ensure_process_group_stopped, send_process_group_signal, stop_child};
+use crate::model::RestartPolicy;
+use crate::model::{ExitDescription, ParticipantSpec, ProcessFailureKind, ProcessState};
+use crate::state::store::SupervisorState;
 use anyhow::Context;
 use anyhow::Result;
-use phoxal_cli_core::runtime::{ExitDescription, ProcessFailureKind, ReadinessPolicy};
 use std::collections::VecDeque;
 use std::process::Stdio;
 use std::time::Instant;
@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 
 pub(crate) struct RunningParticipant {
     pub(crate) spec: ParticipantSpec,
-    pub(crate) shutdown_phase: String,
+    pub(crate) shutdown_stage: super::stages::SupervisionStageKind,
     pub(crate) child: Option<ManagedChild>,
     pub(crate) stdout_task: Option<JoinHandle<()>>,
     pub(crate) stderr_task: Option<JoinHandle<()>>,
@@ -31,50 +31,28 @@ impl Drop for RunningParticipant {
         let Some(child) = self.child.take() else {
             return;
         };
-        if let Some(pid) = child.id() {
-            #[cfg(unix)]
-            if self.spec.process_group {
-                if let Err(error) = send_process_group_signal(pid, libc::SIGKILL) {
-                    tracing::warn!(
-                        participant = %self.spec.id,
-                        pid,
-                        error = %error,
-                        "failed to kill supervised process group while dropping participant"
-                    );
-                }
-            } else if let Err(error) = send_process_signal(pid, libc::SIGKILL) {
-                tracing::warn!(
-                    participant = %self.spec.id,
-                    pid,
-                    error = %error,
-                    "failed to kill supervised child while dropping participant"
-                );
-            }
-            #[cfg(not(unix))]
-            if let Err(error) = {
-                let mut child = child;
-                child.start_kill()
-            } {
-                tracing::warn!(
-                    participant = %self.spec.id,
-                    pid,
-                    error = %error,
-                    "failed to kill supervised child while dropping participant"
-                );
-            }
+        if let Some(pid) = child.id()
+            && let Err(error) = send_process_group_signal(pid, libc::SIGKILL)
+        {
+            tracing::warn!(
+                participant = %self.spec.key,
+                pid,
+                error = %error,
+                "failed to kill supervised process group while dropping participant"
+            );
         }
     }
 }
 
 impl RunningParticipant {
-    pub(crate) async fn spawn_in_phase(
+    pub(crate) async fn spawn_in_stage(
         spec: ParticipantSpec,
         board: &SupervisorState,
-        phase: impl Into<String>,
+        stage: super::stages::SupervisionStageKind,
     ) -> Result<Self> {
         let mut running = Self {
             spec,
-            shutdown_phase: phase.into(),
+            shutdown_stage: stage,
             child: None,
             stdout_task: None,
             stderr_task: None,
@@ -95,32 +73,21 @@ impl RunningParticipant {
         // Every (re)spawn returns to `Starting`. A first appearance promotes
         // the stable participant identity to `Ready`; an identity that is
         // continuously present across replacement remains `Ready` below.
-        board.set_state(
-            &self.spec.key,
-            ProcessState::Starting,
-            self.spec.note.clone(),
-        );
-        if matches!(self.spec.readiness, ReadinessPolicy::ExactLiveliness(_)) {
-            // Nothing mints a producer any more: a participant's producer is
-            // the ZID of the Zenoh session it opens, which does not exist yet.
-            // Clearing it here is what makes the snapshot report a fact - this
-            // incarnation has no session - until its liveliness token arrives.
-            board.clear_producer(&self.spec.key);
-        }
+        board.set_state(&self.spec.key, ProcessState::Starting);
+        // A participant's producer is the ZID of the bus session it has not yet
+        // opened. Fence the previous incarnation before spawning its replacement.
+        board.prepare_incarnation(&self.spec.key);
         let mut command = Command::new(&self.spec.executable);
         command.args(&self.spec.args);
-        if let Some(cwd) = &self.spec.cwd {
-            command.current_dir(cwd);
-        }
         command
-            // No terminal input for any child: the TUI (Part 4) owns terminal
+            // No terminal input for any child: the TUI owns terminal
             // input exclusively (there is no Interact/raw-io tab), and a
             // child that inherited this process's stdin could otherwise race
             // it for keystrokes.
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = ManagedChild::spawn(&mut command, self.spec.process_group, &self.spec.env)
+        let mut child = ManagedChild::spawn(&mut command)
             .with_context(|| format!("failed to spawn {}", self.spec.command_line()))?;
         let pid = child.id();
         board.set_pid(&self.spec.key, pid);
@@ -143,27 +110,6 @@ impl RunningParticipant {
             ));
         }
         self.child = Some(child);
-        if let ReadinessPolicy::ExactLiveliness(instance) = &self.spec.readiness {
-            // OBSERVED readiness (not spawn-is-ready): a bus participant stays
-            // `Starting` (set at the top of this function) until the
-            // supervisor's history-enabled observer sees its Liveliness key -
-            // see `SupervisorState::record_instance_presence`. A
-            // process that spawned successfully but never gets that far
-            // (crashed before `#[setup]` completed, hung, or was silently
-            // never launched by Webots) must never be reported ready. If a
-            // replacement overlaps a stale holder of the same stable key,
-            // Zenoh reports continuous presence rather than another `Alive`;
-            // preserve that known binary state instead of inventing an
-            // producer signal or waiting for a duplicate event.
-            if board.is_exact_present(instance) {
-                board.set_state(&self.spec.key, ProcessState::Ready, self.spec.note.clone());
-            }
-        } else {
-            // No bus identity to observe (e.g. the Webots application itself,
-            // see `ParticipantSpec::bus_participant`) - readiness is
-            // necessarily process-lifecycle only.
-            board.set_state(&self.spec.key, ProcessState::Ready, self.spec.note.clone());
-        }
         Ok(())
     }
 
@@ -206,7 +152,7 @@ impl RunningParticipant {
         let pid = child.id();
         let Some(status) = child
             .try_wait()
-            .with_context(|| format!("failed to poll {}", self.spec.id))?
+            .with_context(|| format!("failed to poll {}", self.spec.key))?
         else {
             return Ok(());
         };
@@ -214,9 +160,7 @@ impl RunningParticipant {
         self.child = None;
         board.set_pid(&self.spec.key, None);
         let group_stop = async {
-            if self.spec.process_group
-                && let Some(pid) = pid
-            {
+            if let Some(pid) = pid {
                 ensure_process_group_stopped(pid).await?;
             }
             Ok::<(), anyhow::Error>(())
@@ -250,40 +194,31 @@ impl RunningParticipant {
                 format!(
                     "StartLimitBurst exhausted after {} failures in {}; last status {status}",
                     policy.start_limit_burst,
-                    crate::format_duration(policy.start_limit_interval)
+                    crate::model::format_duration(policy.start_limit_interval)
                 ),
             );
             return Ok(());
         }
 
         self.restart_count = self.restart_count.saturating_add(1);
-        board.set_restart_count(&self.spec.key, self.restart_count);
-        board.set_state(
-            &self.spec.key,
-            ProcessState::Restarting,
-            Some(format!(
-                "exited with {status}; restarting in {}",
-                crate::format_duration(policy.restart_delay)
-            )),
-        );
+        board.record_restart(&self.spec.key);
+        board.set_state(&self.spec.key, ProcessState::Restarting);
         self.restart_at = Some(now + policy.restart_delay);
         Ok(())
     }
 
     pub(crate) async fn stop_current(&mut self, board: &SupervisorState) -> Result<()> {
-        if let Some(mut child) = self.child.take() {
+        let stop = if let Some(mut child) = self.child.take() {
             tracing::debug!(process = %self.spec.key, "stopping supervised process");
-            stop_child(
-                &mut child,
-                self.spec.shutdown_grace,
-                self.spec.process_group,
-            )
-            .await?;
+            let result = stop_child(&mut child, self.spec.shutdown_grace).await;
             board.set_pid(&self.spec.key, None);
-        }
+            result
+        } else {
+            Ok(())
+        };
         join_reader(self.stdout_task.take()).await;
         join_reader(self.stderr_task.take()).await;
-        Ok(())
+        stop
     }
 
     pub(crate) async fn swap(
@@ -306,19 +241,9 @@ impl RunningParticipant {
 }
 
 fn exit_description(status: &std::process::ExitStatus) -> ExitDescription {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        ExitDescription {
-            code: status.code(),
-            signal: status.signal(),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        ExitDescription {
-            code: status.code(),
-            signal: None,
-        }
+    use std::os::unix::process::ExitStatusExt;
+    ExitDescription {
+        code: status.code(),
+        signal: status.signal(),
     }
 }

@@ -3,15 +3,17 @@
 //! Unlike its sibling sources this one does not ingest from the bus - the pad
 //! is attached to the machine running this client, so the device state is
 //! produced here and only the resulting command goes out (see
-//! [`crate::joypad`] for why the old robot-side tool went away).
+//! [`crate::joypad`] for the operator-side ownership contract).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use phoxal_api::v0_1 as api;
-use phoxal_bus::{CommandPublisher, ContractBody, Publish, Topic};
-use phoxal_cli_observation::{AttachmentEvent, ManualDriveUnsupported, SourceStatus};
+use phoxal_bus::SetpointPublisher;
+use phoxal_cli_observation::{
+    AttachmentEvent, ManualDriveUnsupported, ObservationSource, SourceStatus,
+};
 use tokio::sync::mpsc;
 
 use super::FeedContext;
@@ -19,7 +21,7 @@ use crate::attach::ports::input::InputCommand;
 use crate::joypad::manual::ManualDrive;
 use crate::joypad::{Joypad, STOP_REPEAT_COUNT};
 
-const SOURCE: &str = "input";
+const SOURCE: ObservationSource = ObservationSource::Input;
 
 /// How often the selected pad is read and a command published.
 const POLL_HZ: f64 = 50.0;
@@ -39,12 +41,9 @@ async fn feed(
     commands: &mut mpsc::Receiver<InputCommand>,
     drive: Result<ManualDrive, ManualDriveUnsupported>,
 ) -> Result<()> {
-    let topic = Topic::<Publish<api::motion::ManualCommand>>::new_static(
-        <api::motion::ManualCommand as ContractBody>::TOPIC,
-    );
-    let publisher = CommandPublisher::<api::motion::ManualCommand>::new(
+    let publisher = SetpointPublisher::new(
         context.attachment.bus().clone(),
-        &topic,
+        &api::topic::client().motion().manual(),
     )
     .context("failed to attach the manual command publisher")?;
 
@@ -138,7 +137,7 @@ fn queue_stop(pending_stops: &mut usize) {
 /// Send one queued stop, keeping the countdown intact if the publish failed so
 /// the next tick tries again.
 fn publish_stop(
-    publisher: &CommandPublisher<api::motion::ManualCommand>,
+    publisher: &SetpointPublisher<api::endpoint::motion::ManualEndpoint>,
     pending_stops: &mut usize,
     dropped: &mut u64,
 ) {
@@ -153,7 +152,7 @@ fn publish_stop(
 }
 
 /// Drain the whole stop budget at once, for an exit that has no next tick.
-fn publish_stop_repeats(publisher: &CommandPublisher<api::motion::ManualCommand>) {
+fn publish_stop_repeats(publisher: &SetpointPublisher<api::endpoint::motion::ManualEndpoint>) {
     for attempt in 0..STOP_REPEAT_COUNT {
         if let Err(error) = publisher.send(stop()) {
             tracing::warn!(
@@ -175,32 +174,24 @@ const fn stop() -> api::motion::ManualCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_bus::{Bus, BusConfig, Subscribe, Subscriber};
+    use phoxal_bus::{BusConfig, BusOwner, SetpointReceiver};
+    use phoxal_runtime_contract::identity::ExecutionId;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_queued_stop_reaches_the_manual_contract() {
-        let bus = Bus::open(BusConfig::in_process(format!(
-            "test/manual-stop/{}",
-            std::process::id()
-        )))
+        let (owner, bus) = BusOwner::open(BusConfig::for_external(
+            ExecutionId::mint(),
+            None,
+            Vec::new(),
+        ))
         .await
         .expect("bus should open");
-        let publisher = CommandPublisher::new(
-            bus.clone(),
-            &Topic::<Publish<api::motion::ManualCommand>>::new_static(
-                <api::motion::ManualCommand as ContractBody>::TOPIC,
-            ),
-        )
-        .expect("publisher attaches");
-        let subscriber = Subscriber::<api::motion::ManualCommand>::new(
-            &bus,
-            &Topic::<Subscribe<api::motion::ManualCommand>>::new_static(
-                <api::motion::ManualCommand as ContractBody>::TOPIC,
-            ),
-            1,
-        )
-        .await
-        .expect("subscriber attaches");
+        let publisher =
+            SetpointPublisher::new(bus.clone(), &api::topic::client().motion().manual())
+                .expect("publisher attaches");
+        let subscriber = SetpointReceiver::new(&bus, &api::topic::owner().motion().manual())
+            .await
+            .expect("subscriber attaches");
 
         let mut pending_stops = 0;
         let mut dropped = 0;
@@ -215,27 +206,24 @@ mod tests {
             .expect("the stop should decode");
         assert_eq!(received.body.linear_x_mps, 0.0);
         assert_eq!(received.body.angular_z_radps, 0.0);
-        bus.close().await.expect("bus should close");
+        owner.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_failed_stop_keeps_its_place_in_the_budget() {
         // A stop lost to a closed bus must not be counted as delivered, or a
         // single transport hiccup would leave the robot moving.
-        let bus = Bus::open(BusConfig::in_process(format!(
-            "test/manual-stop-retry/{}",
-            std::process::id()
-        )))
+        let (owner, bus) = BusOwner::open(BusConfig::for_external(
+            ExecutionId::mint(),
+            None,
+            Vec::new(),
+        ))
         .await
         .expect("bus should open");
-        let publisher = CommandPublisher::new(
-            bus.clone(),
-            &Topic::<Publish<api::motion::ManualCommand>>::new_static(
-                <api::motion::ManualCommand as ContractBody>::TOPIC,
-            ),
-        )
-        .expect("publisher attaches");
-        bus.close().await.expect("bus should close");
+        let publisher =
+            SetpointPublisher::new(bus.clone(), &api::topic::client().motion().manual())
+                .expect("publisher attaches");
+        owner.close().await;
 
         let mut pending_stops = STOP_REPEAT_COUNT;
         let mut dropped = 0;

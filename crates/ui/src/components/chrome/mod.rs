@@ -8,7 +8,10 @@ use crate::{Role, Theme};
 
 pub fn render_header(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     let (project, lifecycle) = model.overview.supervisor.as_ref().map_or(
-        ("waiting for resident".to_string(), "connecting".to_string()),
+        (
+            "waiting for supervisor".to_string(),
+            "connecting".to_string(),
+        ),
         |snapshot| {
             (
                 crate::format::sanitize_terminal_text(&snapshot.project),
@@ -41,10 +44,6 @@ fn connection_label(connection: Option<&phoxal_cli_observation::ConnectionObserv
     match connection {
         None => "connection waiting".to_string(),
         Some(ConnectionObservation::Connected) => "connected".to_string(),
-        Some(ConnectionObservation::Reconnecting { attempt }) => {
-            format!("reconnecting #{attempt}")
-        }
-        Some(ConnectionObservation::Terminal) => "terminal".to_string(),
         Some(ConnectionObservation::Lost { .. }) => "connection lost".to_string(),
     }
 }

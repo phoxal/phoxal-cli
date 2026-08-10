@@ -1,7 +1,7 @@
 //! The execution-level observation, projected from one supervisor snapshot.
 
-use phoxal_cli_core::identity::ExecutionId;
-use phoxal_supervisor_api::{DaemonFailure, ExecutionMode, Lifecycle, RobotIdentity, StartupStep};
+use phoxal_runtime_contract::identity::ExecutionId;
+use phoxal_supervisor_api::{Clock, DaemonFailure, Lifecycle, RobotId, StartupStep};
 
 /// What an attached client knows about the execution as a whole.
 ///
@@ -13,8 +13,8 @@ pub struct SupervisorObservation {
     /// Monotonic within one execution. A client keeps the highest it has seen.
     pub revision: u64,
     pub execution: ExecutionId,
-    pub robot: RobotIdentity,
-    pub mode: ExecutionMode,
+    pub robot: RobotId,
+    pub clock: Clock,
     /// Where this client believes the execution's bundle lives, for display.
     pub project: String,
     pub lifecycle: Lifecycle,

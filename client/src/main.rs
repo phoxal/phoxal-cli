@@ -10,7 +10,7 @@
 //! no private IPC: the daemon is a sibling executable, and the only channel to
 //! a running execution is the execution-scoped Zenoh supervisor API.
 //!
-//! The command surface (see [`cli::commands`]) is:
+//! The command surface is:
 //!
 //! - `run`/`start`/`simulation webots run <world>` - build and publish a fresh
 //!   bundle, launch `phoxald` on it, and (for `run`) attach;
@@ -20,13 +20,20 @@
 //!   project and host workflows;
 //! - `doctor` - check host prerequisites; `self upgrade` - update the CLI pair.
 
-#![allow(clippy::module_name_repetitions)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 
 mod application;
 mod attach;
 mod bootstrap;
 mod cli;
-mod cutover;
 mod digest;
 mod joypad;
 mod lock;
@@ -39,7 +46,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{AppContext, Cli, SessionAwareWriter, Ui, tracing_ansi_enabled};
+use crate::cli::args::Cli;
+use crate::cli::context::AppContext;
+use crate::cli::output::{SessionAwareWriter, Ui, tracing_ansi_enabled};
 
 #[tokio::main()]
 async fn main() -> ExitCode {
@@ -49,7 +58,7 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            if let Some(exit) = error.downcast_ref::<crate::cli::ReportedExit>() {
+            if let Some(exit) = error.downcast_ref::<crate::cli::exit::ReportedExit>() {
                 return ExitCode::from(exit.0);
             }
             Ui::from_env().error(format!("{error:#}"));
@@ -73,10 +82,9 @@ fn init_tracing() {
     // (e.g. a Zenoh connection retry) from writing straight to stderr
     // underneath an active TUI frame instead of through the renderer.
     //
-    // Every `phoxal` invocation writes to a live console, so none of them
-    // carries wall-clock timestamps: the daemon owns the log file that a line
-    // is read from long after the fact, and it is a separate process with its
-    // own subscriber.
+    // Every `phoxal` invocation writes to a live console, so none carries
+    // wall-clock timestamps. `phoxald` is the separate headless process whose
+    // stderr is retained by its service manager.
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
@@ -96,5 +104,5 @@ async fn run(cli: Cli) -> Result<()> {
     })?;
     let app = AppContext::new(workspace_root, cli.offline())?;
 
-    crate::cli::dispatch(cli, &app).await
+    crate::cli::dispatch::dispatch(cli, &app).await
 }

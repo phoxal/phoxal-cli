@@ -21,7 +21,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         Row::new(vec![
             if candidate { ">" } else { " " }.to_string(),
             key.to_string(),
-            format!("{:?}", process.state).to_lowercase(),
+            format!("{:?}", process.row.state).to_lowercase(),
         ])
     });
     frame.render_widget(
@@ -52,7 +52,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             let summary = row.sample.summary();
             [
                 Line::from(vec![
-                    Span::raw(format!("{}  ", row.sample.participant_id)),
+                    Span::raw(format!("{}  ", row.sample.participant_id())),
                     Span::raw(format!("{:.1} msg/s", summary.message_rate_hz)),
                 ]),
                 Line::from(format!(

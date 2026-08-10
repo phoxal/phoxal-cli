@@ -93,7 +93,7 @@ impl RuntimeStore {
                     .body
                     .participant
                     .as_ref()
-                    .is_none_or(|participant| &row.sample.participant_id == participant)
+                    .is_none_or(|participant| row.sample.participant_id() == participant)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -112,23 +112,25 @@ impl RuntimeStore {
 
 #[cfg(test)]
 mod tests {
-    use phoxal_cli_core::identity::ExecutionId;
     use phoxal_cli_observation::{
         ObservationQuery, QueryToken, RuntimeFeedStatus, RuntimePerformanceSample, RuntimeQuery,
         StoreRevision,
     };
+    use phoxal_runtime_contract::identity::ExecutionId;
 
     use super::*;
 
     fn sample(id: &str, sequence: u64) -> RuntimePerformanceSample {
         RuntimePerformanceSample {
-            sequence,
-            participant_id: id.to_string(),
-            truncated: 0,
-            window_ns: 1,
-            step: None,
-            topics: std::sync::Arc::new(Vec::new()),
-            overflow: None,
+            record: phoxal_supervisor_api::payload::telemetry::Record {
+                sequence,
+                participant_id: id.to_string(),
+                truncated: 0,
+                window_ns: 1,
+                step: None,
+                topics: Vec::new(),
+                overflow: None,
+            },
         }
     }
 

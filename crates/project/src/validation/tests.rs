@@ -4,13 +4,13 @@ use super::participants::{
     component_driver_platform_refs_from_resolved, platform_artifact_refs_from_resolved,
 };
 use super::*;
+use crate::check::source::{SourceParticipant, SourceParticipantKind};
+use crate::source::resolver::{
+    BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
+};
 use anyhow::{Result, anyhow, bail};
 use graph_check::Problem;
 use phoxal_cli_catalog::ArtifactKind;
-use phoxal_cli_core::check::source::{SourceParticipant, SourceParticipantKind};
-use phoxal_cli_core::project::resolver::{
-    BundlePlan, ResolvedComponent, ResolvedComponentDriver, ResolvedPlatformRuntime,
-};
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
 use std::path::{Path, PathBuf};
 
@@ -33,7 +33,6 @@ fn platform_refs(images: &[(String, String)]) -> Vec<PlatformArtifactRef> {
 const LAUNCH_PLAN_FIXTURE_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
-  namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
     max_angular_speed_radps: 2.0
@@ -61,7 +60,7 @@ services:
 "#;
 
 fn robot_with_service_config(service_id: &str, config: Value) -> Result<Robot> {
-    let mut robot = phoxal_cli_core::project::resolver::parse_robot_from_string(
+    let mut robot = crate::source::resolver::parse_robot_from_string(
         &LAUNCH_PLAN_FIXTURE_ROBOT.replace("mission", service_id),
     )?;
     robot
@@ -659,10 +658,8 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
         vec!["left_drive".to_string(), "right_drive".to_string()]
     );
 
-    let off = check_artifact_refs_from_resolved(
-        &resolved,
-        phoxal_cli_core::project::intent::DriverSelection::None,
-    );
+    let off =
+        check_artifact_refs_from_resolved(&resolved, crate::source::intent::DriverSelection::None);
     assert!(
         off.iter()
             .all(|reference| reference.kind != ArtifactKind::ComponentDriver),
@@ -670,7 +667,7 @@ fn n_instances_of_one_registry_driver_fetch_once_and_validate_as_n_graph_partici
     );
     let subset = check_artifact_refs_from_resolved(
         &resolved,
-        phoxal_cli_core::project::intent::DriverSelection::Only(
+        crate::source::intent::DriverSelection::Only(
             ["left_drive".to_string()].into_iter().collect(),
         ),
     );
@@ -1050,13 +1047,13 @@ fn raw_brain(schema: Option<serde_json::Value>) -> RawParticipantReport {
     }
 }
 
-/// The check-engine half of the unit-config gate (organization#973).
+/// The check-engine half of the unit-config gate ().
 ///
 /// `phoxal validate` and the Webots simulation path never open a staged
-/// layout, so `RuntimeLayout::inspect_for`'s identical rule cannot protect
+/// layout, so runtime-bundle verification's identical rule cannot protect
 /// them. A root binary whose id and kind are a perfectly good `brain` but
 /// which embeds a real config surface must still fail here, before any
-/// resident startup - and the ordinary unit schema must still pass.
+/// supervisor startup, and the ordinary unit schema must still pass.
 #[test]
 fn a_brain_declaring_a_config_surface_fails_the_check_engine() -> Result<()> {
     let sources = vec![fixture_brain_source()];
@@ -1100,7 +1097,7 @@ fn a_brain_declaring_a_config_surface_fails_the_check_engine() -> Result<()> {
 }
 
 /// The mandatory root brain source record `resolved_with_components`'
-/// fixture root package produces (organization#973).
+/// fixture root package produces ().
 fn fixture_brain_source() -> SourceParticipant {
     SourceParticipant::brain(std::path::PathBuf::from("/tmp/robot"), "testbot-robot")
 }
@@ -1117,15 +1114,13 @@ fn raw_kind(kind: &str, id: &str) -> RawParticipantReport {
 
 fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<BundlePlan> {
     Ok(BundlePlan {
-        source_manifest: phoxal_cli_core::project::resolver::parse_robot_from_string(
-            MINIMAL_ROBOT,
-        )?,
+        source_manifest: crate::source::resolver::parse_robot_from_string(MINIMAL_ROBOT)?,
         compiled: crate::stage::compile_test_bundle(
-            &phoxal_cli_core::project::resolver::parse_robot_from_string(MINIMAL_ROBOT)?,
+            &crate::source::resolver::parse_robot_from_string(MINIMAL_ROBOT)?,
         )?,
         train: "0.36.0".to_string(),
         target: crate::resolve::project::host_target_triple(),
-        brain: phoxal_cli_core::project::resolver::ResolvedBrain {
+        brain: crate::source::resolver::ResolvedBrain {
             crate_dir: std::path::PathBuf::from("/tmp/robot"),
             package: "testbot-robot".to_string(),
             bin_target: "testbot-robot".to_string(),
@@ -1142,7 +1137,6 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Bundle
 const MINIMAL_ROBOT: &str = r#"schema: phoxal/robot/v0
 robot:
   id: testbot
-  namespace: test
   motion_limits:
     max_linear_speed_mps: 0.6
     max_angular_speed_radps: 2.0

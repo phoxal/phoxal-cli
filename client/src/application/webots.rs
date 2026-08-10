@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use phoxal_cli_core::runtime::ParticipantSpec;
+use phoxal_cli_project::WebotsLaunch;
 
 /// How long a SIGTERMed Webots is given to close its world before the
 /// fallback. Webots writes state on the way out, so this is generous.
@@ -32,12 +32,9 @@ impl Webots {
     /// terminal Ctrl+C must reach the client's shutdown path, which then stops
     /// both processes in the right order - never the simulator directly, mid
     /// world write.
-    pub(crate) fn launch(spec: &ParticipantSpec) -> Result<Self> {
+    pub(crate) fn launch(spec: &WebotsLaunch) -> Result<Self> {
         let mut command = Command::new(&spec.executable);
-        command
-            .args(&spec.args)
-            .stdin(Stdio::null())
-            .envs(spec.env.iter().cloned());
+        command.args(&spec.args).stdin(Stdio::null());
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }

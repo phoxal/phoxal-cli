@@ -201,14 +201,11 @@ fn wait_for_child(child: &CapturedChild, reporter: Option<&dyn Reporter>) -> Res
 }
 
 fn terminate_process_group(child: &mut std::process::Child) {
-    #[cfg(unix)]
     if let Ok(group) = i32::try_from(child.id()) {
         // SAFETY: every captured command is created as its own process-group
         // leader above, so the negative pid targets only that command tree.
         let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
     }
-    #[cfg(not(unix))]
-    let _ = child.kill();
 }
 
 pub fn run_stdout(

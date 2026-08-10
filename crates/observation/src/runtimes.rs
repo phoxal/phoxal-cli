@@ -1,61 +1,13 @@
-use std::sync::Arc;
-
 use crate::{ObservationQuery, ObservationWindow, WindowDirection};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeDirection {
-    Publish,
-    Subscribe,
-    Mixed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeBufferKind {
-    Outbound,
-    Latest,
-    Subscriber,
-    Mixed,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RuntimeStepSample {
-    pub target_period_ns: u64,
-    pub completed: u64,
-    pub errors: u64,
-    pub mean_duration_ns: u64,
-    pub max_duration_ns: u64,
-    pub mean_lateness_ns: u64,
-    pub max_lateness_ns: u64,
-    pub missed_ticks: u64,
-    pub overruns: u64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RuntimeTopicSample {
-    pub topic: String,
-    pub direction: RuntimeDirection,
-    pub buffer_kind: RuntimeBufferKind,
-    pub count: u64,
-    pub rate_hz: f32,
-    pub drops: u64,
-    pub latest_overwrites: u64,
-    pub bounded_evictions: u64,
-    pub capacity: u64,
-    pub current_depth: u64,
-    pub high_water_depth: u64,
-    pub decode_errors: u64,
-    pub overflowed_rows: u32,
-}
+pub use phoxal_supervisor_api::payload::runtime::{
+    BufferKind as RuntimeBufferKind, Direction as RuntimeDirection, Step as RuntimeStepSample,
+    Topic as RuntimeTopicSample,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimePerformanceSample {
-    pub sequence: u64,
-    pub participant_id: String,
-    pub truncated: u32,
-    pub window_ns: u64,
-    pub step: Option<RuntimeStepSample>,
-    pub topics: Arc<Vec<RuntimeTopicSample>>,
-    pub overflow: Option<RuntimeTopicSample>,
+    pub record: phoxal_supervisor_api::payload::telemetry::Record,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -72,18 +24,28 @@ pub struct RuntimePerformanceSummary {
 
 impl RuntimePerformanceSample {
     #[must_use]
+    pub fn participant_id(&self) -> &str {
+        &self.record.participant_id
+    }
+
+    #[must_use]
+    pub const fn sequence(&self) -> u64 {
+        self.record.sequence
+    }
+
+    #[must_use]
     pub fn summary(&self) -> RuntimePerformanceSummary {
-        let window_s = self.window_ns as f64 / 1_000_000_000.0;
-        let step_rate_hz = self
-            .step
-            .as_ref()
-            .and_then(|step| (window_s > 0.0).then_some((step.completed as f64 / window_s) as f32));
-        let budget_utilization_pct = self.step.as_ref().and_then(|step| {
+        let window_s = self.record.window_ns as f64 / 1_000_000_000.0;
+        let step_rate_hz =
+            self.record.step.as_ref().and_then(|step| {
+                (window_s > 0.0).then_some((step.completed as f64 / window_s) as f32)
+            });
+        let budget_utilization_pct = self.record.step.as_ref().and_then(|step| {
             (step.target_period_ns > 0).then_some(
                 (step.max_duration_ns as f64 / step.target_period_ns as f64 * 100.0) as f32,
             )
         });
-        let headroom_ns = self.step.as_ref().and_then(|step| {
+        let headroom_ns = self.record.step.as_ref().and_then(|step| {
             (step.target_period_ns > 0).then_some({
                 let difference =
                     i128::from(step.target_period_ns) - i128::from(step.max_duration_ns);
@@ -96,40 +58,44 @@ impl RuntimePerformanceSample {
                 })
             })
         });
-        self.topics.iter().chain(self.overflow.iter()).fold(
-            RuntimePerformanceSummary {
-                step_rate_hz,
-                budget_utilization_pct,
-                headroom_ns,
-                ..RuntimePerformanceSummary::default()
-            },
-            |mut summary, row| {
-                summary.message_rate_hz += row.rate_hz;
-                summary.drops = summary
-                    .drops
-                    .saturating_add(row.drops)
-                    .saturating_add(row.latest_overwrites)
-                    .saturating_add(row.bounded_evictions);
-                summary.decode_errors = summary.decode_errors.saturating_add(row.decode_errors);
-                if row.capacity > 0 {
-                    let current =
-                        (row.current_depth as f64 / row.capacity as f64 * 100.0).clamp(0.0, 100.0);
-                    let high = (row.high_water_depth as f64 / row.capacity as f64 * 100.0)
-                        .clamp(0.0, 100.0);
-                    summary.current_pressure_pct = Some(
-                        summary
-                            .current_pressure_pct
-                            .map_or(current as f32, |old| old.max(current as f32)),
-                    );
-                    summary.high_water_pressure_pct = Some(
-                        summary
-                            .high_water_pressure_pct
-                            .map_or(high as f32, |old| old.max(high as f32)),
-                    );
-                }
-                summary
-            },
-        )
+        self.record
+            .topics
+            .iter()
+            .chain(self.record.overflow.iter())
+            .fold(
+                RuntimePerformanceSummary {
+                    step_rate_hz,
+                    budget_utilization_pct,
+                    headroom_ns,
+                    ..RuntimePerformanceSummary::default()
+                },
+                |mut summary, row| {
+                    summary.message_rate_hz += row.rate_millihz as f32 / 1_000.0;
+                    summary.drops = summary
+                        .drops
+                        .saturating_add(row.drops)
+                        .saturating_add(row.latest_overwrites)
+                        .saturating_add(row.bounded_evictions);
+                    summary.decode_errors = summary.decode_errors.saturating_add(row.decode_errors);
+                    if row.capacity > 0 {
+                        let current = (row.current_depth as f64 / row.capacity as f64 * 100.0)
+                            .clamp(0.0, 100.0);
+                        let high = (row.high_water_depth as f64 / row.capacity as f64 * 100.0)
+                            .clamp(0.0, 100.0);
+                        summary.current_pressure_pct = Some(
+                            summary
+                                .current_pressure_pct
+                                .map_or(current as f32, |old| old.max(current as f32)),
+                        );
+                        summary.high_water_pressure_pct = Some(
+                            summary
+                                .high_water_pressure_pct
+                                .map_or(high as f32, |old| old.max(high as f32)),
+                        );
+                    }
+                    summary
+                },
+            )
     }
 }
 
@@ -169,7 +135,7 @@ mod tests {
             direction: RuntimeDirection::Publish,
             buffer_kind,
             count: 20,
-            rate_hz: 10.0,
+            rate_millihz: 10_000,
             drops: 1,
             latest_overwrites: 2,
             bounded_evictions: 3,
@@ -177,6 +143,7 @@ mod tests {
             current_depth: current,
             high_water_depth: high,
             decode_errors: 4,
+            timeline_filtered: 0,
             overflowed_rows: 0,
         }
     }
@@ -184,21 +151,28 @@ mod tests {
     #[test]
     fn runtime_summary_derives_portable_rate_budget_headroom_and_pressure() {
         let sample = RuntimePerformanceSample {
-            sequence: 1,
-            participant_id: "drive".to_string(),
-            truncated: 0,
-            window_ns: 2_000_000_000,
-            step: Some(RuntimeStepSample {
-                target_period_ns: 20_000_000,
-                completed: 100,
-                max_duration_ns: 15_000_000,
-                ..RuntimeStepSample::default()
-            }),
-            topics: Arc::new(vec![
-                topic(RuntimeBufferKind::Outbound, 10, 4, 8),
-                topic(RuntimeBufferKind::Outbound, 10, 2, 5),
-            ]),
-            overflow: Some(topic(RuntimeBufferKind::Mixed, 0, 99, 99)),
+            record: phoxal_supervisor_api::payload::telemetry::Record {
+                sequence: 1,
+                participant_id: "drive".to_string(),
+                truncated: 0,
+                window_ns: 2_000_000_000,
+                step: Some(RuntimeStepSample {
+                    target_period_ns: 20_000_000,
+                    completed: 100,
+                    errors: 0,
+                    mean_duration_ns: 0,
+                    max_duration_ns: 15_000_000,
+                    mean_lateness_ns: 0,
+                    max_lateness_ns: 0,
+                    missed_ticks: 0,
+                    overruns: 0,
+                }),
+                topics: vec![
+                    topic(RuntimeBufferKind::Outbound, 10, 4, 8),
+                    topic(RuntimeBufferKind::Outbound, 10, 2, 5),
+                ],
+                overflow: Some(topic(RuntimeBufferKind::Mixed, 0, 99, 99)),
+            },
         };
         let summary = sample.summary();
         assert_eq!(summary.step_rate_hz, Some(50.0));
@@ -214,13 +188,15 @@ mod tests {
     #[test]
     fn event_driven_runtime_keeps_message_rate_without_inventing_a_budget() {
         let sample = RuntimePerformanceSample {
-            sequence: 1,
-            participant_id: "camera".to_string(),
-            truncated: 0,
-            window_ns: 1_000_000_000,
-            step: None,
-            topics: Arc::new(vec![topic(RuntimeBufferKind::Subscriber, 0, 0, 0)]),
-            overflow: None,
+            record: phoxal_supervisor_api::payload::telemetry::Record {
+                sequence: 1,
+                participant_id: "camera".to_string(),
+                truncated: 0,
+                window_ns: 1_000_000_000,
+                step: None,
+                topics: vec![topic(RuntimeBufferKind::Subscriber, 0, 0, 0)],
+                overflow: None,
+            },
         };
         let summary = sample.summary();
         assert_eq!(summary.step_rate_hz, None);
@@ -233,18 +209,15 @@ mod tests {
     #[test]
     fn runtime_pressure_is_clamped_when_hostile_depth_exceeds_capacity() {
         let sample = RuntimePerformanceSample {
-            sequence: 1,
-            participant_id: "drive".to_string(),
-            truncated: 0,
-            window_ns: 1,
-            step: None,
-            topics: Arc::new(vec![topic(
-                RuntimeBufferKind::Subscriber,
-                2,
-                u64::MAX,
-                u64::MAX,
-            )]),
-            overflow: None,
+            record: phoxal_supervisor_api::payload::telemetry::Record {
+                sequence: 1,
+                participant_id: "drive".to_string(),
+                truncated: 0,
+                window_ns: 1,
+                step: None,
+                topics: vec![topic(RuntimeBufferKind::Subscriber, 2, u64::MAX, u64::MAX)],
+                overflow: None,
+            },
         };
         let summary = sample.summary();
         assert_eq!(summary.current_pressure_pct, Some(100.0));

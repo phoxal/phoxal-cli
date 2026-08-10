@@ -319,19 +319,7 @@ fn executable_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn executable_names(name: &str) -> Vec<String> {
-    #[cfg(windows)]
-    {
-        vec![
-            format!("{name}.exe"),
-            format!("{name}.bat"),
-            format!("{name}.cmd"),
-            name.to_string(),
-        ]
-    }
-    #[cfg(not(windows))]
-    {
-        vec![name.to_string()]
-    }
+    vec![name.to_string()]
 }
 
 fn explicit_webots_home() -> Option<PathBuf> {
@@ -365,43 +353,15 @@ fn known_webots_home_paths() -> Vec<PathBuf> {
         homes.push(PathBuf::from("/usr/local/webots"));
         homes.push(PathBuf::from("/opt/webots"));
     }
-    #[cfg(windows)]
-    {
-        if let Some(program_files) = env::var_os("ProgramFiles") {
-            homes.push(PathBuf::from(program_files).join("Webots"));
-        }
-        if let Some(program_files) = env::var_os("ProgramFiles(x86)") {
-            homes.push(PathBuf::from(program_files).join("Webots"));
-        }
-    }
     homes
 }
 
 fn webots_executable_candidates_for_home(home: &Path) -> Vec<PathBuf> {
-    #[cfg(windows)]
-    {
-        let mut candidates = vec![
-            home.join("webots"),
-            home.join("bin").join("webots"),
-            home.join("Contents").join("MacOS").join("webots"),
-        ];
-        candidates.push(home.join("webots.exe"));
-        candidates.push(
-            home.join("msys64")
-                .join("mingw64")
-                .join("bin")
-                .join("webots.exe"),
-        );
-        candidates
-    }
-    #[cfg(not(windows))]
-    {
-        vec![
-            home.join("webots"),
-            home.join("bin").join("webots"),
-            home.join("Contents").join("MacOS").join("webots"),
-        ]
-    }
+    vec![
+        home.join("webots"),
+        home.join("bin").join("webots"),
+        home.join("Contents").join("MacOS").join("webots"),
+    ]
 }
 
 fn webots_controller_lib_candidates(home: &Path) -> Vec<PathBuf> {

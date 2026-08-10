@@ -10,7 +10,7 @@
 //! [`phoxal_bus::Bus::probe_routers`], which reports executions rather than raw
 //! transport identities and errors on anything that is not one.
 
-use phoxal_runtime_contract::ExecutionId;
+use phoxal_runtime_contract::identity::ExecutionId;
 
 use crate::error::AttachError;
 

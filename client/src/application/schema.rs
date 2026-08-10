@@ -19,7 +19,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use phoxal_manifest::schema::{DocumentKind, generate};
+use phoxal_manifest::source::DocumentKind;
 
 /// The project-relative directory the generated editor schemas are written to.
 pub(crate) const SCHEMA_DIR_RELATIVE: &str = ".phoxal/schemas";
@@ -72,7 +72,7 @@ pub(crate) fn generate_command(start: &Path) -> Result<SchemaReport> {
 /// Generate and serialize the complete set, verifying each document before it
 /// can reach the filesystem. This function never writes.
 fn generate_schemas(start: &Path) -> Result<GeneratedSchemas> {
-    let robot = phoxal_cli_core::project::resolver::discover_robot_yaml(start)
+    let robot = phoxal_cli_project::source::resolver::discover_robot_yaml(start)
         .with_context(|| format!("failed to find robot.yaml from {}", start.display()))?;
     let root = robot
         .parent()
@@ -81,7 +81,7 @@ fn generate_schemas(start: &Path) -> Result<GeneratedSchemas> {
     let mut names = BTreeSet::new();
     let mut files = Vec::with_capacity(DocumentKind::ALL.len());
     for kind in DocumentKind::ALL {
-        let name = kind.file_name();
+        let name = kind.schema_file_name();
         // The owner's file name must be one plain path segment, so a schema
         // can never be written outside the project-owned directory.
         let mut segments = Path::new(name).components();
@@ -97,7 +97,7 @@ fn generate_schemas(start: &Path) -> Result<GeneratedSchemas> {
             names.insert(name),
             "manifest schema filename `{name}` is duplicated"
         );
-        let value = generate(kind);
+        let value = kind.generate();
         ensure!(
             value.get("$schema").and_then(serde_json::Value::as_str) == Some(DRAFT_2020_12),
             "manifest schema `{name}` is not a Draft 2020-12 root"
@@ -239,7 +239,7 @@ mod tests {
         // ships, so a pin bump that renames or adds one fails here, in CI,
         // rather than surprising a user at generation time.
         assert_eq!(
-            DocumentKind::ALL.map(DocumentKind::file_name),
+            DocumentKind::ALL.map(DocumentKind::schema_file_name),
             [
                 "robot.schema.json",
                 "component.schema.json",
@@ -271,7 +271,7 @@ mod tests {
         let project = project()?;
         let report = generate_command(project.path())?;
         let mut expected = DocumentKind::ALL
-            .map(DocumentKind::file_name)
+            .map(DocumentKind::schema_file_name)
             .map(str::to_owned)
             .to_vec();
         expected.sort();
@@ -287,7 +287,7 @@ mod tests {
         let project = project()?;
         let report = generate_command(project.path())?;
         for kind in DocumentKind::ALL {
-            let name = kind.file_name();
+            let name = kind.schema_file_name();
             let path = report.schema_dir.join(name);
             let text = fs::read_to_string(&path)?;
             assert!(text.ends_with("}\n"), "{name} must end with one newline");
@@ -374,7 +374,7 @@ mod tests {
             "a symlink must be left alone"
         );
         for kind in DocumentKind::ALL {
-            assert!(report.schema_dir.join(kind.file_name()).is_file());
+            assert!(report.schema_dir.join(kind.schema_file_name()).is_file());
         }
         Ok(())
     }
@@ -401,13 +401,13 @@ mod tests {
         );
         assert_eq!(entries(&report.schema_dir)?.len(), DocumentKind::ALL.len());
         for kind in DocumentKind::ALL {
-            let path = report.schema_dir.join(kind.file_name());
+            let path = report.schema_dir.join(kind.schema_file_name());
             let value = serde_json::from_slice::<serde_json::Value>(&fs::read(&path)?)?;
             assert_eq!(
                 value.get("$schema").and_then(serde_json::Value::as_str),
                 Some(DRAFT_2020_12),
                 "{} must hold this run's schema",
-                kind.file_name()
+                kind.schema_file_name()
             );
         }
         Ok(())
@@ -445,7 +445,7 @@ mod tests {
         // a failure of work that already succeeded.
         assert!(outcomes.is_empty(), "every run must succeed: {outcomes:?}");
         let mut expected = DocumentKind::ALL
-            .map(DocumentKind::file_name)
+            .map(DocumentKind::schema_file_name)
             .map(str::to_owned)
             .to_vec();
         expected.sort();
@@ -583,13 +583,13 @@ mod tests {
     }
 
     #[test]
-    fn generation_requires_no_cargo_registry_resident_or_build_lock_state() -> Result<()> {
+    fn generation_requires_no_cargo_registry_runtime_or_build_lock_state() -> Result<()> {
         let project = project()?;
         generate_command(project.path())?;
         assert!(!project.path().join("target").exists());
         // The schema directory is the only project state this command creates,
         // which also rules out a lock, a socket, and a package cache.
-        let state = phoxal_cli_core::runtime::paths::RuntimePaths::for_root(project.path());
+        let state = phoxal_cli_host::paths::RuntimePaths::for_root(project.path());
         assert_eq!(entries(&state.state_root)?, vec!["schemas".to_string()]);
         Ok(())
     }
@@ -602,9 +602,9 @@ mod tests {
         // generated schemas out of every build archive.
         let project = project()?;
         let generated = generate_schemas(project.path())?;
-        let staged = project
-            .path()
-            .join(phoxal_cli_core::project::launch_plan::RUNTIME_BUNDLE_ROOT_RELATIVE);
+        let staged = phoxal_cli_host::paths::RuntimePaths::for_root(project.path())
+            .state_root
+            .join("bundle");
         assert_eq!(generated.schema_dir.parent(), staged.parent());
         assert_ne!(generated.schema_dir, staged);
         Ok(())

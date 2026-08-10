@@ -1,17 +1,21 @@
 //! Simulation participant and substitution projections.
 
+use crate::check as graph_check;
+use crate::check::source::SourceParticipant;
+use crate::source::resolver::BundlePlan;
 use crate::validation::extract_participant_report_from_staged_runtime;
 use crate::validation::source_participants_from_resolved_with_drivers;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use phoxal_cli_core::check as graph_check;
-use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::project::launch_plan::SIMULATOR_CONTROLLER_ARTIFACT_NAME;
-use phoxal_cli_core::project::launch_plan::simulator_controller_provider_id;
-use phoxal_cli_core::project::resolver::BundlePlan;
 use std::path::Path;
+
+pub(crate) const SIMULATOR_CONTROLLER_ARTIFACT_NAME: &str = "webots-controller";
+
+fn simulator_controller_provider_id(robot_id: &str) -> String {
+    format!("simulator-webots-controller-{robot_id}")
+}
 
 pub(crate) fn official_simulator_participants(
     prepared_root: &Path,
@@ -81,7 +85,7 @@ pub(crate) fn remap_simulator_participant_ids(
 }
 
 /// Map the resolved Webots controller artifact to its compile-time graph id.
-/// This identity never becomes a resident launch-plan or board row.
+/// This identity never becomes a supervisor launch-plan or board row.
 pub(crate) fn simulator_participant_id_for_resolved_artifact(
     artifact_name: &str,
     robot_id: &str,
@@ -111,7 +115,7 @@ pub(crate) fn sim_source_participants(
 
 fn retain_simulation_sources(participants: &mut Vec<SourceParticipant>) {
     participants.retain(|participant| {
-        use phoxal_cli_core::check::source::SourceParticipantKind;
+        use crate::check::source::SourceParticipantKind;
         match participant.kind {
             SourceParticipantKind::Simulator => {
                 participant.expected_artifact_id == SIMULATOR_CONTROLLER_ARTIFACT_NAME

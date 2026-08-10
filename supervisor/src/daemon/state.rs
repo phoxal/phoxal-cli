@@ -1,14 +1,7 @@
 //! The daemon's authoritative execution state.
 //!
-//! Two authorities sit behind one value here, deliberately:
-//!
-//! - the internal [`SupervisorState`] store, which the process machinery
-//!   writes to on every spawn, exit, and liveliness token;
-//! - the daemon's own facts - the robot identity, the execution mode, the
-//!   startup sequence, and the typed daemon failure - which no process
-//!   observation can produce.
-//!
-//! Every change to either republishes one complete snapshot at the next
+//! Process observations and daemon lifecycle facts are projected through this
+//! single publication authority. Every accepted change republishes one complete snapshot at the next
 //! revision. `revision` is monotonic within the execution and is assigned here,
 //! at the single publication point, so a client that keeps the highest revision
 //! it has seen can never install an older document over a newer one.
@@ -24,13 +17,11 @@ use phoxal_supervisor_api::{
 use tokio::sync::watch;
 
 use super::projection::{ExecutionFacts, project};
-use crate::SupervisorState;
+use crate::state::store::SupervisorState;
 
 /// The daemon's startup sequence, in the order `phoxald` performs it.
-const STARTUP_SEQUENCE: [StartupStepKind; 5] = [
+const STARTUP_SEQUENCE: [StartupStepKind; 3] = [
     StartupStepKind::Bundle,
-    StartupStepKind::Requirements,
-    StartupStepKind::Binaries,
     StartupStepKind::Router,
     StartupStepKind::Participants,
 ];
@@ -43,10 +34,8 @@ pub(crate) struct ExecutionState {
 }
 
 struct Inner {
-    facts: Mutex<ExecutionFacts>,
-    startup: Mutex<Vec<StartupStep>>,
-    started: Mutex<Vec<(StartupStepKind, Instant)>>,
-    failure: Mutex<Option<DaemonFailure>>,
+    board: SupervisorState,
+    data: Mutex<ExecutionData>,
     revision: AtomicU64,
     published: watch::Sender<Snapshot>,
     /// Held across "take the next revision" *and* "publish it", so two
@@ -55,10 +44,16 @@ struct Inner {
     publication: Mutex<()>,
 }
 
+struct ExecutionData {
+    facts: ExecutionFacts,
+    startup: Vec<StartupStep>,
+    started: Vec<(StartupStepKind, Instant)>,
+    failure: Option<DaemonFailure>,
+}
+
 impl ExecutionState {
-    /// Start an execution's state from the facts known before the bundle is
-    /// even read: nothing has been validated yet, so the identity and mode are
-    /// placeholders the loader replaces through [`Self::identify`].
+    /// Start an execution from its persisted participant roster before any
+    /// startup step has begun.
     pub(crate) fn new(board: SupervisorState, facts: ExecutionFacts) -> Self {
         let startup: Vec<_> = STARTUP_SEQUENCE
             .into_iter()
@@ -71,18 +66,25 @@ impl ExecutionState {
             .collect();
         let initial = project(0, &facts, &startup, None, &board.snapshot());
         let (published, _) = watch::channel(initial);
-        Self {
-            board,
-            inner: Arc::new(Inner {
-                facts: Mutex::new(facts),
-                startup: Mutex::new(startup),
-                started: Mutex::new(Vec::new()),
-                failure: Mutex::new(None),
-                revision: AtomicU64::new(0),
-                published,
-                publication: Mutex::new(()),
+        let inner = Arc::new(Inner {
+            board: board.clone(),
+            data: Mutex::new(ExecutionData {
+                facts,
+                startup,
+                started: Vec::new(),
+                failure: None,
             }),
-        }
+            revision: AtomicU64::new(0),
+            published,
+            publication: Mutex::new(()),
+        });
+        let weak = Arc::downgrade(&inner);
+        board.publish_with(move |_| {
+            if let Some(inner) = weak.upgrade() {
+                Self::publish(&inner);
+            }
+        });
+        Self { board, inner }
     }
 
     pub(crate) fn board(&self) -> &SupervisorState {
@@ -100,32 +102,15 @@ impl ExecutionState {
         self.inner.published.subscribe()
     }
 
-    /// The stable authored robot identity, as the connect reply advertises it.
-    pub(crate) fn robot(&self) -> phoxal_supervisor_api::RobotIdentity {
-        self.facts_lock().robot.clone()
-    }
-
-    /// The finalized manifest's `clock:` field, passed through untouched.
-    pub(crate) fn mode(&self) -> phoxal_supervisor_api::ExecutionMode {
-        self.facts_lock().mode
-    }
-
     /// The selected process set, for resolving a command's target.
     pub(crate) fn roster(&self) -> super::roster::Roster {
-        self.facts_lock().roster.clone()
-    }
-
-    /// Adopt the identity and mode the finalized manifest declares, together
-    /// with the selected process set derived from it.
-    pub(crate) fn identify(&self, facts: ExecutionFacts) {
-        *self.facts_lock() = facts;
-        self.republish();
+        self.data_lock().facts.roster.clone()
     }
 
     pub(crate) fn step_active(&self, kind: StartupStepKind) {
         {
-            let mut startup = self.startup_lock();
-            let Some(step) = startup.iter_mut().find(|step| step.kind == kind) else {
+            let mut data = self.data_lock();
+            let Some(step) = data.startup.iter_mut().find(|step| step.kind == kind) else {
                 return;
             };
             if step.state == StartupStepState::Active {
@@ -133,15 +118,15 @@ impl ExecutionState {
             }
             step.state = StartupStepState::Active;
             step.elapsed_ms = None;
-            self.started_lock().push((kind, Instant::now()));
+            data.started.push((kind, Instant::now()));
         }
         self.republish();
     }
 
     pub(crate) fn step_detail(&self, kind: StartupStepKind, detail: impl AsRef<str>) {
         {
-            let mut startup = self.startup_lock();
-            let Some(step) = startup.iter_mut().find(|step| step.kind == kind) else {
+            let mut data = self.data_lock();
+            let Some(step) = data.startup.iter_mut().find(|step| step.kind == kind) else {
                 return;
             };
             step.detail = Some(Detail::new(detail));
@@ -157,19 +142,16 @@ impl ExecutionState {
         self.finish_step(
             kind,
             StartupStepState::Failed,
-            Some(Detail::new(detail.as_ref())),
+            Some(detail.as_ref().to_string()),
         );
     }
 
-    fn finish_step(&self, kind: StartupStepKind, state: StartupStepState, detail: Option<Detail>) {
+    fn finish_step(&self, kind: StartupStepKind, state: StartupStepState, detail: Option<String>) {
         {
-            let elapsed = {
-                let mut started = self.started_lock();
-                let position = started.iter().position(|(step, _)| *step == kind);
-                position.map(|position| started.remove(position).1.elapsed())
-            };
-            let mut startup = self.startup_lock();
-            let Some(step) = startup.iter_mut().find(|step| step.kind == kind) else {
+            let mut data = self.data_lock();
+            let position = data.started.iter().position(|(step, _)| *step == kind);
+            let elapsed = position.map(|position| data.started.remove(position).1.elapsed());
+            let Some(step) = data.startup.iter_mut().find(|step| step.kind == kind) else {
                 return;
             };
             if step.state == state {
@@ -177,7 +159,7 @@ impl ExecutionState {
             }
             step.state = state;
             if let Some(detail) = detail {
-                step.detail = Some(detail);
+                step.detail = Some(Detail::new(detail));
             }
             step.elapsed_ms = elapsed
                 .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
@@ -195,21 +177,18 @@ impl ExecutionState {
     pub(crate) fn fail(&self, reason: DaemonFailureReason, detail: impl AsRef<str>) {
         let detail = detail.as_ref();
         {
-            let mut failure = self.failure_lock();
-            if failure.is_none() {
-                *failure = Some(DaemonFailure {
-                    reason,
-                    detail: Detail::new(detail),
-                });
+            let mut data = self.data_lock();
+            if data.failure.is_none() {
+                data.failure = Some(DaemonFailure::new(reason, detail));
             }
         }
-        // Publishes on its own, which the bridge turns into one republication.
+        // The store invokes the one publication callback after atomically
+        // applying the lifecycle failure.
         self.board.fail(detail);
-        self.republish();
     }
 
     pub(crate) fn failure(&self) -> Option<DaemonFailure> {
-        self.failure_lock().clone()
+        self.data_lock().failure.clone()
     }
 
     /// Rebuild and publish one complete snapshot at the next revision.
@@ -219,60 +198,36 @@ impl ExecutionState {
     /// them in the other order, leaving the watch channel - and therefore every
     /// attached client's `current` answer - resting on revision 4 forever.
     pub(crate) fn republish(&self) {
-        let _publication = self
-            .inner
+        Self::publish(&self.inner);
+    }
+
+    fn publish(inner: &Inner) {
+        let _publication = inner
             .publication
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let revision = self.inner.revision.fetch_add(1, Ordering::SeqCst) + 1;
+        // Read the authoritative board only after publication is serialized.
+        // Otherwise a delayed callback could assign a newer revision to an
+        // older clone and make clients retain stale state.
+        let board = inner.board.snapshot();
+        let revision = inner.revision.fetch_add(1, Ordering::SeqCst) + 1;
+        let data = inner
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let snapshot = project(
             revision,
-            &self.facts_lock(),
-            &self.startup_lock(),
-            self.failure_lock().as_ref(),
-            &self.board.snapshot(),
+            &data.facts,
+            &data.startup,
+            data.failure.as_ref(),
+            &board,
         );
-        self.inner.published.send_replace(snapshot);
+        inner.published.send_replace(snapshot);
     }
 
-    /// Republish whenever the internal store changes, so a process spawning,
-    /// exiting, or being proved ready reaches attached clients without every
-    /// call site in the process machinery knowing this type exists.
-    pub(crate) fn bridge_store_changes(&self) -> tokio::task::JoinHandle<()> {
-        let state = self.clone();
-        let mut changes = self.board.subscribe();
-        tokio::spawn(async move {
-            while changes.changed().await.is_ok() {
-                changes.borrow_and_update();
-                state.republish();
-            }
-        })
-    }
-
-    fn facts_lock(&self) -> std::sync::MutexGuard<'_, ExecutionFacts> {
+    fn data_lock(&self) -> std::sync::MutexGuard<'_, ExecutionData> {
         self.inner
-            .facts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn startup_lock(&self) -> std::sync::MutexGuard<'_, Vec<StartupStep>> {
-        self.inner
-            .startup
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn started_lock(&self) -> std::sync::MutexGuard<'_, Vec<(StartupStepKind, Instant)>> {
-        self.inner
-            .started
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn failure_lock(&self) -> std::sync::MutexGuard<'_, Option<DaemonFailure>> {
-        self.inner
-            .failure
+            .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -280,21 +235,14 @@ impl ExecutionState {
 
 #[cfg(test)]
 mod tests {
-    use phoxal_supervisor_api::{ExecutionMode, Name, RobotIdentity};
-
     use super::*;
-    use crate::daemon::roster::tests::roster;
+    use crate::daemon::roster::Roster;
 
     fn state() -> ExecutionState {
         ExecutionState::new(
             SupervisorState::new(),
             ExecutionFacts {
-                robot: RobotIdentity {
-                    id: Name::new("rover"),
-                    namespace: Name::new("demo"),
-                },
-                mode: ExecutionMode::Real,
-                roster: roster(),
+                roster: Roster::test_fixture(),
             },
         )
     }
@@ -362,25 +310,24 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_store_change_republishes_without_the_process_machinery_knowing_this_type() {
-        use phoxal_cli_core::runtime::{ParticipantKind, ProcessState, StartupRequirement};
+    #[test]
+    fn a_store_change_republishes_without_the_process_machinery_knowing_this_type() {
+        use crate::model::{ParticipantKind, ProcessState, StartupRequirement};
 
         let state = state();
-        let bridge = state.bridge_store_changes();
-        let mut published = state.subscribe();
+        let before = state.snapshot().revision;
         let brain = state
             .snapshot()
             .processes
             .first()
             .expect("a selected process")
-            .key
+            .participant
             .clone();
 
-        let core = roster()
+        let core = Roster::test_fixture()
             .resolve(&brain)
             .expect("the roster row")
-            .core
+            .key
             .clone();
         state.board().upsert_process(
             core.clone(),
@@ -389,19 +336,13 @@ mod tests {
             StartupRequirement::Required,
         );
 
-        // Republication is asynchronous, so wait for the value rather than
-        // assuming the bridge has already run.
-        loop {
-            published.changed().await.expect("the publisher stays open");
-            let snapshot = published.borrow_and_update().clone();
-            if snapshot
+        let snapshot = state.snapshot();
+        assert!(snapshot.revision > before);
+        assert!(
+            snapshot
                 .processes
                 .iter()
                 .any(|process| process.state == phoxal_supervisor_api::ProcessState::Ready)
-            {
-                break;
-            }
-        }
-        bridge.abort();
+        );
     }
 }

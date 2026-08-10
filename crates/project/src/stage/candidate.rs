@@ -24,20 +24,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::source::resolver::BundlePlan;
 use anyhow::{Context, Result, ensure};
-use phoxal_cli_core::project::intent::RunIntent;
-use phoxal_cli_core::project::layout::{ASSETS_DIR, BIN_DIR, ROBOT_FILE, ROUTER_CONFIG_ASSET};
-use phoxal_cli_core::project::resolver::BundlePlan;
-
-use super::finalize::{ROBOT_STRUCTURE_ASSET, finalize_manifest, render_finalized};
-
-/// The frozen files a component definition contributes to a bundle, beside its
-/// meshes. `simulation.yaml` is optional; the other two are not.
-const COMPONENT_DEFINITION_FILES: [(&str, bool); 3] = [
-    ("component.yaml", true),
-    ("structure.urdf", true),
-    ("simulation.yaml", false),
-];
+use phoxal_bundle::{ASSETS_DIR, BIN_DIR};
 
 /// An unpublished bundle candidate.
 pub(crate) struct StagedCandidate {
@@ -55,10 +44,8 @@ impl StagedCandidate {
 pub(crate) fn begin_runtime_layout(
     project_root: &Path,
     resolved: &BundlePlan,
-    intent: &RunIntent,
 ) -> Result<StagedCandidate> {
-    let live =
-        project_root.join(phoxal_cli_core::project::launch_plan::RUNTIME_BUNDLE_ROOT_RELATIVE);
+    let live = crate::paths::runtime::runtime_bundle_root(project_root);
     let parent = live
         .parent()
         .context("runtime bundle directory has no parent")?;
@@ -80,7 +67,7 @@ pub(crate) fn begin_runtime_layout(
             )
         })?;
 
-    stage_candidate(project_root, candidate.path(), resolved, intent)?;
+    stage_candidate(candidate.path(), resolved)?;
 
     Ok(StagedCandidate {
         dir: candidate,
@@ -88,16 +75,7 @@ pub(crate) fn begin_runtime_layout(
     })
 }
 
-fn stage_candidate(
-    project_root: &Path,
-    candidate: &Path,
-    resolved: &BundlePlan,
-    intent: &RunIntent,
-) -> Result<()> {
-    let finalized = finalize_manifest(&resolved.source_manifest, intent)?;
-    fs::write(candidate.join(ROBOT_FILE), render_finalized(&finalized)?)
-        .context("failed to write the finalized robot document")?;
-
+fn stage_candidate(candidate: &Path, resolved: &BundlePlan) -> Result<()> {
     let asset_root = candidate.join(ASSETS_DIR);
     fs::create_dir_all(&asset_root)
         .with_context(|| format!("failed to create {}", asset_root.display()))?;
@@ -105,48 +83,6 @@ fn stage_candidate(
     // The canonical model's logical assets: robot and component meshes.
     for (id, bytes) in &resolved.compiled.assets {
         write_asset(&asset_root, id.as_str(), bytes)?;
-    }
-
-    // The robot structure, at its deterministic bundle-relative location.
-    let structure = project_root.join(&resolved.source_manifest.robot.structure);
-    let structure_bytes = fs::read(&structure)
-        .with_context(|| format!("failed to read robot structure {}", structure.display()))?;
-    write_asset(&asset_root, ROBOT_STRUCTURE_ASSET, &structure_bytes)?;
-
-    // The frozen component definitions, keyed by component type so the loader
-    // derives their roots deterministically.
-    for component in &resolved.components {
-        let destination = format!("components/{}", component.source_name);
-        for (file, required) in COMPONENT_DEFINITION_FILES {
-            let source = component.assets_root.join(file);
-            if !source.is_file() {
-                ensure!(
-                    !required,
-                    "component type '{}' is missing {file} at {}",
-                    component.source_name,
-                    component.assets_root.display()
-                );
-                continue;
-            }
-            let bytes = fs::read(&source)
-                .with_context(|| format!("failed to read {}", source.display()))?;
-            write_asset(&asset_root, &format!("{destination}/{file}"), &bytes)?;
-        }
-    }
-
-    if let Some(source) = &resolved.source_manifest.router.config {
-        ensure!(
-            !source.as_os_str().is_empty()
-                && source
-                    .components()
-                    .all(|component| matches!(component, std::path::Component::Normal(_))),
-            "router.config must be a non-empty relative path without '.' or '..': {}",
-            source.display()
-        );
-        let source = project_root.join(source);
-        let bytes = fs::read(&source)
-            .with_context(|| format!("failed to read router config {}", source.display()))?;
-        write_asset(&asset_root, ROUTER_CONFIG_ASSET, &bytes)?;
     }
 
     fs::create_dir_all(candidate.join(BIN_DIR))
@@ -207,96 +143,12 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Materialize a complete finalized bundle at `root` from an authored
-/// `robot.yaml` body, so tests exercise the real loader against real staged
-/// files rather than a hand-assembled directory.
-///
-/// Every component type the document uses gets a minimal frozen definition;
-/// `simulated_types` additionally get a `simulation.yaml`, which is what makes a
-/// `clock: simulated` fixture coherent.
-#[cfg(test)]
-pub(crate) fn write_test_bundle(
-    root: &Path,
-    robot_yaml: &str,
-    intent: &RunIntent,
-    simulated_types: &[&str],
-) -> Result<()> {
-    let source = tempfile::tempdir()?;
-    let phoxal_manifest::source::robot::Manifest::V0(authored) =
-        phoxal_manifest::source::robot::parse_from_string(robot_yaml)?;
-    fs::write(source.path().join("robot.yaml"), robot_yaml)?;
-    let structure = source.path().join(&authored.robot.structure);
-    if let Some(parent) = structure.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        &structure,
-        r#"<robot name="fixture"><link name="base_footprint"/><link name="base_link"/><link name="base"/><joint name="root" type="fixed"><parent link="base_footprint"/><child link="base_link"/></joint><joint name="base_mount" type="fixed"><parent link="base_link"/><child link="base"/></joint></robot>"#,
-    )?;
-    let mut component_roots = std::collections::BTreeMap::new();
-    for component_type in authored.used_component_types() {
-        let component_root = source.path().join("components").join(component_type);
-        fs::create_dir_all(&component_root)?;
-        fs::write(
-            component_root.join("component.yaml"),
-            "schema: phoxal/component/v0\ncapabilities:\n  motor:\n    kind: motor\n    command: velocity\n    target:\n      kind: joint\n      id: wheel_joint\n",
-        )?;
-        fs::write(
-            component_root.join("structure.urdf"),
-            r#"<robot name="component"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
-        )?;
-        if simulated_types.contains(&component_type) {
-            fs::write(
-                component_root.join("simulation.yaml"),
-                "schema: phoxal/simulation/v0\ncapabilities: {}\n",
-            )?;
-        }
-        component_roots.insert(component_type.to_string(), component_root);
-    }
-    let compiled = phoxal_cli_core::project::resolver::CompiledBundle::from_project(
-        phoxal_manifest::compile(phoxal_manifest::SourceSet {
-            project_root: source.path().to_path_buf(),
-            robot_manifest: source.path().join("robot.yaml"),
-            component_roots: component_roots.clone(),
-        })?,
-    );
-    let resolved = BundlePlan {
-        source_manifest: authored,
-        compiled,
-        train: "0.54.0".to_string(),
-        target: crate::resolve::project::host_target_triple(),
-        brain: phoxal_cli_core::project::resolver::ResolvedBrain {
-            crate_dir: source.path().to_path_buf(),
-            package: "fixture-robot".to_string(),
-            bin_target: "fixture-robot".to_string(),
-        },
-        platform_runtimes: Vec::new(),
-        simulators: Vec::new(),
-        user_runtimes: Vec::new(),
-        undeclared_runtimes: Vec::new(),
-        components: component_roots
-            .iter()
-            .map(|(component_type, assets_root)| {
-                phoxal_cli_core::project::resolver::ResolvedComponent {
-                    instance: component_type.clone(),
-                    source_name: component_type.clone(),
-                    assets_root: assets_root.clone(),
-                    driver: None,
-                }
-            })
-            .collect(),
-        path_overrides: Vec::new(),
-    };
-    fs::create_dir_all(root)?;
-    stage_candidate(source.path(), root, &resolved, intent)
-}
-
 /// Compile a minimal real project into a [`CompiledBundle`], for fixtures that
 /// need a plausible compiler output without staging a whole bundle.
 #[cfg(test)]
 pub(crate) fn compile_test_bundle(
     source_manifest: &phoxal_manifest::source::robot::v0::Manifest,
-) -> Result<phoxal_cli_core::project::resolver::CompiledBundle> {
+) -> Result<crate::source::resolver::CompiledBundle> {
     let source = tempfile::tempdir()?;
     let component = source.path().join("components/wheel");
     fs::create_dir_all(&component)?;
@@ -305,7 +157,6 @@ pub(crate) fn compile_test_bundle(
         r#"schema: phoxal/robot/v0
 robot:
   id: testbot
-  namespace: dev
   motion_limits:
     max_linear_speed_mps: 0.6
     max_angular_speed_radps: 2.0
@@ -333,171 +184,19 @@ robot:
         component.join("structure.urdf"),
         r#"<robot name="wheel"><link name="base"/><link name="wheel"/><joint name="wheel_joint" type="continuous"><parent link="base"/><child link="wheel"/></joint></robot>"#,
     )?;
-    let mut bundle = phoxal_cli_core::project::resolver::CompiledBundle::from_project(
-        phoxal_manifest::compile(phoxal_manifest::SourceSet {
+    let mut fixture = crate::source::resolver::parse_robot_from_string(&fs::read_to_string(
+        source.path().join("robot.yaml"),
+    )?)?;
+    fixture.clock = source_manifest.clock;
+    fixture.services = source_manifest.services.clone();
+    phoxal_manifest::source::robot::Manifest::V0(fixture).write_to_dir(source.path())?;
+    let bundle = crate::source::resolver::CompiledBundle::from_project(
+        phoxal_manifest::SourceSet {
             project_root: source.path().to_path_buf(),
             robot_manifest: source.path().join("robot.yaml"),
             component_roots: std::collections::BTreeMap::from([("wheel".to_string(), component)]),
-        })?,
+        }
+        .compile()?,
     );
-    bundle.participants = source_manifest
-        .services
-        .iter()
-        .map(|(id, service)| phoxal_manifest::Participant {
-            id: id.clone(),
-            kind: phoxal_manifest::ParticipantKind::Service,
-            component_instance: None,
-            config: service.config.clone(),
-        })
-        .collect();
     Ok(bundle)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use phoxal_cli_core::project::intent::DriverSelection;
-    use phoxal_cli_core::project::layout::RuntimeLayout;
-    use phoxal_cli_core::project::requirements::RequiredParticipantKind;
-    use std::collections::BTreeSet;
-
-    const DRIVEN: &str = r#"schema: phoxal/robot/v0
-robot:
-  id: testbot
-  namespace: dev
-  motion_limits:
-    max_linear_speed_mps: 0.6
-    max_angular_speed_radps: 2.0
-  kinematic:
-    kind: omnidirectional
-    actuators:
-      - left_drive.motor
-    encoders: []
-  components:
-    left_drive:
-      component: ddsm115
-      mount_link: base
-      driver:
-        connection:
-          type: serial
-          port: /dev/ttyUSB0
-          baud: 115200
-    right_drive:
-      component: ddsm115
-      mount_link: base
-      driver:
-        connection:
-          type: serial
-          port: /dev/ttyUSB1
-          baud: 115200
-"#;
-
-    fn files(root: &Path) -> BTreeSet<String> {
-        fn walk(root: &Path, dir: &Path, out: &mut BTreeSet<String>) {
-            for entry in fs::read_dir(dir).expect("read staged directory") {
-                let path = entry.expect("read staged entry").path();
-                if path.is_dir() {
-                    walk(root, &path, out);
-                } else {
-                    out.insert(
-                        path.strip_prefix(root)
-                            .expect("staged file is below the bundle root")
-                            .to_string_lossy()
-                            .replace('\\', "/"),
-                    );
-                }
-            }
-        }
-        let mut out = BTreeSet::new();
-        walk(root, root, &mut out);
-        out
-    }
-
-    /// The bundle root is exactly one persisted robot definition, the frozen
-    /// assets, and `bin/` - no `robot.json`, no `participants.json`, no
-    /// `runtime.json`, and no authored source layout.
-    #[test]
-    fn a_published_bundle_has_exactly_the_finalized_shape() -> Result<()> {
-        let bundle = tempfile::tempdir()?;
-        write_test_bundle(bundle.path(), DRIVEN, &RunIntent::default(), &[])?;
-        assert_eq!(
-            files(bundle.path()),
-            BTreeSet::from([
-                "assets/components/ddsm115/component.yaml".to_string(),
-                "assets/components/ddsm115/structure.urdf".to_string(),
-                "assets/robot/structure.urdf".to_string(),
-                "robot.yaml".to_string(),
-            ])
-        );
-        for descriptor in [
-            "robot.json",
-            "assets/participants.json",
-            "assets/runtime.json",
-        ] {
-            assert!(
-                !bundle.path().join(descriptor).exists(),
-                "the old descriptor {descriptor} must not exist"
-            );
-        }
-        Ok(())
-    }
-
-    /// A stripped driver is absent from the finalized manifest, is never
-    /// derived as a requirement, and therefore never has a `bin/` entry to
-    /// resolve or inspect: exclusion is enforced once, by the document.
-    #[test]
-    fn a_stripped_driver_is_absent_from_the_manifest_and_the_requirements() -> Result<()> {
-        let bundle = tempfile::tempdir()?;
-        write_test_bundle(
-            bundle.path(),
-            DRIVEN,
-            &RunIntent::real(DriverSelection::Only(
-                ["left_drive".to_string()].into_iter().collect(),
-            )),
-            &[],
-        )?;
-        let document = fs::read_to_string(bundle.path().join(ROBOT_FILE))?;
-        assert!(document.contains("ttyUSB0"), "{document}");
-        assert!(!document.contains("ttyUSB1"), "{document}");
-
-        let layout = RuntimeLayout::open(bundle.path())?;
-        let drivers = layout
-            .requirements()
-            .participants
-            .iter()
-            .filter(|participant| participant.kind == RequiredParticipantKind::ComponentDriver)
-            .map(|participant| participant.participant_id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(drivers, vec!["left_drive"]);
-        Ok(())
-    }
-
-    /// Nothing between staging and publication touches the live bundle: the
-    /// candidate is a sibling directory, and a candidate that is dropped
-    /// instead of published leaves the previous bundle byte-identical.
-    #[test]
-    fn a_discarded_candidate_never_touches_the_live_bundle() -> Result<()> {
-        let project = tempfile::tempdir()?;
-        let live = project
-            .path()
-            .join(phoxal_cli_core::project::launch_plan::RUNTIME_BUNDLE_ROOT_RELATIVE);
-        write_test_bundle(&live, DRIVEN, &RunIntent::default(), &[])?;
-        let published = fs::read(live.join(ROBOT_FILE))?;
-
-        let candidate = tempfile::Builder::new()
-            .prefix(".bundle-candidate-")
-            .tempdir_in(live.parent().context("bundle has a parent")?)?;
-        write_test_bundle(
-            candidate.path(),
-            DRIVEN,
-            &RunIntent::simulated(),
-            &["ddsm115"],
-        )?;
-        // The candidate really does differ, or this proves nothing.
-        assert_ne!(fs::read(candidate.path().join(ROBOT_FILE))?, published);
-        drop(candidate);
-
-        assert_eq!(fs::read(live.join(ROBOT_FILE))?, published);
-        Ok(())
-    }
 }

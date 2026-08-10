@@ -1,42 +1,54 @@
 //! Ordered participant startup and readiness barriers.
 
-use super::{ParticipantSpec, RunningParticipant, SupervisorOptions, SupervisorState};
+use super::participant::RunningParticipant;
+use super::spec::SupervisorOptions;
+use crate::model::{
+    ParticipantSpec, ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement,
+};
+use crate::state::store::SupervisorState;
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::runtime::{ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::time::MissedTickBehavior;
 
-/// Build the ordered resident startup stages for a physical run.
-pub fn stages_for_run(
-    specs: Vec<ParticipantSpec>,
-    timeout: crate::WaitBudget,
-) -> Vec<SupervisionStage> {
-    let mut infrastructure = Vec::new();
-    let mut graph = Vec::new();
-    for spec in specs {
-        match spec.kind {
-            phoxal_cli_core::runtime::ParticipantKind::Host => infrastructure.push(spec),
-            phoxal_cli_core::runtime::ParticipantKind::Brain
-            | phoxal_cli_core::runtime::ParticipantKind::Driver
-            | phoxal_cli_core::runtime::ParticipantKind::Service
-            | phoxal_cli_core::runtime::ParticipantKind::Simulator => graph.push(spec),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaitBudget {
+    Unbounded,
+    Bounded(Duration),
+}
+
+impl Default for WaitBudget {
+    fn default() -> Self {
+        Self::Bounded(Duration::default())
+    }
+}
+
+impl WaitBudget {
+    fn deadline_from(self, now: Instant) -> Option<Instant> {
+        match self {
+            Self::Unbounded => None,
+            Self::Bounded(duration) => Some(now + duration),
         }
     }
-    vec![
-        SupervisionStage::new("starting project infrastructure", infrastructure, timeout),
-        SupervisionStage::new("starting robot graph", graph, timeout),
-    ]
+}
+
+/// Build the participant startup barrier for a physical run.
+pub fn stages_for_run(specs: Vec<ParticipantSpec>, timeout: WaitBudget) -> Vec<SupervisionStage> {
+    vec![SupervisionStage::new(
+        SupervisionStageKind::Graph,
+        specs,
+        timeout,
+    )]
 }
 
 /// How supervision reports stage progress to whoever owns the startup
 /// sequence.
 ///
 /// The store is not that owner: the startup sequence a client renders is the
-/// daemon's own (bundle, requirements, binaries, router, participants), and
+/// daemon's own (bundle, router, participants), and
 /// this loop only ever advances its last step. Keeping it
 /// behind this handle is what lets the process machinery stay ignorant of the
 /// wire contract.
@@ -75,11 +87,22 @@ pub(crate) type StageReporter = Arc<dyn StageProgress>;
 
 /// A startup barrier containing process specs and board ids that must become
 /// ready before the next stage begins. Simulation clock is not a stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SupervisionStageKind {
+    Graph,
+}
+
+impl SupervisionStageKind {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Graph => "starting robot graph",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SupervisionStage {
-    /// Human-readable name for this stage, used in stalled-stage errors and
-    /// process spawn diagnostics. The typed startup step stays separate.
-    pub label: String,
+    pub(crate) kind: SupervisionStageKind,
     pub specs: Vec<ParticipantSpec>,
     /// Board ids that must be observed `Ready` before the next stage spawns:
     /// every spawned spec's own id that is a bus participant (see
@@ -89,21 +112,17 @@ pub struct SupervisionStage {
     /// Spawned processes whose terminal failure aborts this stage.
     pub failure_ids: Vec<ProcessKey>,
     pub optional_ids: Vec<ProcessKey>,
-    pub timeout: crate::WaitBudget,
+    pub timeout: WaitBudget,
 }
 
 impl SupervisionStage {
     #[must_use]
     pub fn new(
-        label: impl Into<String>,
+        kind: SupervisionStageKind,
         specs: Vec<ParticipantSpec>,
-        timeout: crate::WaitBudget,
+        timeout: WaitBudget,
     ) -> Self {
-        let ready_ids = specs
-            .iter()
-            .filter(|spec| spec.bus_participant)
-            .map(|spec| spec.key.clone())
-            .collect();
+        let ready_ids = specs.iter().map(|spec| spec.key.clone()).collect();
         let failure_ids = specs
             .iter()
             .filter(|spec| spec.startup_requirement == StartupRequirement::Required)
@@ -115,7 +134,7 @@ impl SupervisionStage {
             .map(|spec| spec.key.clone())
             .collect();
         Self {
-            label: label.into(),
+            kind,
             specs,
             ready_ids,
             failure_ids,
@@ -128,23 +147,28 @@ impl SupervisionStage {
 pub(crate) async fn spawn_participants_in_stage(
     running: &mut Vec<RunningParticipant>,
     board: &SupervisorState,
-    phase: &str,
+    stage: SupervisionStageKind,
     specs: Vec<ParticipantSpec>,
 ) {
     for spec in specs {
+        if !spec.spawn {
+            board.register_planned(&spec.key, spec.kind, spec.startup_requirement);
+            continue;
+        }
         let key = spec.key.clone();
         // Normal planning pre-registers every expected participant before the
         // observer starts. Keep this authoritative, idempotent registration at
         // the stage boundary for direct stage tests and defensive consistency;
         // unsolicited Liveliness and logs still cannot create board entries.
         board.register_planned(&key, spec.kind, spec.startup_requirement);
-        match RunningParticipant::spawn_in_phase(spec, board, phase).await {
+        match RunningParticipant::spawn_in_stage(spec, board, stage).await {
             Ok(participant) => running.push(participant),
             Err(error) => {
-                board.set_state(
+                board.record_failure(
                     &key,
-                    ProcessState::Failed,
-                    Some(format!("spawn failed: {error:#}")),
+                    crate::model::ProcessFailureKind::Spawn,
+                    None,
+                    format!("spawn failed: {error:#}"),
                 );
             }
         }
@@ -158,7 +182,7 @@ pub(crate) struct PendingStage {
     pub(crate) ready_ids: Vec<ProcessKey>,
     pub(crate) failure_ids: Vec<ProcessKey>,
     pub(crate) optional_ids: Vec<ProcessKey>,
-    /// `None` for an unbounded wait (Product decision 6/finding D2) - there is
+    /// `None` means an unbounded wait, so there is
     /// no `Instant` to ever compare against.
     pub(crate) deadline: Option<Instant>,
 }
@@ -172,18 +196,19 @@ pub(crate) async fn spawn_stage(
     stage: SupervisionStage,
 ) -> Option<PendingStage> {
     let SupervisionStage {
-        label,
+        kind,
         specs,
         ready_ids,
         failure_ids,
         optional_ids,
         timeout: stage_timeout,
     } = stage;
+    let label = kind.label().to_string();
     progress.started(&label);
     if specs.is_empty() && ready_ids.is_empty() {
         return None;
     }
-    spawn_participants_in_stage(running, board, &label, specs).await;
+    spawn_participants_in_stage(running, board, kind, specs).await;
     if ready_ids.is_empty() {
         return None;
     }
@@ -218,7 +243,7 @@ pub(crate) async fn await_stage_ready(
     ready_ids: &[ProcessKey],
     failure_ids: &[ProcessKey],
     optional_ids: &[ProcessKey],
-    budget: crate::WaitBudget,
+    budget: WaitBudget,
     poll_interval: Duration,
 ) -> Result<()> {
     if ready_ids.is_empty() {
@@ -253,19 +278,18 @@ pub(crate) async fn await_stage_ready(
         if missing.is_empty() {
             return Ok(());
         }
-        // `deadline` is `None` for an unbounded wait (Product decision 6) -
+        // `deadline` is `None` for an unbounded wait, so
         // there is nothing to ever compare `Instant::now()` against, so a
         // missing participant simply keeps waiting for as long as the
         // operator leaves the session open.
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            let waited = crate::format_duration(started.elapsed());
+            let waited = crate::model::format_duration(started.elapsed());
             for key in &missing {
-                board.set_state(
+                board.record_failure(
                     key,
-                    ProcessState::Failed,
-                    Some(format!(
-                        "stage readiness timed out after {waited}: never observed ready"
-                    )),
+                    crate::model::ProcessFailureKind::ReadinessTimeout,
+                    None,
+                    format!("stage readiness timed out after {waited}: never observed ready"),
                 );
             }
             if missing.iter().all(|key| optional_ids.contains(key)) {
@@ -309,61 +333,44 @@ pub(crate) async fn maybe_publish_startup_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_cli_core::runtime::{
-        ParticipantKind, ReadinessPolicy, RuntimeFailurePolicy, StartupRequirement,
-    };
+    use crate::model::{ParticipantKind, RuntimeFailurePolicy, StartupRequirement};
     use std::path::PathBuf;
 
     fn spec(id: &str, kind: ParticipantKind) -> ParticipantSpec {
         ParticipantSpec {
-            key: ProcessKey::project(id),
-            id: id.to_string(),
+            spawn: true,
+            key: phoxal_runtime_contract::identity::ParticipantId::new(id)
+                .expect("fixture participant")
+                .into(),
             kind,
             executable: PathBuf::from(id),
             args: Vec::new(),
-            cwd: None,
-            env: Vec::new(),
             shutdown_grace: Duration::from_secs(1),
-            process_group: false,
-            note: None,
-            bus_participant: true,
-            readiness: ReadinessPolicy::ProcessSpawned,
             startup_requirement: StartupRequirement::Required,
             runtime_failure: RuntimeFailurePolicy::StopProject,
             restart_policy: Default::default(),
         }
     }
 
-    /// The stage split is by kind: a host process is project infrastructure
-    /// and every graph participant - the mandatory root brain included
-    /// - waits behind it.
     #[test]
-    fn run_assigns_host_processes_to_infrastructure_and_every_participant_to_the_graph() {
+    fn run_places_every_compiled_participant_in_one_graph_barrier() {
         let stages = stages_for_run(
             vec![
-                spec("webots", ParticipantKind::Host),
                 spec("brain", ParticipantKind::Brain),
                 spec("service", ParticipantKind::Service),
+                spec("webots", ParticipantKind::Simulator),
             ],
-            crate::WaitBudget::Unbounded,
+            WaitBudget::Unbounded,
         );
-        assert_eq!(stages[0].label, "starting project infrastructure");
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].kind.label(), "starting robot graph");
         assert_eq!(
             stages[0]
                 .specs
                 .iter()
-                .map(|spec| spec.id.as_str())
+                .map(|spec| spec.key.to_string())
                 .collect::<Vec<_>>(),
-            ["webots"]
-        );
-        assert_eq!(stages[1].label, "starting robot graph");
-        assert_eq!(
-            stages[1]
-                .specs
-                .iter()
-                .map(|spec| spec.id.as_str())
-                .collect::<Vec<_>>(),
-            ["brain", "service"]
+            ["brain", "service", "webots"]
         );
     }
 }

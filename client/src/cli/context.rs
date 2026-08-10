@@ -1,10 +1,10 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use crate::cli::Ui;
 use crate::cli::output::OutputContext;
+use crate::cli::output::Ui;
 use anyhow::Result;
-use phoxal_cli_core::Project;
+use phoxal_cli_project::source::Project;
 
 #[derive(Debug, Clone)]
 pub struct AppContext {

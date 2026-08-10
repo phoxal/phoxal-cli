@@ -46,8 +46,8 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
 /// Leave the session without touching the execution.
 ///
 /// In a simulation session there is nothing to leave behind: the client owns
-/// Webots, so detaching would strand a simulator with no operator
-///. `q` there means "end the session", which is a stop.
+/// Webots, so detaching would strand a simulator with no operator. `q` there
+/// means "end the session", which is a stop.
 fn detach(model: &mut AppModel) -> Vec<Effect> {
     if !model.detachable {
         return request_stop(model);
@@ -98,7 +98,7 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
             // snapshot at all. `reason` is deliberately `None` here - a
             // transport loss is not a supervisor-reported cause, so the
             // caller falls through to its own supervisor.log pointer instead
-            // of surfacing this transport-level text as if the resident had
+            // of surfacing this transport-level text as if the supervisor had
             // explained itself.
             if matches!(
                 &connection,
@@ -155,12 +155,6 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
                 return Vec::new();
             }
             model.overview.source_health = Some(health);
-            Vec::new()
-        }
-        AttachmentEvent::FreshnessChanged { epoch, values } => {
-            if model.epoch == Some(epoch) {
-                model.overview.freshness = values;
-            }
             Vec::new()
         }
         AttachmentEvent::LogsChanged(changed) => invalidate_logs(model, changed),
@@ -330,7 +324,7 @@ fn accept_runtimes(
     }
     let mut newest_rows = BTreeMap::<String, RuntimeRow>::new();
     for row in window.rows.iter() {
-        newest_rows.insert(row.sample.participant_id.clone(), row.clone());
+        newest_rows.insert(row.sample.participant_id().to_string(), row.clone());
     }
     model.runtimes.rows = newest_rows.into_values().collect();
     model.runtimes.known_revision = window.revision;
@@ -340,13 +334,8 @@ fn accept_runtimes(
 
 /// The participant id a supervisor log or telemetry record is stamped with,
 /// for the process key that denotes the same participant.
-fn participant_id(key: &phoxal_supervisor_api::ProcessKey) -> String {
-    use phoxal_supervisor_api::ProcessKey;
-    match key {
-        ProcessKey::Brain => "brain".to_string(),
-        ProcessKey::Service { id } | ProcessKey::Simulator { id } => id.as_str().to_string(),
-        ProcessKey::Driver { instance } => instance.as_str().to_string(),
-    }
+fn participant_id(key: &phoxal_runtime_contract::identity::ParticipantId) -> String {
+    key.to_string()
 }
 
 fn non_empty(value: &str) -> Option<String> {
@@ -694,11 +683,11 @@ fn handle_input_key(model: &mut AppModel, panel: InputPanelId, key: KeyEvent) ->
         .as_ref()
         .map(|observation| observation.joypads.available.clone())
         .unwrap_or_default();
-    let input_fresh = model
-        .overview
-        .freshness
-        .get("input")
-        .is_none_or(|freshness| *freshness == phoxal_cli_observation::Freshness::Fresh);
+    let input_fresh = model.overview.source_health.as_ref().and_then(|health| {
+        health
+            .sources
+            .get(&phoxal_cli_observation::ObservationSource::Input)
+    }) != Some(&phoxal_cli_observation::SourceStatus::Failed);
     match key.code {
         Key::Up => move_device_candidate(&mut model.input, &devices, -1),
         Key::Down => move_device_candidate(&mut model.input, &devices, 1),
@@ -794,16 +783,16 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use phoxal_cli_core::identity::ExecutionId;
     use phoxal_cli_observation::{
-        AttachmentEpoch, AttachmentEvent, Freshness, InputObservation, JoypadDevice,
-        JoypadDeviceStatus, JoypadDevicesSample, LogSeverity, LogSource, LogWindow,
-        ObservationWindow, ProcessObservation, SupervisorObservation,
+        AttachmentEpoch, AttachmentEvent, InputObservation, JoypadDevice, JoypadDeviceStatus,
+        JoypadDevicesSample, LogSeverity, LogSource, LogWindow, ObservationWindow,
+        ProcessObservation, SupervisorObservation,
     };
-    use phoxal_runtime_contract::ProducerId;
+    use phoxal_runtime_contract::identity::ExecutionId;
+    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
     use phoxal_supervisor_api::{
-        DaemonFailure, DaemonFailureReason, DesiredState, Detail, ExecutionMode, Name, Process,
-        ProcessKey, ProcessState, RobotIdentity, StartupRequirement,
+        Clock, DaemonFailure, DaemonFailureReason, DesiredState, Detail, Process, ProcessState,
+        RobotId,
     };
 
     use super::*;
@@ -976,13 +965,10 @@ mod tests {
     }
 
     /// Every row in the snapshot is a supervised participant, so the split is
-    /// "came from the graph" versus "came from the supervisor or this client"
-    ///.
+    /// "came from the graph" versus "came from the supervisor or this client".
     #[test]
     fn log_source_filter_separates_supervised_participants_from_everything_else() {
-        let runtime_key = ProcessKey::Service {
-            id: Name::new("drive"),
-        };
+        let runtime_key = ParticipantId::new("drive").expect("fixture participant");
         let processes = BTreeMap::from([(runtime_key.clone(), process(runtime_key))]);
         let row = |participant: &str| LogRow {
             participant: participant.to_string(),
@@ -1142,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_resident_is_distinct_from_a_clean_stop() {
+    fn failed_execution_is_distinct_from_a_clean_stop() {
         let mut model = AppModel::default();
         update(
             &mut model,
@@ -1211,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn permanently_lost_resident_is_a_failed_outcome_with_no_supervisor_reason() {
+    fn permanently_lost_execution_is_a_failed_outcome_with_no_supervisor_reason() {
         let mut model = AppModel::default();
         update(
             &mut model,
@@ -1258,12 +1244,8 @@ mod tests {
 
     #[test]
     fn runtime_candidate_tracks_identity_and_never_retargets_a_removed_row() {
-        let alpha = ProcessKey::Service {
-            id: Name::new("alpha"),
-        };
-        let beta = ProcessKey::Service {
-            id: Name::new("beta"),
-        };
+        let alpha = ParticipantId::new("alpha").expect("fixture participant");
+        let beta = ParticipantId::new("beta").expect("fixture participant");
         let mut processes = BTreeMap::from([
             (alpha.clone(), process(alpha.clone())),
             (beta.clone(), process(beta.clone())),
@@ -1304,9 +1286,7 @@ mod tests {
     /// detail view is cleared and the widened read is re-issued.
     #[test]
     fn runtime_detail_clears_and_requeries_when_the_process_leaves_the_snapshot() {
-        let key = ProcessKey::Service {
-            id: Name::new("drive"),
-        };
+        let key = ParticipantId::new("drive").expect("fixture participant");
         let mut model = AppModel {
             epoch: Some(epoch()),
             ..AppModel::default()
@@ -1330,9 +1310,7 @@ mod tests {
 
     #[test]
     fn restart_without_a_live_producer_is_a_visible_diagnostic() {
-        let key = ProcessKey::Service {
-            id: Name::new("drive"),
-        };
+        let key = ParticipantId::new("drive").expect("fixture participant");
         let mut process = process(key.clone());
         process.row.producer = None;
         let mut model = AppModel {
@@ -1354,9 +1332,7 @@ mod tests {
 
     #[test]
     fn runtime_log_jump_resets_every_stale_filter_and_pause() {
-        let key = ProcessKey::Service {
-            id: Name::new("drive"),
-        };
+        let key = ParticipantId::new("drive").expect("fixture participant");
         let mut model = AppModel {
             route: FocusRoute::Content {
                 panel: PanelId::Runtimes(RuntimesPanelId::Processes),
@@ -1386,9 +1362,7 @@ mod tests {
     /// participant id is its component instance - so the query carries the
     /// instance, not the rendered key.
     fn runtime_detail_queries_use_the_participant_id_and_clear_on_escape() {
-        let key = ProcessKey::Driver {
-            instance: Name::new("base"),
-        };
+        let key = ParticipantId::new("base").expect("fixture participant");
         let mut model = AppModel {
             epoch: Some(epoch()),
             route: FocusRoute::Content {
@@ -1479,10 +1453,12 @@ mod tests {
             },
             ..AppModel::default()
         };
-        model
-            .overview
-            .freshness
-            .insert("input".to_string(), Freshness::Stale);
+        let mut health = phoxal_cli_observation::SourceHealth::default();
+        health.sources.insert(
+            phoxal_cli_observation::ObservationSource::Input,
+            phoxal_cli_observation::SourceStatus::Failed,
+        );
+        model.overview.source_health = Some(Arc::new(health));
         model
             .input
             .reconcile_authoritative(input_observation(Some("pad-a"), true));
@@ -1535,11 +1511,8 @@ mod tests {
         SupervisorObservation {
             revision: 1,
             execution: epoch().execution,
-            robot: RobotIdentity {
-                id: Name::new("testbot"),
-                namespace: Name::new("dev"),
-            },
-            mode: ExecutionMode::Real,
+            robot: RobotId::new("testbot").expect("fixture robot id"),
+            clock: Clock::Real,
             project: "/tmp/robot".to_string(),
             lifecycle,
             startup: Vec::new(),
@@ -1573,24 +1546,24 @@ mod tests {
         }
     }
 
-    fn process(key: ProcessKey) -> ProcessObservation {
+    fn process(participant: ParticipantId) -> ProcessObservation {
         ProcessObservation {
-            key: key.clone(),
             row: Process {
-                key,
+                participant,
+                kind: phoxal_runtime_contract::metadata::ParticipantKind::Service,
                 component: None,
-                startup: StartupRequirement::Required,
                 desired: DesiredState::Running,
                 state: ProcessState::Ready,
                 pid: Some(42),
-                producer: Some(ProducerId::try_from(0x2b).expect("fixture producer")),
+                producer: Some(
+                    ProducerId::try_from((1_u128 << 124) | 43).expect("fixture producer"),
+                ),
                 restarts: 0,
                 failure: None,
             },
-            state: ProcessState::Ready,
-            started_at: Instant::now(),
-            ended_at: None,
-            first_ready_at: Some(Instant::now()),
+            observed_started_at: Instant::now(),
+            observed_ended_at: None,
+            observed_first_ready_at: Some(Instant::now()),
         }
     }
 }

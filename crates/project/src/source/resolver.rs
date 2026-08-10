@@ -1,0 +1,379 @@
+//! Authored-manifest loading and project resolution records.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow, bail};
+use phoxal_manifest::CompiledProject;
+use phoxal_manifest::source::robot::v0::Manifest as Robot;
+use phoxal_model::AssetId;
+
+use phoxal_cli_catalog::ArtifactKind;
+
+const ROBOT_FILE: &str = "robot.yaml";
+
+pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
+    match kind {
+        ArtifactKind::ComponentDriver => format!("phoxal-component-{name}"),
+        ArtifactKind::Service | ArtifactKind::Simulator => {
+            format!("phoxal-{kind}-{name}")
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveOptions {
+    /// Override the official service/driver target triple. `build --target`
+    /// materializes for that triple instead of the host, so a robot graph can
+    /// be cross-compiled from a non-Linux host.
+    pub official_target_triple: Option<String>,
+    /// The component-driver instances resolution may resolve driver binaries
+    /// for. `run`'s driver policy threads through here so an excluded driver is
+    /// never resolved - not even to select its target artifact ().
+    /// Everything except driver-filtered supervisor staging resolves `All`.
+    pub drivers: super::intent::DriverSelection,
+    /// Whether simulator-only artifacts belong to this resolution.
+    ///
+    /// Host run/check/simulation paths keep them. A native runtime bundle does
+    /// not: simulators execute beside Webots on an operator host and are never
+    /// installed on the robot target.
+    pub include_simulators: bool,
+    /// Pass `--offline` to every Cargo/registry operation resolution makes.
+    /// `PHOXAL_OFFLINE` is a Phoxal-only env var Cargo does not
+    /// recognize, so this must be threaded explicitly from the caller's own
+    /// `--offline`/`AppContext::offline`, not read back from the
+    /// environment.
+    pub offline: bool,
+}
+
+impl Default for ResolveOptions {
+    fn default() -> Self {
+        Self {
+            official_target_triple: None,
+            drivers: super::intent::DriverSelection::default(),
+            include_simulators: true,
+            offline: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BundlePlan {
+    pub source_manifest: Robot,
+    /// The single canonical compiler output consumed by staging, launch
+    /// planning, and simulation. Source documents remain available only for
+    /// package resolution and CLI-owned settings such as router policy.
+    pub compiled: CompiledBundle,
+    pub train: String,
+    pub target: String,
+    /// The one mandatory root brain, discovered from the root Cargo package
+    /// (). Never optional and never registry-resolved: every
+    /// supported source project has exactly one.
+    pub brain: ResolvedBrain,
+    pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
+    pub simulators: Vec<ResolvedPlatformRuntime>,
+    pub user_runtimes: Vec<ResolvedUserRuntime>,
+    /// Workspace runtime crates present under `services/` but not declared in
+    /// robot.yaml (and not official-identity overrides). They are
+    /// not built or launched; graph validation and the staging summary
+    /// surface them as drift diagnostics ().
+    pub undeclared_runtimes: Vec<UndeclaredRuntime>,
+    pub components: Vec<ResolvedComponent>,
+    pub path_overrides: Vec<ResolvedPathOverride>,
+}
+
+/// The compiler output the CLI keeps in memory while it finalizes a bundle.
+///
+/// The canonical model is deliberately NOT persisted: a finalized bundle
+/// carries exactly one robot definition, the finalized `robot.yaml`, and the
+/// canonical [`phoxal_model::Robot`] is rebuilt from it in memory by the
+/// framework's own bundle loader. There is no `robot.json`.
+#[derive(Debug, Clone)]
+pub struct CompiledBundle {
+    pub robot: phoxal_model::Robot,
+    pub services: Vec<phoxal_manifest::CompiledService>,
+    pub drivers: Vec<phoxal_manifest::CompiledDriver>,
+    pub router: Option<phoxal_manifest::CompiledRouter>,
+    pub assets: BTreeMap<AssetId, Vec<u8>>,
+}
+
+impl CompiledBundle {
+    #[must_use]
+    pub fn from_project(project: CompiledProject) -> Self {
+        let (robot, services, drivers, router, assets) = project.into_parts();
+        Self {
+            robot,
+            services,
+            drivers,
+            router,
+            assets: assets.into_map(),
+        }
+    }
+}
+
+/// One resolved official platform runtime (a service or a simulator). The
+/// public identity is the provider-qualified `package` id
+/// (`phoxal/service-drive`); there is no separate `artifact_id` (docs #21).
+///
+/// The official catalog is CLI-internal, so location
+/// and integrity are Cargo's job: `package` at exactly `train` from the
+/// `phoxal` registry, materialized by `cargo install`. Contract/config
+/// metadata is always extracted from the materialized binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPlatformRuntime {
+    pub name: String,
+    pub package: String,
+    pub kind: ArtifactKind,
+    pub path_override: Option<PathBuf>,
+    /// Exact locked framework train this entry belongs to; every official
+    /// package is pinned to it exactly (`=<train>`).
+    pub train: String,
+    /// The target triple this entry was resolved/materialized for. `None`
+    /// identifies the distinct component-assets scope.
+    pub target: Option<String>,
+}
+
+impl ResolvedPlatformRuntime {
+    #[must_use]
+    pub fn source_path(&self) -> Option<&Path> {
+        self.path_override.as_deref()
+    }
+}
+
+/// The robot project's root Cargo package, resolved as its one mandatory
+/// brain source ().
+///
+/// The canonical runtime identity is always `brain`; the Cargo package name
+/// and binary target stay separate, project-specific facts so staging can
+/// rename the verified executable to `bin/brain` without any of them leaking
+/// into the launch graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBrain {
+    /// The root Cargo package's own directory (the project root).
+    pub crate_dir: PathBuf,
+    /// The root Cargo package name, for diagnostics and container package
+    /// selection.
+    pub package: String,
+    /// The exact Cargo-metadata-reported binary target the root package
+    /// builds. Never inferred from `[[bin]]`, package naming, or directory
+    /// naming.
+    pub bin_target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedUserRuntime {
+    pub name: String,
+    pub path: PathBuf,
+    pub source_hash: String,
+}
+
+/// One workspace runtime crate that is present but not declared in robot.yaml
+/// (): legal, not built, surfaced as a drift diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndeclaredRuntime {
+    /// The crate's logical name (its directory name).
+    pub name: String,
+    /// "services" - the directory family and the robot.yaml map the
+    /// crate would be declared in.
+    pub family: &'static str,
+}
+
+/// One resolved `robot.components.<instance>` entry. Authored assets have one
+/// direct source root; they are not a runtime artifact or Cargo-package half.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedComponent {
+    pub instance: String,
+    /// The logical component id (`component: <id>` in `robot.yaml`).
+    pub source_name: String,
+    /// Safe directory holding `component.yaml` and the authored assets.
+    pub assets_root: PathBuf,
+    /// The selected executable driver, if declared and included by policy.
+    pub driver: Option<ResolvedComponentDriver>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedComponentDriver {
+    Local { crate_dir: PathBuf },
+    Registry(ResolvedPlatformRuntime),
+}
+
+impl ResolvedComponentDriver {
+    #[must_use]
+    pub fn source_path(&self) -> Option<&Path> {
+        match self {
+            Self::Local { crate_dir } => Some(crate_dir),
+            Self::Registry(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn registry_runtime(&self) -> Option<&ResolvedPlatformRuntime> {
+        match self {
+            Self::Local { .. } => None,
+            Self::Registry(runtime) => Some(runtime),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedPathOverrideKind {
+    Service,
+    Simulator,
+}
+
+impl ResolvedPathOverrideKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::Simulator => "simulator",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ResolvedPathOverride {
+    pub key: String,
+    pub kind: ResolvedPathOverrideKind,
+    pub artifact_name: String,
+    pub path: PathBuf,
+}
+
+pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
+    let mut cursor = if start.is_file() {
+        start
+            .parent()
+            .ok_or_else(|| anyhow!("cannot discover robot.yaml above {}", start.display()))?
+            .to_path_buf()
+    } else {
+        start.to_path_buf()
+    };
+
+    loop {
+        let candidate = cursor.join(ROBOT_FILE);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        if !cursor.pop() {
+            bail!("failed to discover robot.yaml above {}", start.display());
+        }
+    }
+}
+
+/// Unwrap the versioned authored `robot.yaml` document to its exact body.
+///
+/// The schema tag selects the variant (), so the CLI keeps one
+/// projection point rather than destructuring the versioned enum at every
+/// call site.
+#[must_use]
+pub fn robot_manifest_body(manifest: phoxal_manifest::source::robot::Manifest) -> Robot {
+    let phoxal_manifest::source::robot::Manifest::V0(body) = manifest;
+    body
+}
+
+/// Parse authored `robot.yaml` text into its exact body.
+pub fn parse_robot_from_string(text: &str) -> Result<Robot> {
+    Ok(robot_manifest_body(
+        phoxal_manifest::source::robot::Manifest::parse(text)?,
+    ))
+}
+
+/// Write an authored `robot.yaml` body back out under its versioned schema
+/// tag.
+pub fn write_robot_to_dir(robot: &Robot, dir: impl AsRef<Path>) -> Result<()> {
+    phoxal_manifest::source::robot::Manifest::V0(robot.clone()).write_to_dir(dir)?;
+    Ok(())
+}
+
+pub fn load_robot(path: &Path) -> Result<Robot> {
+    crate::schema::ensure_supported_revision(path, crate::schema::DocumentKind::Robot)?;
+    let robot = robot_manifest_body(
+        phoxal_manifest::source::robot::Manifest::load(path)
+            .with_context(|| format!("failed to read robot file {}", path.display()))?,
+    );
+    validate_launch_participant_ids(&robot, path)?;
+    Ok(robot)
+}
+
+fn validate_launch_participant_ids(robot: &Robot, path: &Path) -> Result<()> {
+    let mut errors = Vec::new();
+    for name in robot.services.keys() {
+        if !is_launch_id(name) {
+            errors.push(format!(
+                "services.{name} in {} must use only [a-z0-9_]; '-' is reserved as a launch separator",
+                path.display()
+            ));
+        }
+    }
+    for instance in robot.robot.components.keys() {
+        if !is_launch_id(instance) {
+            errors.push(format!(
+                "robot.components.{instance} in {} must use only [a-z0-9_]; '-' is reserved as a launch separator",
+                path.display()
+            ));
+        }
+        if robot.services.contains_key(instance) {
+            errors.push(format!(
+                "services.{instance} collides with robot.components.{instance}; participant ids must be unique",
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("Robot launch id errors:\n{}", errors.join("\n"))
+    }
+}
+
+pub fn is_launch_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn official_binary_name_uses_component_crate_binary_for_component_driver() {
+        assert_eq!(
+            official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
+            "phoxal-component-ddsm115"
+        );
+    }
+
+    #[test]
+    fn load_robot_gates_an_unsupported_schema_revision_before_parsing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+
+        let newer = dir.path().join(ROBOT_FILE);
+        std::fs::write(&newer, "schema: phoxal/robot/v1\nrobot:\n  id: rover\n")?;
+        let message = format!(
+            "{:#}",
+            load_robot(&newer).expect_err("phoxal/robot/v1 must be gated")
+        );
+        assert!(message.contains("phoxal/robot/v1"), "{message}");
+        assert!(message.contains("Update the phoxal CLI"), "{message}");
+        assert!(!message.contains("unknown variant"), "{message}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn official_binary_name_prefixes_by_artifact_kind() {
+        assert_eq!(
+            official_binary_name(ArtifactKind::Service, "drive"),
+            "phoxal-service-drive"
+        );
+        assert_eq!(
+            official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
+            "phoxal-component-ddsm115"
+        );
+        assert_eq!(
+            official_binary_name(ArtifactKind::Simulator, "webots-controller"),
+            "phoxal-simulator-webots-controller"
+        );
+    }
+}

@@ -1,6 +1,6 @@
 //! Config responsibilities for check.
 
-use phoxal_cli_core::check as graph_check;
+use crate::check as graph_check;
 use phoxal_manifest::source::robot::v0::Manifest as RobotManifest;
 use serde_json::Value;
 
@@ -20,7 +20,7 @@ pub(crate) fn validate_user_service_config(
 
 /// Validate one declared user runtime's authored config against its embedded
 /// schema, with the declaring map (`services`) in the diagnostic path.
-/// The config VALUE is passed in, never re-looked-up (#950).
+/// The config VALUE is passed in, never re-looked-up ().
 pub(crate) fn validate_user_runtime_config(
     runtime_id: &str,
     schema: Option<&Value>,

@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 use crate::lock::{
     ProjectLock, ProjectLockIdentity, ProjectOperation, refuse_while_execution_is_live,
 };
@@ -34,15 +34,18 @@ pub(crate) async fn build_command(
     refuse_while_execution_is_live(&target.logical_root)?;
     let (reporter, signal_task) =
         crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
-    let built = phoxal_cli_project::build_bundle(phoxal_cli_project::BuildBundleRequest {
-        target,
-        backend: request.backend,
-        output: request.output,
-        publish: true,
-        offline: app.offline,
-        reporter,
+    let offline = app.offline;
+    let built = tokio::task::spawn_blocking(move || {
+        phoxal_cli_project::build_bundle(phoxal_cli_project::BuildBundleRequest {
+            target,
+            backend: request.backend,
+            output: request.output,
+            publish: true,
+            offline,
+            reporter,
+        })
     })
-    .await;
+    .await?;
     signal_task.abort();
     built
 }
@@ -53,12 +56,15 @@ pub(crate) async fn validate_command(
     let target = phoxal_cli_project::resolve_target(None, app.project.root())?;
     let (reporter, signal_task) =
         crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
-    let report = phoxal_cli_project::validate(phoxal_cli_project::ValidateRequest {
-        source: phoxal_cli_project::ValidationSource::Project(target),
-        offline: app.offline,
-        reporter,
+    let offline = app.offline;
+    let report = tokio::task::spawn_blocking(move || {
+        phoxal_cli_project::validate(phoxal_cli_project::ValidateRequest {
+            source: phoxal_cli_project::ValidationSource::Project(target),
+            offline,
+            reporter,
+        })
     })
-    .await;
+    .await?;
     signal_task.abort();
     report
 }

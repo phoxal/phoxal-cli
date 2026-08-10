@@ -9,28 +9,46 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use phoxal_api::v0_1 as api;
-use phoxal_bus::{ContractBody, Subscribe, Subscriber, Topic};
-use phoxal_cli_observation::{AttachmentEvent, MotionObservation, SourceStatus};
+use phoxal_bus::StateView;
+use phoxal_cli_observation::{AttachmentEvent, MotionObservation, ObservationSource, SourceStatus};
 
 use super::FeedContext;
 
-const SOURCE: &str = "motion";
+const SOURCE: ObservationSource = ObservationSource::Motion;
 
 pub(crate) async fn run(context: FeedContext) {
     super::until_cancelled(&context, SOURCE, feed(&context)).await;
 }
 
 async fn feed(context: &FeedContext) -> Result<()> {
-    let topic = Topic::<Subscribe<api::motion::State>>::new_static(
-        <api::motion::State as ContractBody>::TOPIC,
-    );
-    let subscriber = Subscriber::new(context.attachment.bus(), &topic, 32).await?;
+    let state_view = StateView::new(
+        context.attachment.bus(),
+        &api::topic::client().motion().state(),
+    )
+    .await?;
     context.health(SOURCE, SourceStatus::Live).await;
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(20));
+    let mut last_sequence = None;
     loop {
-        let state = subscriber.recv().await?.body;
+        ticker.tick().await;
+        let Some(observed) = state_view.observed() else {
+            continue;
+        };
+        let sequence = observed.metadata.sequence;
+        if last_sequence == Some(sequence) {
+            continue;
+        }
+        last_sequence = Some(sequence);
+        let state = &observed.body;
+        let (linear_x_mps, angular_z_radps) = match &state.decision {
+            api::motion::Decision::Active { target, .. } => {
+                (target.linear_x_mps(), target.angular_z_radps())
+            }
+            api::motion::Decision::Stopped { .. } => (0.0, 0.0),
+        };
         let motion = MotionObservation {
-            linear_x_mps: state.final_target.linear_x_mps,
-            angular_z_radps: state.final_target.angular_z_radps,
+            linear_x_mps,
+            angular_z_radps,
         };
         let observation = {
             context.stores.motion.write().await.record(motion);

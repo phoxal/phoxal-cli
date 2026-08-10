@@ -3,6 +3,16 @@
 //! This crate deliberately contains no stores, tasks, channels, transports,
 //! reconciliation, commands, or rendering.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 pub mod epoch;
 pub mod event;
 pub mod input;
@@ -14,10 +24,7 @@ pub mod source_health;
 pub mod supervisor;
 
 pub use epoch::AttachmentEpoch;
-pub use event::{
-    AttachmentEvent, ConnectionObservation, DiagnosticLevel, DiagnosticSource, Freshness,
-    FreshnessSet, PhaseId, PhaseOutcome, RuntimeEvent,
-};
+pub use event::{AttachmentEvent, ConnectionObservation};
 pub use input::{
     InputObservation, JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample,
     ManualDriveUnsupported, MotionObservation, MotionSample,
@@ -33,5 +40,5 @@ pub use runtimes::{
     RuntimePerformanceSummary, RuntimeQuery, RuntimeRead, RuntimeRow, RuntimeStepSample,
     RuntimeTopicSample, RuntimeWindow,
 };
-pub use source_health::{SourceHealth, SourceStatus};
+pub use source_health::{ObservationSource, SourceHealth, SourceStatus};
 pub use supervisor::SupervisorObservation;

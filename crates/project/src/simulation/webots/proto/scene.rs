@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use phoxal_model::Robot;
 use phoxal_model::component::capability::{Capability as PhysicalCapability, StructuralTarget};
+use phoxal_model::simulation::Capability as SimulationCapability;
 use phoxal_model::simulation::Simulation;
-use phoxal_model::simulation::capability::Capability as SimulationCapability;
 use phoxal_model::structure::{Joint, Link, Structure};
 
 use crate::simulation::webots::proto::support::pose::convert_joint_type;
@@ -29,7 +29,7 @@ impl WebotsSceneDescription {
         structure: &Structure,
         component_solid_links: &BTreeMap<String, Vec<String>>,
     ) -> Result<Self> {
-        let root_link_id = structure.root_link().name().to_string();
+        let root_link_id = structure.root_link().as_str().to_string();
         let links = structure
             .links()
             .cloned()
@@ -48,7 +48,9 @@ impl WebotsSceneDescription {
             .components()
             .map(|model_component| {
                 let component_id = model_component.id();
-                let component = configuration.component_for_instance(component_id)?;
+                let component = configuration
+                    .component_for_instance(component_id.as_str())
+                    .context("compiled component instance is missing its component type")?;
                 let capability_names = component
                     .capabilities()
                     .flat_map(|(capability_id, capability)| {
@@ -57,7 +59,8 @@ impl WebotsSceneDescription {
                             format!("{component_id}.{capability_id}"),
                         )];
                         if matches!(capability, PhysicalCapability::Imu(_)) {
-                            for device_id in Self::imu_device_capability_ids(capability_id) {
+                            for device_id in Self::imu_device_capability_ids(capability_id.as_str())
+                            {
                                 names.push((
                                     device_id.clone(),
                                     format!("{component_id}.{device_id}"),
@@ -70,10 +73,12 @@ impl WebotsSceneDescription {
                 Ok((
                     model_component.mount_link().to_string(),
                     ComponentProtoInstance {
-                        proto_name: proto_name_for_robot(model_component.component_type())?,
+                        proto_name: proto_name_for_robot(
+                            model_component.component_type().as_str(),
+                        )?,
                         capability_names,
                         solid_names: component_solid_links
-                            .get(model_component.component_type())
+                            .get(model_component.component_type().as_str())
                             .into_iter()
                             .flat_map(|link_ids| link_ids.iter())
                             .map(|link_id| (link_id.clone(), format!("{component_id}__{link_id}")))
@@ -92,7 +97,7 @@ impl WebotsSceneDescription {
             );
 
         Ok(Self {
-            robot_name: configuration.robot_id().to_string(),
+            robot_name: configuration.id().to_string(),
             root_link_id,
             links,
             contact_materials: BTreeMap::new(),
@@ -110,7 +115,7 @@ impl WebotsSceneDescription {
         component: &phoxal_model::component::Component,
         simulation: &Simulation,
     ) -> Result<Self> {
-        let root_link_id = structure.root_link().name().to_string();
+        let root_link_id = structure.root_link().as_str().to_string();
         let links = structure
             .links()
             .cloned()
@@ -139,18 +144,18 @@ impl WebotsSceneDescription {
             let binding = RuntimeComponentBinding {
                 capability_id: capability_id.to_string(),
                 physical: capability.clone(),
-                simulation: simulation.capability(capability_id).cloned(),
+                simulation: simulation.capability(capability_id.as_str()).cloned(),
             };
             match capability.target() {
                 StructuralTarget::Joint { id } => {
                     runtime_components_for_joint
-                        .entry(id.clone())
+                        .entry(id.to_string())
                         .or_insert_with(Vec::new)
                         .push(binding);
                 }
                 StructuralTarget::Link { id } => {
                     runtime_components_for_link
-                        .entry(id.clone())
+                        .entry(id.to_string())
                         .or_insert_with(Vec::new)
                         .push(binding);
                 }

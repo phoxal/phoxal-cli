@@ -26,7 +26,6 @@ flate2 = { workspace = true }
 gilrs = { workspace = true }
 hex = { workspace = true }
 libc = { workspace = true }
-nalgebra = { workspace = true }
 reqwest = { workspace = true }
 self_replace = { workspace = true }
 semver = { workspace = true, features = ["serde"] }
@@ -38,13 +37,14 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 phoxal-api = { workspace = true }
+phoxal-bundle = { workspace = true }
 phoxal-bus = { workspace = true }
 phoxal-manifest = { workspace = true }
 phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
 
 phoxal-cli-catalog = { workspace = true }
-phoxal-cli-core = { workspace = true }
+phoxal-cli-host = { workspace = true }
 phoxal-cli-observation = { workspace = true }
 phoxal-cli-project = { workspace = true }
 phoxal-cli-ui = { workspace = true }

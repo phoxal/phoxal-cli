@@ -46,8 +46,7 @@ impl LogStore {
     /// Install one reconciled page as the complete retained history.
     ///
     /// There is exactly one collector - the supervisor - and one execution, so
-    /// a page replaces the history rather than one robot's slice of it
-    ///.
+    /// a page replaces the history rather than one robot's slice of it.
     pub fn install_snapshot(
         &mut self,
         epoch: AttachmentEpoch,
@@ -114,11 +113,11 @@ impl LogStore {
 
 #[cfg(test)]
 mod tests {
-    use phoxal_cli_core::identity::ExecutionId;
     use phoxal_cli_observation::{
         LogFilters, LogQuery, ObservationQuery, QueryToken, StoreRevision,
     };
     use phoxal_cli_observation::{LogSeverity, LogSource};
+    use phoxal_runtime_contract::identity::ExecutionId;
 
     use super::*;
 

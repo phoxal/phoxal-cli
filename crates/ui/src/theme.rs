@@ -22,7 +22,7 @@ pub(crate) mod role;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
-/// The locked brand palette (docs: CLI UX overhaul, Phase 0 foundation).
+/// The locked brand palette shared by every terminal view.
 pub mod palette {
     use super::Rgb;
 

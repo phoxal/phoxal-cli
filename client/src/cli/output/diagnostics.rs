@@ -1,8 +1,8 @@
 //! Routes the CLI's own `tracing` output through the session's
-//! [`phoxal_cli_observation::RuntimeEvent`] channel instead of writing it directly to
+//! [`RuntimeEvent`] channel instead of writing it directly to
 //! stderr, so a `tracing::warn!` mid-session (the reported "a Zenoh
 //! connection warning writes through the progress renderer" bug) becomes a
-//! typed [`phoxal_cli_observation::RuntimeEvent::Diagnostic`] the renderer controls,
+//! typed [`RuntimeEvent::Diagnostic`] the renderer controls,
 //! never a raw write racing an active redraw or corrupting the alternate
 //! screen.
 //!
@@ -15,7 +15,7 @@
 //! forwards to the real stderr - this module changes nothing for a caller
 //! that never opts in.
 //!
-//! Level is approximated as [`phoxal_cli_observation::DiagnosticLevel::Warn`] for every
+//! Level is approximated as [`DiagnosticLevel::Warn`] for every
 //! captured line: `tracing_subscriber::fmt`'s [`MakeWriter`] contract hands
 //! this only the already-formatted bytes for one event, not its
 //! `Level` - recovering the real level would need a full custom `Layer`
@@ -31,8 +31,40 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing_subscriber::fmt::MakeWriter;
 
-use phoxal_cli_observation::{DiagnosticLevel, DiagnosticSource, RuntimeEvent};
-use phoxal_cli_observation::{PhaseId, PhaseOutcome};
+use phoxal_cli_project::{PhaseId, PhaseOutcome};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DiagnosticSource {
+    Tracing,
+    Cli,
+    Dependency,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DiagnosticLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+/// Bounded messages produced by project preparation and supervision for a UI.
+#[derive(Debug, Clone)]
+pub(crate) enum RuntimeEvent {
+    PhaseStarted {
+        id: PhaseId,
+        label: String,
+    },
+    PhaseFinished {
+        id: PhaseId,
+        outcome: PhaseOutcome,
+        elapsed: Duration,
+    },
+    Diagnostic {
+        source: DiagnosticSource,
+        level: DiagnosticLevel,
+        message: String,
+    },
+}
 
 struct ActiveSession {
     sender: mpsc::Sender<RuntimeEvent>,
@@ -103,7 +135,7 @@ pub(crate) fn try_route(
 
 /// Emit `RuntimeEvent::PhaseStarted` for one real per-operation phase
 /// (`"download"`/`"build"`/`"validate"`/...) through the active session, if
-/// any (finding A3) - a no-op when no session is installed, exactly like
+/// any; this is a no-op when no session is installed, exactly like
 /// [`try_route`]. Project preparation normally emits the paired typed events
 /// through its `Reporter`; this adapter maps those events into the session.
 pub(crate) fn phase_started(id: impl Into<PhaseId>, label: impl Into<String>) {

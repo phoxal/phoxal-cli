@@ -1,25 +1,22 @@
 //! Host prerequisite checks.
 
 use anyhow::{Context, Result};
-use phoxal_cli_core::project::train::RegistryStatus;
+use phoxal_cli_project::source::train::RegistryStatus;
 
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 
 struct Doctor;
 
 impl Doctor {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         // The pair first: a host whose `phoxald` is missing or mismatched
-        // cannot execute anything this CLI builds, whatever else is right
-        //.
+        // cannot execute anything this CLI builds, whatever else is right.
         let pair = crate::pair::status();
         if pair.is_exact() {
             app.ui.success(pair.summary());
         } else {
-            app.ui.warn(
-                pair.failure()
-                    .expect("a pair that is not exact always has a failure"),
-            );
+            app.ui
+                .warn(pair.failure().unwrap_or_else(|| pair.summary()));
         }
         for status in phoxal_cli_project::host::doctor::probes() {
             match status {
@@ -34,8 +31,10 @@ impl Doctor {
                 }
             }
         }
-        let train =
-            phoxal_cli_core::project::train::resolve_locked_train(app.project.root(), app.offline)?;
+        let train = phoxal_cli_project::source::train::resolve_locked_train(
+            app.project.root(),
+            app.offline,
+        )?;
         println!("framework train: {}", train.version);
         println!("root package: Cargo.toml and Cargo.lock are coherent");
         {

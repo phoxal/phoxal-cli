@@ -4,7 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Phoxal supervisor process-boundary contract: schema-tagged DTOs, typed protocol topics, and bounds."
+publish = false
+description = "Phoxal CLI supervisor process protocol and typed transport contracts."
 documentation.workspace = true
 homepage.workspace = true
 repository.workspace = true
@@ -15,18 +16,14 @@ path = "src/lib.rs"
 
 [dependencies]
 phoxal-bus = { workspace = true }
-# `phoxal-api` imports the macro privately, so a downstream protocol tree must
-# name `phoxal-macros` itself. See NEEDED-FROM-FRAMEWORK in src/lib.rs.
 phoxal-macros = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
-serde = { workspace = true }
-serde_bytes = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 rmp-serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

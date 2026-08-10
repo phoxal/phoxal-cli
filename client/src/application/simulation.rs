@@ -1,11 +1,9 @@
 //! The client-owned simulation session.
 //!
-//! `phoxal simulation webots run <ROBOT_YAML> <WORLD>` owns the whole session.
-//! The daemon has no simulation concept at all: the bundle
-//! this command finalizes says `clock: simulated`, has its driver blocks
-//! stripped, and stages the simulator, and `phoxald` derives the participant
-//! set and the clock source from that manifest exactly as it does for any other
-//! bundle. It is launched on the bundle root with no flags.
+//! `phoxal simulation webots run <PROJECT> <WORLD>` owns the whole session.
+//! The daemon has no source-level simulation concept: this command compiles a
+//! simulated-clock bundle and stages Webots, while `phoxald` validates and
+//! executes the exact participant set already persisted in `runtime.json`.
 //!
 //! What is genuinely different is lifetime coordination: this client owns the
 //! Webots application, so two processes have to end together in either order,
@@ -21,7 +19,7 @@ use super::lifecycle::Target;
 use super::session::{self, Detachable};
 use super::webots::Webots;
 use crate::attach::Session;
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
 /// How long the daemon is given to answer connect after Webots is up.
@@ -43,7 +41,7 @@ pub(crate) async fn run_command(
 ) -> Result<()> {
     crate::pair::require_exact()?;
     let target = Target::resolve(project, app.project.root())?;
-    phoxal_cli_core::project::train::resolve_locked_train(&target.project, app.offline)
+    phoxal_cli_project::source::train::resolve_locked_train(&target.project, app.offline)
         .with_context(|| {
             format!(
                 "simulation requires a buildable source project; {} is not a source project",
@@ -68,16 +66,17 @@ pub(crate) async fn run_command(
         phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;
     let (reporter, signal_task) =
         crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
-    let prepared =
+    let offline = app.offline;
+    let prepared = tokio::task::spawn_blocking(move || {
         phoxal_cli_project::prepare_simulation(phoxal_cli_project::PrepareSimulationRequest {
             target: runtime_target,
-            run: phoxal_cli_core::project::launch_plan::RunIdentity::mint_or_adopt(None),
             world,
-            offline: app.offline,
+            offline,
             webots,
             reporter,
         })
-        .await;
+    })
+    .await?;
     signal_task.abort();
     let prepared = prepared?;
     let simulation = prepared
@@ -86,31 +85,47 @@ pub(crate) async fn run_command(
         .context("simulation preparation returned no simulation data")?;
 
     app.ui.info(format!(
-        "world: {}; bundle: {}",
-        simulation.world.display(),
+        "world source: {}; bundle: {}",
+        simulation.world_source.display(),
         prepared.staged_root.display()
     ));
 
-    // Webots first: the daemon's graph waits on a world clock that only the
-    // simulator produces, so a daemon started first would sit in readiness
-    // with nothing yet able to satisfy it.
-    let webots_spec = prepared
-        .participants
-        .iter()
-        .find(|participant| participant.kind == phoxal_cli_core::runtime::ParticipantKind::Host)
-        .and_then(|participant| participant.launch.as_ref())
-        .context("simulation preparation returned no Webots launch spec")?;
-    let webots = Webots::launch(webots_spec)?;
-
+    // The daemon owns execution identity. Start and attach first, then derive
+    // the Webots controller launch from that exact execution and the verified
+    // runtime bundle. The daemon may wait for the external simulator's
+    // readiness while its supervisor API remains attachable.
     let launched = daemon::spawn(&prepared.staged_root)?;
     let session = await_simulated_attachment(&target, launched, app).await;
     let session = match session {
         Ok(session) => session,
         Err(error) => {
-            // The daemon never came up, so there is nothing to stop through
-            // the supervisor API - but Webots is this client's and must not be
-            // left behind.
-            webots.stop().await?;
+            return Err(error);
+        }
+    };
+    let stage_request = phoxal_cli_project::StageWebotsRequest {
+        staged_root: prepared.staged_root.clone(),
+        project_root: simulation.project_root.clone(),
+        world_source: simulation.world_source.clone(),
+        webots_executable: simulation.webots_executable.clone(),
+        execution: session.connected().execution,
+        endpoint: target.endpoint.clone(),
+    };
+    let launch =
+        tokio::task::spawn_blocking(move || phoxal_cli_project::stage_webots(stage_request))
+            .await?;
+    let launch = match launch {
+        Ok(launch) => launch,
+        Err(error) => {
+            stop_failed_simulation_start(session).await;
+            return Err(error.context("failed to stage Webots after attaching to the execution"));
+        }
+    };
+    app.ui
+        .info(format!("staged world: {}", launch.world.display()));
+    let webots = match Webots::launch(&launch) {
+        Ok(webots) => webots,
+        Err(error) => {
+            stop_failed_simulation_start(session).await;
             return Err(error);
         }
     };
@@ -137,16 +152,25 @@ pub(crate) async fn run_command(
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status.clone());
                     if plan(&SessionEnd::WebotsExited { status }).stop_daemon {
-                        let _ = supervisor.stop().await;
-                        if await_terminal(&mut snapshots, TERMINAL_BUDGET)
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!(
-                                "the execution did not reach a terminal state within {}s of \
-                                 losing its world clock",
-                                TERMINAL_BUDGET.as_secs()
-                            );
+                        match supervisor.stop().await {
+                            Ok(phoxal_supervisor_api::CommandOutcome::Accepted { .. }) => {
+                                if await_terminal(&mut snapshots, TERMINAL_BUDGET)
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::warn!(
+                                        "the execution did not reach a terminal state within {}s \
+                                         of losing its world clock",
+                                        TERMINAL_BUDGET.as_secs()
+                                    );
+                                }
+                            }
+                            Ok(phoxal_supervisor_api::CommandOutcome::Rejected { reason }) => {
+                                tracing::warn!(?reason, "the supervisor rejected the Webots stop");
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "the Webots stop request failed");
+                            }
                         }
                     }
                     return;
@@ -169,10 +193,12 @@ pub(crate) async fn run_command(
     watcher.abort();
     let _ = watcher.await;
     let webots = std::sync::Arc::into_inner(webots)
-        .expect("the Webots watcher is joined before the handle is reclaimed")
+        .ok_or_else(|| anyhow::anyhow!("Webots process handle still has an owner after shutdown"))?
         .into_inner();
     let webots_exit = std::sync::Arc::into_inner(webots_exit)
-        .expect("the Webots watcher is joined before its observation is reclaimed")
+        .ok_or_else(|| {
+            anyhow::anyhow!("Webots exit observation still has an owner after shutdown")
+        })?
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -185,6 +211,22 @@ pub(crate) async fn run_command(
     // gracefully, with the explicit kill only if it will not go.
     webots.stop().await?;
     super::lifecycle::report_outcome(&target, outcome?)
+}
+
+async fn stop_failed_simulation_start(session: Session) {
+    let mut snapshots = session.snapshots();
+    match session.ports.supervisor.stop().await {
+        Ok(phoxal_supervisor_api::CommandOutcome::Accepted { .. }) => {
+            if let Err(error) = await_terminal(&mut snapshots, TERMINAL_BUDGET).await {
+                tracing::warn!(%error, "failed simulation did not reach a terminal state");
+            }
+        }
+        Ok(phoxal_supervisor_api::CommandOutcome::Rejected { reason }) => {
+            tracing::warn!(?reason, "the supervisor rejected failed-simulation cleanup");
+        }
+        Err(error) => tracing::warn!(%error, "failed-simulation cleanup request failed"),
+    }
+    session.shutdown().await;
 }
 
 /// Wait for a terminal snapshot, for the feed to end, or for `budget`.
@@ -419,7 +461,7 @@ mod tests {
     #[test]
     fn the_daemon_ending_first_asks_nothing_of_it_and_still_reports() {
         let failure = phoxal_supervisor_api::DaemonFailure {
-            reason: phoxal_supervisor_api::DaemonFailureReason::WorldClockMissing,
+            reason: phoxal_supervisor_api::DaemonFailureReason::ControlPlaneLost,
             detail: phoxal_supervisor_api::Detail::new("the world clock never became ready"),
         };
         let end = SessionEnd::observe(
@@ -436,7 +478,7 @@ mod tests {
         let report = shutdown
             .report
             .expect("an unexpected termination is reported");
-        assert!(report.contains("WorldClockMissing"), "{report}");
+        assert!(report.contains("ControlPlaneLost"), "{report}");
         assert!(report.contains("stopping Webots"), "{report}");
     }
 

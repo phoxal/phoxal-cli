@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::{Args, ValueEnum};
 
-use crate::cli::AppContext;
+use crate::cli::context::AppContext;
 
 #[derive(Debug, Args)]
 pub struct Validate {

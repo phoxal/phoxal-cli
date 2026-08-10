@@ -1,19 +1,17 @@
 //! Supervisor control values.
 
-use phoxal_cli_core::runtime::ProcessKey;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use crate::model::ProcessKey;
 use tokio::sync::mpsc;
 
-/// Finding A7/C2: this struct deliberately carries no UI/telemetry handle.
+/// This struct deliberately carries no UI or telemetry handle.
 /// Live telemetry (host/process/router/joypad feeds) is owned by the caller
 /// and passed directly to
-/// the resident supervisor, and this loop never reads it - so an earlier
+/// the supervisor, and this loop never reads it, so an earlier
 /// `telemetry: TelemetryBackend` field
 /// here was dead weight, not a real dependency.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SupervisorOptions {
-    pub action_rx: Option<SupervisorActionReceiver>,
+    pub action_rx: Option<mpsc::Receiver<SupervisorAction>>,
     /// The run's root cancellation signal (the application owns the sender
     /// half): a Ctrl-C observed by the application cancels
     /// this, and this loop selects on it directly instead of its own private
@@ -47,37 +45,4 @@ pub enum SupervisorAction {
     /// `RunningParticipant::swap` with the participant's own spec cloned back
     /// in, rather than a new field on `RunningParticipant`.
     Restart { key: ProcessKey },
-}
-
-#[derive(Clone)]
-pub struct SupervisorActionReceiver {
-    inner: Arc<Mutex<Option<mpsc::Receiver<SupervisorAction>>>>,
-}
-
-impl std::fmt::Debug for SupervisorActionReceiver {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SupervisorActionReceiver(..)")
-    }
-}
-
-impl SupervisorActionReceiver {
-    #[must_use]
-    pub fn new(receiver: mpsc::Receiver<SupervisorAction>) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Some(receiver))),
-        }
-    }
-
-    pub(crate) async fn recv(&self) -> Option<SupervisorAction> {
-        let mut receiver = self.inner.lock().await;
-        let Some(active) = receiver.as_mut() else {
-            drop(receiver);
-            return std::future::pending().await;
-        };
-        let action = active.recv().await;
-        if action.is_none() {
-            receiver.take();
-        }
-        action
-    }
 }

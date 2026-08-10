@@ -13,9 +13,9 @@ pub(crate) mod telemetry;
 use std::sync::Arc;
 
 use phoxal_cli_observation::{
-    AttachmentEpoch, AttachmentEvent, ManualDriveUnsupported, SourceStatus,
+    AttachmentEpoch, AttachmentEvent, ManualDriveUnsupported, ObservationSource, SourceStatus,
 };
-use phoxal_supervisor_client::Attachment;
+use phoxal_supervisor_client::AttachmentPort;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -27,7 +27,7 @@ use crate::joypad::manual::ManualDrive;
 /// Everything a feed needs, cloned into each of them.
 #[derive(Clone)]
 pub(crate) struct FeedContext {
-    pub(crate) attachment: Arc<Attachment>,
+    pub(crate) attachment: AttachmentPort,
     pub(crate) epoch: AttachmentEpoch,
     /// Where this client believes the execution's bundle lives, for display.
     pub(crate) project: String,
@@ -40,7 +40,7 @@ impl FeedContext {
     /// Announce one source's health. A feed that cannot reach its endpoint is
     /// not a failed attachment: the snapshot keeps flowing and the operator is
     /// told which view is stale.
-    pub(crate) async fn health(&self, source: &str, status: SourceStatus) {
+    pub(crate) async fn health(&self, source: ObservationSource, status: SourceStatus) {
         let mut health = self.stores.health.write().await;
         let Some(values) = health.record(source, status) else {
             return;
@@ -71,7 +71,7 @@ pub(crate) fn spawn_all(
 
 /// Run `feed` until the session is cancelled, reporting a failure as source
 /// health rather than as the end of the attachment.
-pub(crate) async fn until_cancelled<F>(context: &FeedContext, source: &str, feed: F)
+pub(crate) async fn until_cancelled<F>(context: &FeedContext, source: ObservationSource, feed: F)
 where
     F: Future<Output = anyhow::Result<()>>,
 {
@@ -79,7 +79,7 @@ where
         () = context.cancellation.cancelled() => {}
         result = feed => {
             if let Err(error) = result {
-                tracing::debug!(source, error = %format!("{error:#}"), "an attachment feed stopped");
+                tracing::debug!(source = source.label(), error = %format!("{error:#}"), "an attachment feed stopped");
                 context.health(source, SourceStatus::Failed).await;
             }
         }

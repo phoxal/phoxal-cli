@@ -24,11 +24,10 @@ enum Slot {
     Processes = 2,
     Input = 3,
     Health = 4,
-    Freshness = 5,
-    LogsChanged = 6,
-    RuntimesChanged = 7,
-    LogsReply = 8,
-    RuntimesReply = 9,
+    LogsChanged = 5,
+    RuntimesChanged = 6,
+    LogsReply = 7,
+    RuntimesReply = 8,
 }
 
 const SLOT_COUNT: usize = Slot::RuntimesReply as usize + 1;
@@ -111,9 +110,9 @@ impl PendingInputs {
                 + usize::from(state.terminate),
         );
         if state.epoch_pending {
-            drained.push(SessionInput::Client(AttachmentEvent::EpochChanged(
-                state.epoch.expect("a pending epoch has a value"),
-            )));
+            if let Some(epoch) = state.epoch {
+                drained.push(SessionInput::Client(AttachmentEvent::EpochChanged(epoch)));
+            }
             state.epoch_pending = false;
         }
         for slot in &mut state.slots {
@@ -149,7 +148,6 @@ fn slot_for(input: &SessionInput) -> Option<Slot> {
         SessionInput::Client(AttachmentEvent::ProcessesChanged { .. }) => Some(Slot::Processes),
         SessionInput::Client(AttachmentEvent::InputChanged { .. }) => Some(Slot::Input),
         SessionInput::Client(AttachmentEvent::SourceHealthChanged { .. }) => Some(Slot::Health),
-        SessionInput::Client(AttachmentEvent::FreshnessChanged { .. }) => Some(Slot::Freshness),
         SessionInput::Client(AttachmentEvent::LogsChanged(_)) => Some(Slot::LogsChanged),
         SessionInput::Client(AttachmentEvent::RuntimesChanged(_)) => Some(Slot::RuntimesChanged),
         SessionInput::Logs(_) => Some(Slot::LogsReply),
@@ -174,7 +172,6 @@ fn input_epoch(input: &SessionInput) -> Option<AttachmentEpoch> {
         SessionInput::Client(
             AttachmentEvent::LogsChanged(changed) | AttachmentEvent::RuntimesChanged(changed),
         ) => Some(changed.epoch),
-        SessionInput::Client(AttachmentEvent::FreshnessChanged { epoch, .. }) => Some(*epoch),
         SessionInput::Logs(window) => Some(window.epoch),
         SessionInput::Runtimes(window) => Some(window.epoch),
         _ => None,
@@ -222,12 +219,12 @@ impl PollAsync<UserEvent> for InputPort {
 mod tests {
     use std::sync::Arc;
 
-    use phoxal_cli_core::identity::ExecutionId;
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, LogWindow, QueryToken, StoreChanged, StoreRevision,
         SupervisorObservation,
     };
-    use phoxal_supervisor_api::{ExecutionMode, Lifecycle, Name, RobotIdentity};
+    use phoxal_runtime_contract::identity::ExecutionId;
+    use phoxal_supervisor_api::{Clock, Lifecycle, RobotId};
 
     use super::*;
 
@@ -377,11 +374,8 @@ mod tests {
             Arc::new(SupervisorObservation {
                 revision: 1,
                 execution: ExecutionId::mint(),
-                robot: RobotIdentity {
-                    id: Name::new("rover"),
-                    namespace: Name::new("lab"),
-                },
-                mode: ExecutionMode::Real,
+                robot: RobotId::new("rover").expect("fixture robot id"),
+                clock: Clock::Real,
                 project: "project".into(),
                 lifecycle: Lifecycle::Stopped,
                 startup: Vec::new(),

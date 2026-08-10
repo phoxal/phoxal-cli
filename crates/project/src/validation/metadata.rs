@@ -1,11 +1,11 @@
 //! Metadata responsibilities for check.
 
 use super::{RawArtifact, RawParticipantReport};
+use crate::check::participant_metadata;
+use crate::source::resolver::{ResolvedPlatformRuntime, official_binary_name};
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_cli_core::check::participant_metadata;
-use phoxal_cli_core::project::resolver::{ResolvedPlatformRuntime, official_binary_name};
 use std::path::Path;
 
 /// Extract one official runtime's participant report straight from its
@@ -53,7 +53,7 @@ pub(crate) fn raw_participant_report_from_extracted_metadata(
     binary_path: &Path,
     meta: participant_metadata::ParticipantMeta,
 ) -> Result<RawParticipantReport> {
-    if meta.id != expected_artifact_id {
+    if meta.id.as_str() != expected_artifact_id {
         bail!(
             "{} at {} declares participant id '{}', but it was selected as the {artifact_kind} \
              artifact '{expected_artifact_id}'; the staged/built binary does not match the \
@@ -77,7 +77,7 @@ pub(crate) fn raw_participant_report_from_extracted_metadata(
     Ok(RawParticipantReport {
         artifact: RawArtifact {
             kind: kind.to_string(),
-            id: meta.id,
+            id: meta.id.to_string(),
         },
         config_schema: Some(meta.config_schema),
     })
@@ -89,10 +89,12 @@ mod tests {
 
     fn meta(id: &str) -> participant_metadata::ParticipantMeta {
         participant_metadata::ParticipantMeta {
-            api: phoxal_runtime_contract::RobotApi::V0_1,
+            api: phoxal_runtime_contract::version::RobotApiVersion::new(0, 1),
             schemas: participant_metadata::CURRENT_SCHEMAS,
-            id: id.to_string(),
-            kind: phoxal_runtime_contract::ParticipantKind::Service,
+            id: phoxal_runtime_contract::identity::ParticipantArtifactId::new(id)
+                .expect("fixture artifact id"),
+            kind: phoxal_runtime_contract::metadata::ParticipantKind::Service,
+            requirement: None,
             config_schema: serde_json::json!({"type": "object", "properties": {"speed": {"type": "integer"}}}),
         }
     }
@@ -151,7 +153,7 @@ mod tests {
     /// A binary with no metadata section at all must be a hard error, not a
     /// synthesized identity that then trivially "matches" nothing - covered at
     /// the extraction layer itself:
-    /// `phoxal_cli_core::check::participant_metadata::tests::foreign_object_without_section_is_a_clear_error`.
+    /// `crate::check::participant_metadata::tests::foreign_object_without_section_is_a_clear_error`.
     /// Here we cover the same shape one layer up: `extract_participant_metadata`
     /// on a file that is not a recognized object file at all fails before any
     /// identity comparison is attempted.

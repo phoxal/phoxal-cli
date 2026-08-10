@@ -13,6 +13,16 @@
 //! each built binary afterwards. There is consequently no `CatalogId`, no
 //! catalog constant in any wire contract, and no framework-train floor.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 use std::collections::BTreeSet;
 
 /// The registry name every `cargo install`/`cargo metadata` invocation against

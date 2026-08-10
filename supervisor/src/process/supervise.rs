@@ -1,14 +1,16 @@
 //! Main supervision loop, actions, and orderly shutdown.
 
-use super::stages::StageReporter;
-use super::{
-    ProcessState, RunningParticipant, SupervisionStage, SupervisorAction, SupervisorOptions,
-    SupervisorState, await_stage_ready, join_reader, maybe_publish_startup_outcome,
-    spawn_until_pending, stop_child,
+use super::output::join_reader;
+use super::participant::RunningParticipant;
+use super::signals::stop_child;
+use super::spec::{SupervisorAction, SupervisorOptions};
+use super::stages::{
+    StageReporter, SupervisionStage, WaitBudget, await_stage_ready, maybe_publish_startup_outcome,
+    spawn_until_pending,
 };
-use crate::WaitBudget;
+use crate::model::{ProjectLifecycle, RuntimeFailurePolicy};
+use crate::state::store::SupervisorState;
 use anyhow::Result;
-use phoxal_cli_core::runtime::{ProjectLifecycle, RuntimeFailurePolicy};
 use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
@@ -25,9 +27,8 @@ pub async fn supervise_until_shutdown(
         .processes
         .into_iter()
         .filter(|(_, entry)| {
-            entry.descriptor.startup_requirement
-                == phoxal_cli_core::runtime::StartupRequirement::Required
-                && entry.status.actual == phoxal_cli_core::runtime::ProcessState::Failed
+            entry.descriptor.startup_requirement == crate::model::StartupRequirement::Required
+                && entry.status.actual == crate::model::ProcessState::Failed
         })
         .map(|(key, _)| key.to_string())
         .collect::<Vec<_>>();
@@ -57,14 +58,14 @@ pub async fn supervise_until_shutdown(
 
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let action_rx = options.action_rx.take();
+    let mut action_rx = options.action_rx.take();
     let mut supervisor_error = None;
     'supervision: loop {
         tokio::select! {
             () = token.cancelled() => {
                 break;
             }
-            action = recv_action(action_rx.as_ref()) => {
+            action = recv_action(action_rx.as_mut()) => {
                 if let Some(action) = action
                     && let Err(error) = handle_action(&mut running, &board, action).await
                 {
@@ -89,7 +90,9 @@ pub async fn supervise_until_shutdown(
                 }),
                 Duration::from_millis(200),
             ), if pending_stage.is_some() => {
-                let stage = pending_stage.take().expect("guarded by is_some");
+                let Some(stage) = pending_stage.take() else {
+                    continue;
+                };
                 match result {
                     Ok(()) => {
                         tracing::info!(stage = %stage.label, "supervisor startup phase ready");
@@ -141,15 +144,6 @@ pub async fn supervise_until_shutdown(
                                 token.cancel();
                                 break 'supervision;
                             }
-                            RuntimeFailurePolicy::RecreateGraph => {
-                                let reason = format!(
-                                    "process {} requires graph recreation",
-                                    participant.spec.key
-                                );
-                                board.fail(&reason);
-                                supervisor_error = Some(anyhow::anyhow!(reason));
-                                break 'supervision;
-                            }
                         }
                     }
                 }
@@ -160,16 +154,20 @@ pub async fn supervise_until_shutdown(
     if supervisor_error.is_none() {
         board.set_lifecycle(ProjectLifecycle::Stopping);
     }
-    shutdown_all(&mut running, &board).await;
+    let teardown = shutdown_all(&mut running, &board).await;
     if let Some(error) = supervisor_error {
-        return Err(error);
+        if teardown.is_clean() {
+            return Err(error);
+        }
+        return Err(error.context(teardown.summary()));
     }
+    teardown.into_result()?;
     board.set_lifecycle(ProjectLifecycle::Stopped);
     Ok(())
 }
 
 pub(crate) async fn recv_action(
-    action_rx: Option<&super::SupervisorActionReceiver>,
+    action_rx: Option<&mut tokio::sync::mpsc::Receiver<SupervisorAction>>,
 ) -> Option<SupervisorAction> {
     match action_rx {
         Some(action_rx) => action_rx.recv().await,
@@ -199,19 +197,52 @@ pub(crate) async fn handle_action(
     }
 }
 
-pub(crate) async fn shutdown_all(running: &mut [RunningParticipant], board: &SupervisorState) {
+#[derive(Debug, Default)]
+pub(crate) struct TeardownReport {
+    failures: Vec<String>,
+}
+
+impl TeardownReport {
+    fn push(&mut self, failure: impl Into<String>) {
+        if self.failures.len() < crate::model::MAX_TEARDOWN_FAILURES {
+            self.failures.push(failure.into());
+        }
+    }
+
+    fn is_clean(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    fn summary(&self) -> String {
+        format!("supervisor teardown failed: {}", self.failures.join("; "))
+    }
+
+    fn into_result(self) -> Result<()> {
+        if self.is_clean() {
+            Ok(())
+        } else {
+            anyhow::bail!(self.summary())
+        }
+    }
+}
+
+pub(crate) async fn shutdown_all(
+    running: &mut [RunningParticipant],
+    board: &SupervisorState,
+) -> TeardownReport {
+    let mut report = TeardownReport::default();
     // Reverse exact startup phase order, concurrency within each phase.
-    let mut phases = running
+    let mut stages = running
         .iter()
-        .map(|participant| participant.shutdown_phase.clone())
+        .map(|participant| participant.shutdown_stage)
         .collect::<Vec<_>>();
-    phases.sort_by_key(|phase| phase_rank(phase));
-    phases.dedup();
-    for phase in phases.into_iter().rev() {
+    stages.sort();
+    stages.dedup();
+    for stage in stages.into_iter().rev() {
         let mut joins = tokio::task::JoinSet::new();
         for participant in running
             .iter_mut()
-            .filter(|participant| participant.shutdown_phase == phase)
+            .filter(|participant| participant.shutdown_stage == stage)
         {
             let mut child = participant.child.take();
             let stdout = participant.stdout_task.take();
@@ -221,40 +252,41 @@ pub(crate) async fn shutdown_all(running: &mut [RunningParticipant], board: &Sup
             joins.spawn(async move {
                 if let Some(child) = child.as_mut() {
                     tracing::debug!(process = %spec.key, "stopping supervised process");
-                    if let Err(error) =
-                        stop_child(child, spec.shutdown_grace, spec.process_group).await
-                    {
-                        board.set_state(
+                    let failure = if let Err(error) = stop_child(child, spec.shutdown_grace).await {
+                        board.record_failure(
                             &spec.key,
-                            ProcessState::Failed,
-                            Some(format!("failed to stop: {error:#}")),
+                            crate::model::ProcessFailureKind::Cleanup,
+                            None,
+                            format!("failed to stop: {error:#}"),
                         );
-                    }
+                        Some(format!("{}: {error:#}", spec.key))
+                    } else {
+                        None
+                    };
                     board.set_pid(&spec.key, None);
+                    join_reader(stdout).await;
+                    join_reader(stderr).await;
+                    return failure;
                 }
                 join_reader(stdout).await;
                 join_reader(stderr).await;
+                None
             });
         }
         while let Some(result) = joins.join_next().await {
-            if let Err(error) = result {
-                tracing::warn!(%error, "shutdown worker failed");
+            match result {
+                Ok(Some(failure)) => report.push(failure),
+                Ok(None) => {}
+                Err(error) => report.push(format!("shutdown worker failed: {error}")),
             }
         }
     }
-}
-
-fn phase_rank(phase: &str) -> u8 {
-    match phase {
-        "starting project infrastructure" => 0,
-        "starting robot graph" => 1,
-        _ => 2,
-    }
+    report
 }
 
 #[cfg(test)]
 mod tests {
-    use phoxal_cli_core::runtime::ProjectLifecycle;
+    use crate::model::ProjectLifecycle;
 
     use super::*;
 

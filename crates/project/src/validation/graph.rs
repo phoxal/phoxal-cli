@@ -5,11 +5,11 @@ use super::{
     ensure_brain_declares_unit_config, validate_artifact_identity,
     validate_source_artifact_identity, validate_user_service_config,
 };
+use crate::check as graph_check;
+use crate::check::source::SourceParticipant;
+use crate::check::source::SourceParticipantKind;
 use anyhow::Context;
 use anyhow::Result;
-use phoxal_cli_core::check as graph_check;
-use phoxal_cli_core::check::source::SourceParticipant;
-use phoxal_cli_core::check::source::SourceParticipantKind;
 
 pub fn run_check_with_context(
     resolved_platform_artifact_refs: &[PlatformArtifactRef],
@@ -84,7 +84,7 @@ pub fn run_check_with_context(
         if participant.kind == SourceParticipantKind::Brain {
             // The brain has no config side channel, so a non-unit schema is a
             // malformed binary rather than a user config mistake: fail hard
-            // here, before any resident startup (organization#973).
+            // here, before any supervisor startup.
             ensure_brain_declares_unit_config(participant, &raw)?;
         } else if participant.kind == SourceParticipantKind::ComponentDriver {
             // A component driver is launched once per component instance. Several

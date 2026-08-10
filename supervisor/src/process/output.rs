@@ -1,10 +1,12 @@
 //! Captured child-output routing and reader task cleanup.
 
-use super::{MAX_CAPTURED_LINE_BYTES, SupervisorState};
-use phoxal_cli_core::runtime::ProcessKey;
+use crate::model::ProcessKey;
+use crate::state::store::SupervisorState;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinHandle;
+
+const MAX_CAPTURED_LINE_BYTES: usize = 16 * 1024;
 use tokio::time::timeout;
 
 pub(crate) fn spawn_output_reader<R>(

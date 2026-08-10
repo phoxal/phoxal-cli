@@ -131,7 +131,7 @@ impl WebotsSceneDescription {
 
     fn render_joint(&self, joint: &Joint, mesh_url_prefix: &str) -> Result<Node> {
         let child_body =
-            self.render_link_subtree_with_mesh_url_prefix(joint.child(), mesh_url_prefix)?;
+            self.render_link_subtree_with_mesh_url_prefix(joint.child().as_str(), mesh_url_prefix)?;
         let axis = Self::vec3(joint.axis());
         let joint_type = convert_joint_type(joint.kind())?;
 
@@ -165,7 +165,7 @@ impl WebotsSceneDescription {
                 let mut hinge_joint = HingeJoint::new()
                     .with_joint_parameters(Box::new(Node::HingeJointParameters(joint_parameters)))
                     .with_end_point(Box::new(child_body));
-                let capabilities = self.render_joint_capabilities(joint.name());
+                let capabilities = self.render_joint_capabilities(joint.name().as_str());
                 if !capabilities.is_empty() {
                     hinge_joint = hinge_joint.with_device(capabilities);
                 }
@@ -188,7 +188,7 @@ impl WebotsSceneDescription {
                             .with_static_friction(friction),
                     )))
                     .with_end_point(Box::new(child_body));
-                let capabilities = self.render_joint_capabilities(joint.name());
+                let capabilities = self.render_joint_capabilities(joint.name().as_str());
                 if !capabilities.is_empty() {
                     slider_joint = slider_joint.with_device(capabilities);
                 }
@@ -241,7 +241,7 @@ impl WebotsSceneDescription {
             if joint.kind() == JointKind::Fixed {
                 let child_transform = transform_to_root * pose_to_isometry(joint.origin());
                 assembly.extend(self.collect_fixed_subtree(
-                    joint.child(),
+                    joint.child().as_str(),
                     &child_transform,
                     mesh_url_prefix,
                 )?);
@@ -279,7 +279,7 @@ impl WebotsSceneDescription {
     fn collect_rendered_solid_link_ids_from(&self, link_id: &str, link_ids: &mut BTreeSet<String>) {
         if !self.is_physical_link(link_id) {
             for joint in self.child_joints(link_id) {
-                self.collect_rendered_solid_link_ids_from(joint.child(), link_ids);
+                self.collect_rendered_solid_link_ids_from(joint.child().as_str(), link_ids);
             }
             return;
         }
@@ -296,11 +296,11 @@ impl WebotsSceneDescription {
         for joint in self.child_joints(link_id) {
             if joint.kind() == JointKind::Fixed {
                 self.collect_jointed_rendered_solid_link_ids_under_fixed_subtree(
-                    joint.child(),
+                    joint.child().as_str(),
                     link_ids,
                 );
             } else {
-                self.collect_rendered_solid_link_ids_from(joint.child(), link_ids);
+                self.collect_rendered_solid_link_ids_from(joint.child().as_str(), link_ids);
             }
         }
     }

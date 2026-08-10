@@ -1,5 +1,5 @@
+use crate::source::resolver::{discover_robot_yaml, load_robot};
 use anyhow::{Context, Result};
-use phoxal_cli_core::project::resolver::{discover_robot_yaml, load_robot};
 use std::path::{Path, PathBuf};
 
 pub(crate) struct LoadedProject {

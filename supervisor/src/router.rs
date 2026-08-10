@@ -66,7 +66,7 @@ impl EmbeddedRouter {
 /// caller decides what losing the router means to it: for `phoxald` it is a
 /// typed `RouterLost` failure that terminates the execution.
 pub async fn start_embedded_router(
-    execution: phoxal_cli_core::identity::ExecutionId,
+    execution: phoxal_runtime_contract::identity::ExecutionId,
     endpoint: String,
     config: Option<&Path>,
     on_lost: RouterLost,
@@ -151,7 +151,7 @@ mod tests {
         // A fragment can set `exit_on_failure=false`, which would send binding
         // to a background retry task and make a successful open mean nothing.
         let error = start_embedded_router(
-            phoxal_cli_core::identity::ExecutionId::mint(),
+            phoxal_runtime_contract::identity::ExecutionId::mint(),
             "tcp/127.0.0.1:7447#exit_on_failure=false".into(),
             None,
             ignored(),
@@ -175,7 +175,7 @@ mod tests {
         let endpoint = format!("unixsock-stream/{}", socket.display());
 
         let router = start_embedded_router(
-            phoxal_cli_core::identity::ExecutionId::mint(),
+            phoxal_runtime_contract::identity::ExecutionId::mint(),
             endpoint.clone(),
             None,
             ignored(),
@@ -202,7 +202,7 @@ mod tests {
         let (on_lost, recorded) = recorder();
 
         let router = start_embedded_router(
-            phoxal_cli_core::identity::ExecutionId::mint(),
+            phoxal_runtime_contract::identity::ExecutionId::mint(),
             endpoint,
             None,
             on_lost,
