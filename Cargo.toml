@@ -60,12 +60,12 @@ thiserror = "2.0.18"
 
 # The framework train. Every crate in this workspace speaks one train, so the
 # pins live here and nowhere else.
-phoxal-api = "0.57.0"
-phoxal-bundle = "0.57.0"
-phoxal-bus = "0.57.0"
-phoxal-manifest = "0.57.0"
-phoxal-model = "0.57.0"
-phoxal-runtime-contract = "0.57.0"
+phoxal-api = "0.58.0"
+phoxal-bundle = "0.58.0"
+phoxal-bus = "0.58.0"
+phoxal-manifest = "0.58.0"
+phoxal-model = "0.58.0"
+phoxal-runtime-contract = "0.58.0"
 
 phoxal-cli-catalog = { path = "crates/catalog" }
 phoxal-cli-host = { path = "crates/host" }
