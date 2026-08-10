@@ -8,7 +8,7 @@ description.workspace = true
 documentation.workspace = true
 homepage.workspace = true
 repository.workspace = true
-publish = false
+publish = ["phoxal-internal"]
 
 # The project/build/deploy tool and the disposable attached client.
 # It is bin-only: the shipped executable is `phoxal`, and

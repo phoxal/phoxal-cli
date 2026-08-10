@@ -3,8 +3,10 @@
 # GitHub Release so no public release exists before every binary is packaged.
 [workspace]
 publish = false
-# Required for release-plz to process these packages in `release-pr`; the
-# publish/tag/GitHub-release side effects are disabled independently below.
+# Process the packages in `release-pr`; publication and GitHub-release side
+# effects remain owned by the repository workflow below. Each manifest's
+# unconfigured internal-registry allowlist makes the package visible to
+# release-plz without making it publishable to crates.io.
 release = true
 release_always = false
 dependencies_update = false
@@ -22,6 +24,7 @@ git_tag_name = "v{{ version }}"
 [[package]]
 name = "phoxal-cli-client"
 version_group = "phoxal-cli"
+changelog_path = "CHANGELOG.md"
 
 [[package]]
 name = "phoxal-cli-supervisor"
