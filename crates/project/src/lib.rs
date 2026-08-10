@@ -41,7 +41,8 @@ pub use paths::runtime::{
     INSTALLED_DAEMON_BINARY, INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT, RELEASES_ROOT,
     RuntimePaths, SYSTEMD_ACTIVE_ROOT, SYSTEMD_UNIT, SYSTEMD_UNIT_PATH, SYSTEMD_UNIT_ROOT,
 };
-pub use progress::{PhaseId, PhaseOutcome, PreparationEvent, Reporter, SilentReporter};
+pub use progress::{PreparationEvent, Reporter, SilentReporter};
+pub use progress_phase::{PhaseId, PhaseOutcome};
 pub use run::{DriverMode, DriverRequest, PrepareRunRequest, PreparedExecution, prepare_run};
 pub use runtime_target::{RuntimeAuthority, RuntimeTarget};
 pub use simulation::{

@@ -62,7 +62,7 @@ fn resolve_project_with(
     // for their crate-owned model assets. Physical drivers are never launched.
     let resolved = crate::progress::run_phase(
         reporter,
-        crate::PhaseId::new("validate"),
+        crate::progress_phase::PhaseId::new("validate"),
         "Validating robot.yaml",
         || {
             resolver(

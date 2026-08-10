@@ -46,7 +46,7 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
         .context("failed to stage the simulation bundle")?;
     crate::progress::run_phase(
         request.reporter.as_ref(),
-        crate::PhaseId::new("check"),
+        crate::progress_phase::PhaseId::new("check"),
         "Checking simulation graph",
         || {
             super::resolve::build_checked_sim_launch_plan(
@@ -73,7 +73,7 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
     crate::progress::ensure_active(request.reporter.as_ref())?;
     let staged_root = crate::progress::run_phase(
         request.reporter.as_ref(),
-        crate::PhaseId::new("publish"),
+        crate::progress_phase::PhaseId::new("publish"),
         "Publishing simulation runtime layout",
         || crate::stage::publish_runtime_layout(candidate),
     )?;
