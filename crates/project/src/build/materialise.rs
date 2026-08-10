@@ -158,7 +158,7 @@ pub fn cargo_install_batch(
         .join(", ");
     crate::progress::run_phase(
         reporter,
-        crate::PhaseId::new("materialize-registry-batch"),
+        crate::progress_phase::PhaseId::new("materialize-registry-batch"),
         format!("Materializing registry batch ({} packages)", packages.len()),
         || run_cargo_install(&mut command, &operands, reporter),
     )?;

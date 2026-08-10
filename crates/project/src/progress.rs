@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-pub use crate::progress_phase::{PhaseId, PhaseOutcome};
+use crate::progress_phase::{PhaseId, PhaseOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreparationEvent {

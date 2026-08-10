@@ -126,7 +126,7 @@ pub(crate) fn resolve_staging_with_registry_cache(
     let official_target = build.target().map(str::to_string);
     let resolved = crate::progress::run_phase(
         ui,
-        crate::PhaseId::new("validate"),
+        crate::progress_phase::PhaseId::new("validate"),
         "Validating robot.yaml",
         || {
             let options = ResolveOptions {
@@ -268,7 +268,7 @@ pub(crate) fn refresh_staging_resolved(
     if check_source {
         crate::progress::run_phase(
             ui,
-            crate::PhaseId::new("check"),
+            crate::progress_phase::PhaseId::new("check"),
             "Checking source graph",
             || {
                 run_source_check(
@@ -309,7 +309,7 @@ pub(crate) fn refresh_staging_resolved(
     // candidate alone - publish it as the live layout now, and only now.
     let staged_root = crate::progress::run_phase(
         ui,
-        crate::PhaseId::new("publish"),
+        crate::progress_phase::PhaseId::new("publish"),
         "Publishing runtime layout",
         || {
             crate::stage::publish_runtime_layout(candidate)
@@ -381,7 +381,7 @@ pub(crate) fn prepare_layout_run(
     );
     crate::progress::run_phase(
         reporter,
-        crate::PhaseId::new("validate"),
+        crate::progress_phase::PhaseId::new("validate"),
         "Opening runtime bundle",
         || {
             phoxal_bundle::RuntimeBundle::open_verified(layout_root)

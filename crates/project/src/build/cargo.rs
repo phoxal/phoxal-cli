@@ -495,7 +495,7 @@ fn build_source_group(
     ));
     crate::progress::run_phase(
         reporter,
-        crate::PhaseId::new("build"),
+        crate::progress_phase::PhaseId::new("build"),
         format!("Cargo batch · {group_artifact_count} selected artifacts"),
         || {
             let mut command = Command::new("cargo");

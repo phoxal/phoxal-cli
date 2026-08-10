@@ -38,7 +38,7 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
     let robot = loaded.robot;
     crate::progress::run_phase(
         request.reporter.as_ref(),
-        crate::PhaseId::new("validate"),
+        crate::progress_phase::PhaseId::new("validate"),
         "Validating robot.yaml",
         || {
             robot
