@@ -89,8 +89,7 @@ mod tests {
 
     fn meta(id: &str) -> participant_metadata::ParticipantMeta {
         participant_metadata::ParticipantMeta {
-            api: phoxal_runtime_contract::version::RobotApiVersion::new(0, 1),
-            schemas: participant_metadata::CURRENT_SCHEMAS,
+            framework: participant_metadata::CURRENT_FRAMEWORK,
             id: phoxal_runtime_contract::identity::ParticipantArtifactId::new(id)
                 .expect("fixture artifact id"),
             kind: phoxal_runtime_contract::metadata::ParticipantKind::Service,

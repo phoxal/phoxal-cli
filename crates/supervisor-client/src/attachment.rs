@@ -1,13 +1,15 @@
+use phoxal_api::supervisor;
+use phoxal_api::supervisor::command::{Command, CommandOutcome};
+use phoxal_api::supervisor::connect::{ConnectReply, ConnectRequest, PRESENCE_KEY};
+use phoxal_api::supervisor::info::ManualDrive;
+use phoxal_api::supervisor::snapshot::{Snapshot, SnapshotDocument};
 use phoxal_bus::{
     BusConfig, BusHandle, BusOwner, DEFAULT_QUERY_TIMEOUT, KeyLivelinessObserver, LivelinessStatus,
-    Querier, SourceLabel, StreamReceiver,
+    Querier, QueryError, SourceLabel, StreamReceiver,
 };
-use phoxal_runtime_contract::identity::{ExecutionId, ParticipantId, ProducerId};
-use phoxal_runtime_contract::version::RobotApiVersion;
-use phoxal_supervisor_api::{
-    Clock, Command, CommandOutcome, PRESENCE_KEY, RobotId, Snapshot, SnapshotDocument, payload,
-    supervisor,
-};
+use phoxal_runtime_contract::clock::Clock;
+use phoxal_runtime_contract::identity::{ExecutionId, ParticipantId, ProducerId, RobotId};
+use phoxal_runtime_contract::version::FrameworkVersion;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -38,8 +40,7 @@ pub struct Connected {
     pub execution: ExecutionId,
     pub robot: RobotId,
     pub clock: Clock,
-    pub robot_api: RobotApiVersion,
-    pub manual_drive: Option<payload::runtime::ManualDrive>,
+    pub manual_drive: Option<ManualDrive>,
 }
 
 /// A cloneable set of operations on one uniquely-owned attachment.
@@ -49,9 +50,9 @@ pub struct AttachmentPort {
     bus: BusHandle,
     snapshots: watch::Receiver<Option<Snapshot>>,
     disconnected: watch::Receiver<bool>,
-    command: Querier<payload::command::Request, payload::command::Reply>,
-    logs: Querier<payload::log::SnapshotRequest, payload::log::Snapshot>,
-    telemetry: Querier<payload::telemetry::SnapshotRequest, payload::telemetry::Snapshot>,
+    command: Querier<supervisor::command::Request, supervisor::command::Reply>,
+    logs: Querier<supervisor::logs::SnapshotRequest, supervisor::logs::Snapshot>,
+    telemetry: Querier<supervisor::telemetry::SnapshotRequest, supervisor::telemetry::Snapshot>,
 }
 
 impl std::fmt::Debug for AttachmentPort {
@@ -106,20 +107,20 @@ impl AttachmentPort {
         loop {
             if let Some(snapshot) = snapshots.borrow_and_update().clone() {
                 match snapshot.lifecycle {
-                    phoxal_supervisor_api::Lifecycle::Ready
-                    | phoxal_supervisor_api::Lifecycle::Degraded => return Ok(snapshot),
-                    phoxal_supervisor_api::Lifecycle::Failed => {
+                    phoxal_api::supervisor::snapshot::Lifecycle::Ready
+                    | phoxal_api::supervisor::snapshot::Lifecycle::Degraded => return Ok(snapshot),
+                    phoxal_api::supervisor::snapshot::Lifecycle::Failed => {
                         let detail = snapshot.failure.as_ref().map_or_else(
                             || "no reason was reported".to_string(),
                             |failure| format!("{:?}: {}", failure.reason, failure.detail.as_str()),
                         );
                         return Err(AttachError::ReadinessFailed(detail));
                     }
-                    phoxal_supervisor_api::Lifecycle::Stopping
-                    | phoxal_supervisor_api::Lifecycle::Stopped => {
+                    phoxal_api::supervisor::snapshot::Lifecycle::Stopping
+                    | phoxal_api::supervisor::snapshot::Lifecycle::Stopped => {
                         return Err(AttachError::StoppedBeforeReady);
                     }
-                    phoxal_supervisor_api::Lifecycle::Starting => {}
+                    phoxal_api::supervisor::snapshot::Lifecycle::Starting => {}
                 }
             }
             tokio::select! {
@@ -134,10 +135,10 @@ impl AttachmentPort {
     pub async fn command(&self, command: Command) -> Result<CommandOutcome, AttachError> {
         Ok(self
             .command
-            .query(payload::command::Request::V0 { command })
+            .query(supervisor::command::Request::V0 { command })
             .await
             .map(|reply| match reply {
-                payload::command::Reply::V0 { outcome } => outcome,
+                supervisor::command::Reply::V0 { outcome } => outcome,
             })?)
     }
 
@@ -153,8 +154,24 @@ impl AttachmentPort {
         .await
     }
 
+    /// End the execution, fenced on the newest revision this attachment has
+    /// installed. The fence is read here rather than passed in: this port owns
+    /// the snapshot watch, so it is the one place that knows the revision the
+    /// caller is actually acting on.
     pub async fn stop(&self) -> Result<CommandOutcome, AttachError> {
-        self.command(Command::Stop).await
+        self.command(Command::Stop {
+            expected_revision: self.revision()?,
+        })
+        .await
+    }
+
+    /// The revision of the newest snapshot this attachment has installed.
+    fn revision(&self) -> Result<u64, AttachError> {
+        self.snapshots
+            .borrow()
+            .as_ref()
+            .map(|snapshot| snapshot.revision)
+            .ok_or(AttachError::NoSnapshotRevision)
     }
 
     pub async fn logs(
@@ -162,10 +179,10 @@ impl AttachmentPort {
         participant_id: Option<String>,
         limit: u32,
         before_sequence: Option<u64>,
-    ) -> Result<payload::log::Snapshot, AttachError> {
+    ) -> Result<supervisor::logs::Snapshot, AttachError> {
         Ok(self
             .logs
-            .query(payload::log::SnapshotRequest {
+            .query(supervisor::logs::SnapshotRequest {
                 participant_id,
                 limit,
                 before_sequence,
@@ -175,8 +192,8 @@ impl AttachmentPort {
 
     pub async fn follow_logs(
         &self,
-    ) -> Result<StreamReceiver<supervisor::endpoint::log::FollowEndpoint>, AttachError> {
-        Ok(StreamReceiver::new(&self.bus, &supervisor::topic::client().log().follow()).await?)
+    ) -> Result<StreamReceiver<supervisor::endpoint::logs::FollowEndpoint>, AttachError> {
+        Ok(StreamReceiver::new(&self.bus, &supervisor::topic::client().logs().follow()).await?)
     }
 
     pub async fn telemetry(
@@ -184,10 +201,10 @@ impl AttachmentPort {
         participant_id: Option<String>,
         limit: u32,
         before_sequence: Option<u64>,
-    ) -> Result<payload::telemetry::Snapshot, AttachError> {
+    ) -> Result<supervisor::telemetry::Snapshot, AttachError> {
         Ok(self
             .telemetry
-            .query(payload::telemetry::SnapshotRequest {
+            .query(supervisor::telemetry::SnapshotRequest {
                 participant_id,
                 limit,
                 before_sequence,
@@ -236,6 +253,15 @@ impl Attachment {
         ))
         .await?;
 
+        // The frozen bootstrap answers before any ordinary endpoint is
+        // touched: a peer on another train can decode this one reply and name
+        // the disagreement, where a richer reply would only fail to parse.
+        let robot = framework(&bus).await?;
+        let client = FrameworkVersion::CURRENT;
+        if robot != client {
+            return Err(AttachError::IncompatibleFramework { robot, client });
+        }
+
         let stream =
             StreamReceiver::new(&bus, &supervisor::topic::client().snapshot().topic()).await?;
         let current = Querier::new(
@@ -243,17 +269,17 @@ impl Attachment {
             &supervisor::topic::client().snapshot().current(),
             DEFAULT_QUERY_TIMEOUT,
         )?
-        .query(payload::snapshot::CurrentRequest {})
+        .query(supervisor::snapshot::CurrentRequest {})
         .await?
         .into_snapshot();
         current.validate()?;
 
         let info = Querier::new(
             bus.clone(),
-            &supervisor::topic::client().runtime().info(),
+            &supervisor::topic::client().info().topic(),
             DEFAULT_QUERY_TIMEOUT,
         )?
-        .query(payload::runtime::InfoRequest {})
+        .query(supervisor::info::InfoRequest {})
         .await?;
 
         let (snapshots_tx, snapshots) = watch::channel(Some(current.clone()));
@@ -277,19 +303,18 @@ impl Attachment {
             execution,
             robot: info.robot,
             clock: info.clock,
-            robot_api: info.robot_api,
             manual_drive: info.manual_drive,
         });
         let port = AttachmentPort {
             connected,
             command: Querier::new(
                 bus.clone(),
-                &supervisor::topic::client().control().topic(),
+                &supervisor::topic::client().command().topic(),
                 DEFAULT_QUERY_TIMEOUT,
             )?,
             logs: Querier::new(
                 bus.clone(),
-                &supervisor::topic::client().log().snapshot(),
+                &supervisor::topic::client().logs().snapshot(),
                 DEFAULT_QUERY_TIMEOUT,
             )?,
             telemetry: Querier::new(
@@ -335,6 +360,27 @@ impl Attachment {
             Err(AttachError::Close(report.to_string()))
         }
     }
+}
+
+/// Complete the frozen attachment bootstrap and report the robot's train.
+///
+/// A reply this client cannot decode is a compatibility answer in its own
+/// right: the bootstrap is permanently stable, so the only reason it fails to
+/// parse is a peer that speaks a different one.
+async fn framework(bus: &BusHandle) -> Result<FrameworkVersion, AttachError> {
+    let reply = Querier::new(
+        bus.clone(),
+        &supervisor::topic::client().connect().topic(),
+        DEFAULT_QUERY_TIMEOUT,
+    )?
+    .query(ConnectRequest::V0 {})
+    .await
+    .map_err(|error| match error {
+        QueryError::Decode(detail) => AttachError::UnreadableConnectReply { detail },
+        other => AttachError::Query(other),
+    })?;
+    let ConnectReply::V0 { framework } = reply;
+    Ok(framework)
 }
 
 async fn pump_snapshots(

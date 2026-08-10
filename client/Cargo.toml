@@ -48,7 +48,6 @@ phoxal-cli-host = { workspace = true }
 phoxal-cli-observation = { workspace = true }
 phoxal-cli-project = { workspace = true }
 phoxal-cli-ui = { workspace = true }
-phoxal-supervisor-api = { workspace = true }
 phoxal-supervisor-client = { workspace = true }
 
 tokio = { workspace = true, features = ["full"] }

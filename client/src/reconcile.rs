@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use phoxal_supervisor_api::payload::runtime::Cursor;
+use phoxal_api::runtime::telemetry::Cursor;
 
 pub trait Sequenced {
     fn cursor(&self) -> Cursor;

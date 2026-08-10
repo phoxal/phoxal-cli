@@ -122,7 +122,7 @@ mod tests {
 
     fn sample(id: &str, sequence: u64) -> RuntimePerformanceSample {
         RuntimePerformanceSample {
-            record: phoxal_supervisor_api::payload::telemetry::Record {
+            record: phoxal_api::supervisor::telemetry::Record {
                 sequence,
                 participant_id: id.to_string(),
                 truncated: 0,

@@ -1,12 +1,16 @@
 //! Bounded participant runtime-telemetry retention.
+//!
+//! Every participant publishes its rollups on one live `runtime/telemetry`
+//! key, so ingestion is one subscription and the producing participant is the
+//! bus envelope's source attribution.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use phoxal_api::{runtime, supervisor};
 use phoxal_bus::{BusHandle, Codec, MessagePack, StreamEvent, StreamPublisher, StreamReceiver};
-use phoxal_supervisor_api::{payload, supervisor};
 use tokio::task::JoinSet;
 
 const RETENTION: Duration = Duration::from_secs(5 * 60);
@@ -20,7 +24,7 @@ const MAX_PAGE: usize = 256;
 struct Retained {
     received_at: Instant,
     encoded_bytes: usize,
-    record: payload::telemetry::Record,
+    record: supervisor::telemetry::Record,
 }
 
 #[derive(Default)]
@@ -37,8 +41,8 @@ impl History {
         &mut self,
         now: Instant,
         participant_id: &str,
-        rollup: payload::telemetry::Rollup,
-    ) -> Result<Option<payload::telemetry::Follow>> {
+        rollup: runtime::telemetry::Rollup,
+    ) -> Result<Option<supervisor::telemetry::Follow>> {
         self.prune(now);
         let Some(sequence) = self.sequence.checked_add(1) else {
             return Ok(None);
@@ -46,7 +50,7 @@ impl History {
         let truncated = u32::from(participant_id.len() > MAX_TOPIC_BYTES);
         let participant_id = bounded(participant_id);
         let (topics, overflow) = bounded_rows(rollup.topics, rollup.overflow);
-        let record = payload::telemetry::Record {
+        let record = supervisor::telemetry::Record {
             sequence,
             participant_id,
             truncated,
@@ -77,8 +81,8 @@ impl History {
         while self.records.len() > MAX_RECORDS || self.retained_bytes > MAX_RETAINED_BYTES {
             self.pop_front(true);
         }
-        Ok(Some(payload::telemetry::Follow {
-            cursor: payload::runtime::Cursor { sequence },
+        Ok(Some(supervisor::telemetry::Follow {
+            cursor: supervisor::telemetry::Cursor { sequence },
             record,
         }))
     }
@@ -86,8 +90,8 @@ impl History {
     fn page(
         &mut self,
         now: Instant,
-        request: &payload::telemetry::SnapshotRequest,
-    ) -> payload::telemetry::Snapshot {
+        request: &supervisor::telemetry::SnapshotRequest,
+    ) -> supervisor::telemetry::Snapshot {
         self.prune(now);
         let limit = if request.limit == 0 {
             DEFAULT_PAGE
@@ -123,8 +127,8 @@ impl History {
                 .any(|retained| retained.record.sequence < first.sequence)
                 .then_some(first.sequence)
         });
-        payload::telemetry::Snapshot {
-            cursor: payload::runtime::Cursor {
+        supervisor::telemetry::Snapshot {
+            cursor: supervisor::telemetry::Cursor {
                 sequence: self.sequence,
             },
             records,
@@ -160,11 +164,11 @@ fn bounded(value: &str) -> String {
 }
 
 fn bounded_rows(
-    rows: Vec<payload::runtime::Topic>,
-    overflow: Option<payload::runtime::Topic>,
+    rows: Vec<supervisor::telemetry::Topic>,
+    overflow: Option<supervisor::telemetry::Topic>,
 ) -> (
-    Vec<payload::runtime::Topic>,
-    Option<payload::runtime::Topic>,
+    Vec<supervisor::telemetry::Topic>,
+    Option<supervisor::telemetry::Topic>,
 ) {
     let mut aggregated = BTreeMap::new();
     for mut row in rows {
@@ -186,8 +190,8 @@ fn bounded_rows(
             merge(&mut folded, row);
         }
         folded.topic.clear();
-        folded.direction = payload::runtime::Direction::Mixed;
-        folded.buffer_kind = payload::runtime::BufferKind::Mixed;
+        folded.direction = supervisor::telemetry::Direction::Mixed;
+        folded.buffer_kind = supervisor::telemetry::BufferKind::Mixed;
         folded.overflowed_rows = folded
             .overflowed_rows
             .saturating_add(u32::try_from(tail.len()).unwrap_or(u32::MAX));
@@ -196,7 +200,7 @@ fn bounded_rows(
     (rows, overflow)
 }
 
-fn merge(target: &mut payload::runtime::Topic, source: &payload::runtime::Topic) {
+fn merge(target: &mut supervisor::telemetry::Topic, source: &supervisor::telemetry::Topic) {
     target.count = target.count.saturating_add(source.count);
     target.rate_millihz = target.rate_millihz.saturating_add(source.rate_millihz);
     target.drops = target.drops.saturating_add(source.drops);
@@ -220,11 +224,11 @@ fn merge(target: &mut payload::runtime::Topic, source: &payload::runtime::Topic)
         .saturating_add(source.overflowed_rows);
 }
 
-fn empty_overflow() -> payload::runtime::Topic {
-    payload::runtime::Topic {
+fn empty_overflow() -> supervisor::telemetry::Topic {
+    supervisor::telemetry::Topic {
         topic: String::new(),
-        direction: payload::runtime::Direction::Mixed,
-        buffer_kind: payload::runtime::BufferKind::Mixed,
+        direction: supervisor::telemetry::Direction::Mixed,
+        buffer_kind: supervisor::telemetry::BufferKind::Mixed,
         count: 0,
         rate_millihz: 0,
         drops: 0,
@@ -245,8 +249,7 @@ pub(super) async fn run(bus: BusHandle) -> Result<()> {
         bus.clone(),
         &supervisor::topic::owner().telemetry().follow(),
     )?;
-    let rollups =
-        StreamReceiver::new(&bus, &supervisor::topic::client().telemetry().rollup()).await?;
+    let rollups = StreamReceiver::new(&bus, &runtime::topic::client().telemetry().topic()).await?;
     let mut tasks = JoinSet::new();
 
     let ingest_history = Arc::clone(&history);
@@ -279,7 +282,7 @@ pub(super) async fn run(bus: BusHandle) -> Result<()> {
             super::declare::<supervisor::endpoint::telemetry::SnapshotEndpoint>(&query_bus).await?;
         loop {
             let incoming = server.recv().await?;
-            let request: payload::telemetry::SnapshotRequest =
+            let request: supervisor::telemetry::SnapshotRequest =
                 match super::decode(&incoming).await? {
                     Some(request) => request,
                     None => continue,
@@ -310,7 +313,7 @@ mod tests {
 
     #[test]
     fn duplicate_rows_are_aggregated_and_the_tail_is_explicit() {
-        let row = |index: usize| payload::runtime::Topic {
+        let row = |index: usize| supervisor::telemetry::Topic {
             topic: format!("topic/{index}"),
             ..empty_overflow()
         };

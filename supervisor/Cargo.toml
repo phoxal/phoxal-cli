@@ -16,15 +16,16 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 libc = { workspace = true }
+phoxal-api = { workspace = true }
+phoxal-bundle = { workspace = true }
 # `router` opens the embedded Zenoh router in this process.
 # The supervisor is the only crate in the workspace that enables it.
-phoxal-bundle = { workspace = true }
 phoxal-bus = { workspace = true, features = ["router"] }
 phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
-phoxal-supervisor-api = { workspace = true }
 phoxal-cli-host = { workspace = true }
 serde = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }

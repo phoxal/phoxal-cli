@@ -102,27 +102,34 @@ impl ServiceControl {
                 bail!("phoxal.service failed before readiness: {failure}");
             }
             // The completed handshake plus a snapshot is the readiness
-            // signal, exactly as it is for an interactive `run`
-            //. A unit that is up but whose graph never
-            // came together answers connect and reports why.
-            if let Ok(attachment) = phoxal_supervisor_client::Attachment::open(
+            // signal, exactly as it is for an interactive `run`. A unit that is
+            // up but whose graph never came together answers connect and
+            // reports why.
+            let attached = phoxal_supervisor_client::Attachment::open(
                 &phoxal_supervisor_client::AttachmentConfig::new(
                     endpoint,
                     crate::attach::CLIENT_PARTICIPANT,
                 ),
             )
-            .await
-            {
-                let readiness = tokio::time::timeout(
-                    Duration::from_millis(250),
-                    attachment.port().wait_ready(),
-                )
-                .await;
-                let _ = attachment.close().await;
-                if let Ok(readiness) = readiness {
-                    readiness.context("the installed runtime failed readiness")?;
-                    return Ok(());
+            .await;
+            match attached {
+                Ok(attachment) => {
+                    let readiness = tokio::time::timeout(
+                        Duration::from_millis(250),
+                        attachment.port().wait_ready(),
+                    )
+                    .await;
+                    let _ = attachment.close().await;
+                    if let Ok(readiness) = readiness {
+                        readiness.context("the installed runtime failed readiness")?;
+                        return Ok(());
+                    }
                 }
+                // The installed unit answered and speaks another framework
+                // train. Waiting out the readiness budget would report a
+                // timeout for something that will never become ready.
+                Err(error) if error.is_framework_mismatch() => return Err(error.into()),
+                Err(_) => {}
             }
             if tokio::time::Instant::now() >= deadline {
                 bail!("timed out waiting for the installed supervisor to become ready");

@@ -82,10 +82,8 @@ mod tests {
     };
     use phoxal_model::{Clock, RobotBuilder};
     use phoxal_runtime_contract::identity::{ParticipantArtifactId, ParticipantId};
-    use phoxal_runtime_contract::metadata::{
-        ParticipantContract, ParticipantKind, ParticipantSchemas,
-    };
-    use phoxal_runtime_contract::version::{BusAbi, LaunchAbi, RobotApiVersion, RuntimeSchema};
+    use phoxal_runtime_contract::metadata::{ParticipantContract, ParticipantKind};
+    use phoxal_runtime_contract::version::FrameworkVersion;
 
     use super::*;
 
@@ -163,14 +161,9 @@ mod tests {
         let reference = BinaryReference::from_source(
             binary_path.clone(),
             ParticipantContract {
+                framework: FrameworkVersion::CURRENT,
                 id: artifact_id.clone(),
                 kind,
-                api: RobotApiVersion::new(0, 1),
-                schemas: ParticipantSchemas {
-                    bus: BusAbi::V0,
-                    launch: LaunchAbi::V0,
-                    runtime: RuntimeSchema::V0,
-                },
                 requirement: None,
                 config_schema: serde_json::json!({"type": "null"}),
             },
@@ -200,14 +193,9 @@ mod tests {
             let brain = BinaryReference::from_source(
                 brain_path.clone(),
                 ParticipantContract {
+                    framework: FrameworkVersion::CURRENT,
                     id: brain_id.clone(),
                     kind: ParticipantKind::Brain,
-                    api: RobotApiVersion::new(0, 1),
-                    schemas: ParticipantSchemas {
-                        bus: BusAbi::V0,
-                        launch: LaunchAbi::V0,
-                        runtime: RuntimeSchema::V0,
-                    },
                     requirement: None,
                     config_schema: serde_json::json!({"type": "null"}),
                 },

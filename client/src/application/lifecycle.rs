@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use phoxal_supervisor_api::{Lifecycle, Snapshot};
+use phoxal_api::supervisor::snapshot::{Lifecycle, Snapshot};
 use phoxal_supervisor_client::{AttachError, Attachment, AttachmentConfig};
 
 use super::daemon::{self, LaunchedDaemon};
@@ -173,7 +173,7 @@ async fn build_publish_and_launch(
 /// Fail with the commands that actually apply when an execution already
 /// answers at this endpoint.
 async fn refuse_if_live(target: &Target) -> Result<()> {
-    if probe(&target.endpoint).await.is_none() {
+    if probe(&target.endpoint).await?.is_none() {
         return Ok(());
     }
     bail!(already_live_message(target))
@@ -198,10 +198,34 @@ fn already_live_message(target: &Target) -> String {
 ///
 /// A completed handshake is the readiness signal. The lock file's presence and
 /// the socket file's existence both survive a killed daemon; a reply does not.
-async fn probe(endpoint: &str) -> Option<Attachment> {
-    Attachment::open(&AttachmentConfig::new(endpoint, CLIENT_PARTICIPANT))
-        .await
-        .ok()
+///
+/// A robot that answered and disagreed about the framework is emphatically not
+/// "no execution here": reading it as one would start a second daemon beside a
+/// robot that is already running.
+async fn probe(endpoint: &str) -> Result<Option<Attachment>> {
+    match Attachment::open(&AttachmentConfig::new(endpoint, CLIENT_PARTICIPANT)).await {
+        Ok(attachment) => Ok(Some(attachment)),
+        Err(error) => {
+            let error = anyhow::Error::from(error);
+            if is_framework_mismatch(&error) {
+                return Err(error);
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Whether a failed attachment means the two binaries speak different
+/// framework contracts.
+///
+/// Such a failure is settled the moment it happens. No amount of waiting turns
+/// it into agreement and no other explanation fits, so every caller here lets
+/// it through untouched rather than retrying it or restating it as something
+/// else.
+fn is_framework_mismatch(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<AttachError>()
+        .is_some_and(AttachError::is_framework_mismatch)
 }
 
 /// Watch the launched daemon until it answers connect, or until it exits.
@@ -222,6 +246,12 @@ async fn await_attachment(
         match Session::open(&target.endpoint, target.project.display().to_string()).await {
             Ok(session) => return Ok(session),
             Err(error) => {
+                // A mismatch is an answer, not a pending one: spending the
+                // handshake budget on it would replace the message that
+                // explains it with a timeout.
+                if is_framework_mismatch(&error) {
+                    return Err(error);
+                }
                 if tokio::time::Instant::now() >= deadline {
                     if let Some(status) = launched.exited()? {
                         bail!(launched.early_exit_message(status));
@@ -280,14 +310,25 @@ async fn open_existing(
     };
     let session = Session::open(&target.endpoint, target.project.display().to_string())
         .await
-        .with_context(|| {
-            format!(
-                "no execution answered at {}. Start one with `phoxal run {}`",
-                target.endpoint,
-                target.project.display()
-            )
-        })?;
+        .map_err(|error| describe_missing_execution(error, &target))?;
     Ok((target, session))
+}
+
+/// Explain a failed open as "nothing is running here", unless it is a
+/// framework mismatch.
+///
+/// A robot that answered and disagreed is not a missing execution, and it
+/// already carries the only account of what happened; telling the operator to
+/// start one would bury that under advice for a different problem.
+fn describe_missing_execution(error: anyhow::Error, target: &Target) -> anyhow::Error {
+    if is_framework_mismatch(&error) {
+        return error;
+    }
+    error.context(format!(
+        "no execution answered at {}. Start one with `phoxal run {}`",
+        target.endpoint,
+        target.project.display()
+    ))
 }
 
 pub(crate) async fn attach_command(
@@ -307,10 +348,10 @@ pub(crate) async fn stop_command(
 ) -> Result<()> {
     let (target, session) = open_existing(app, requested_target, endpoint).await?;
     let outcome = match session.ports.supervisor.stop().await {
-        Ok(phoxal_supervisor_api::CommandOutcome::Accepted { .. }) => {
+        Ok(phoxal_api::supervisor::command::CommandOutcome::Accepted { .. }) => {
             await_terminal(&session).await
         }
-        Ok(phoxal_supervisor_api::CommandOutcome::Rejected { reason }) => {
+        Ok(phoxal_api::supervisor::command::CommandOutcome::Rejected { reason }) => {
             session.shutdown().await;
             bail!("the supervisor rejected the stop: {reason:?}")
         }
@@ -486,7 +527,7 @@ async fn follow_logs(session: &Session, participant: Option<&str>) {
     }
 }
 
-fn render_log(record: &phoxal_supervisor_api::payload::log::Record) -> String {
+fn render_log(record: &phoxal_api::supervisor::logs::Record) -> String {
     let mut line = format!(
         "[{}] {:?}: {}",
         record.participant_id, record.level, record.message
@@ -531,13 +572,12 @@ pub(crate) fn report_outcome(
 
 #[cfg(test)]
 mod tests {
+    use phoxal_api::supervisor::snapshot::{
+        DaemonFailure, DaemonFailureReason, DesiredState, Detail, Process, ProcessState,
+    };
     use phoxal_runtime_contract::clock::Clock;
     use phoxal_runtime_contract::identity::{ParticipantId, ProducerId, RobotId};
     use phoxal_runtime_contract::metadata::ParticipantKind;
-    use phoxal_runtime_contract::version::RobotApiVersion;
-    use phoxal_supervisor_api::{
-        DaemonFailure, DaemonFailureReason, DesiredState, Detail, Process, ProcessState,
-    };
 
     use super::*;
 
@@ -568,7 +608,6 @@ mod tests {
             execution: phoxal_runtime_contract::identity::ExecutionId::mint(),
             robot: RobotId::new("rover").expect("fixture robot"),
             clock: Clock::Simulated,
-            robot_api: RobotApiVersion::new(0, 1),
             manual_drive: None,
         }
     }
@@ -588,14 +627,83 @@ mod tests {
         assert!(rendered.contains("restarts=2"), "{rendered}");
     }
 
+    fn target() -> Target {
+        Target::at_endpoint(
+            "unixsock-stream//tmp/rover/.phoxal/run/supervisor.sock".to_string(),
+            PathBuf::from("/tmp/rover"),
+        )
+    }
+
+    fn mismatch() -> anyhow::Error {
+        AttachError::IncompatibleFramework {
+            robot: phoxal_runtime_contract::version::FrameworkVersion::new(0, 57, 0),
+            client: phoxal_runtime_contract::version::FrameworkVersion::new(0, 56, 2),
+        }
+        .into()
+    }
+
+    /// Every fatal path keys off one classifier, so a mismatch cannot be read
+    /// as "no execution answered" by one caller and as fatal by another.
+    #[test]
+    fn only_a_contract_disagreement_is_classified_as_a_framework_mismatch() {
+        assert!(is_framework_mismatch(&mismatch()));
+        assert!(is_framework_mismatch(&anyhow::Error::from(
+            AttachError::UnreadableConnectReply {
+                detail: "phoxal/supervisor-connect/v1".to_string(),
+            }
+        )));
+        assert!(!is_framework_mismatch(&anyhow::Error::from(
+            AttachError::NoRouter {
+                endpoint: "unixsock-stream//tmp/rover.sock".to_string(),
+            }
+        )));
+        assert!(!is_framework_mismatch(&anyhow::anyhow!("something else")));
+    }
+
+    /// `probe` and the handshake wait both treat a mismatch as fatal because
+    /// they share that classifier; `open_existing` additionally has to leave
+    /// the message alone, which is what this asserts.
+    #[test]
+    fn a_mismatch_reaches_the_operator_without_the_start_one_advice() {
+        let described = format!("{:#}", describe_missing_execution(mismatch(), &target()));
+        assert!(
+            described.contains("Cannot attach to this robot."),
+            "{described}"
+        );
+        assert!(described.contains("Robot framework: 0.57.0"), "{described}");
+        assert!(
+            described.contains("This client speaks framework: 0.56.2"),
+            "{described}"
+        );
+        assert!(described.contains("phoxal self upgrade"), "{described}");
+        assert!(!described.contains("Start one with"), "{described}");
+    }
+
+    /// Every other open failure still earns the advice that names the command
+    /// which would produce an execution.
+    #[test]
+    fn a_missing_execution_still_earns_the_advice_that_names_run() {
+        let described = format!(
+            "{:#}",
+            describe_missing_execution(
+                AttachError::NoRouter {
+                    endpoint: "unixsock-stream//tmp/rover.sock".to_string(),
+                }
+                .into(),
+                &target(),
+            )
+        );
+        assert!(
+            described.contains("Start one with `phoxal run /tmp/rover`"),
+            "{described}"
+        );
+    }
+
     /// `run` never silently attaches: the refusal names attach and stop, which
     /// are the two things the operator can actually do.
     #[test]
     fn a_live_execution_makes_run_fail_with_the_commands_that_apply() {
-        let target = Target::at_endpoint(
-            "unixsock-stream//tmp/rover/.phoxal/run/supervisor.sock".to_string(),
-            PathBuf::from("/tmp/rover"),
-        );
+        let target = target();
         let message = already_live_message(&target);
         assert!(message.contains("already live"), "{message}");
         assert!(message.contains("never attaches"), "{message}");

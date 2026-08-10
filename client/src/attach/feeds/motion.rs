@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use phoxal_api::v0_1 as api;
+use phoxal_api::robot as api;
 use phoxal_bus::StateView;
 use phoxal_cli_observation::{AttachmentEvent, MotionObservation, ObservationSource, SourceStatus};
 

@@ -13,36 +13,26 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use object::{Object, ObjectSection};
-#[cfg(test)]
-use phoxal_runtime_contract::metadata::ParticipantSchemas;
 use phoxal_runtime_contract::metadata::{ParticipantContract, ParticipantMetadata};
-#[cfg(test)]
-use phoxal_runtime_contract::version::{BusAbi, LaunchAbi, RuntimeSchema};
+use phoxal_runtime_contract::version::FrameworkVersion;
 
-/// The version set this CLI build speaks.
+/// The framework train every participant binary this CLI accepts must have
+/// been built from.
 ///
-/// Every field is a one-variant enum, so this is the *only* value of its type
-/// that exists on this train - which is exactly why nothing compares against
-/// it: a binary that disagrees fails to parse. It is named here so a test that
-/// synthesizes a participant binary can emit the same document a role macro
-/// does, without restating a single version string.
-#[cfg(test)]
-pub const CURRENT_SCHEMAS: ParticipantSchemas = ParticipantSchemas {
-    bus: BusAbi::V0,
-    launch: LaunchAbi::V0,
-    runtime: RuntimeSchema::V0,
-};
+/// It is the train the CLI itself links, which is the same train `phoxald`
+/// links: the two ship as one exact pair. Naming it here lets a test that
+/// synthesizes a participant binary emit the document a role macro does
+/// without restating a version string.
+pub const CURRENT_FRAMEWORK: FrameworkVersion = FrameworkVersion::CURRENT;
 
 /// One binary's accepted embedded compatibility record: the tagged `V0`
 /// document destructured into the fields callers actually branch on.
 ///
-/// Every version identity in it is a `phoxal-runtime-contract` enum with one
-/// variant per version this train speaks, so **holding this value is already
-/// the compatibility proof**. There is no set to compare it against and no
-/// check a caller could forget: a binary from another train carries a token
-/// none of those enums has a variant for, and it fails at
-/// [`phoxal_runtime_contract::parse_participant_metadata`] - where serde names
-/// both the token it found and the one it expected.
+/// The document's whole compatibility claim is the framework train it was
+/// built from, and that claim is settled by exact equality. The parse proves
+/// the *grammar* is one this CLI reads; the equality check in
+/// [`extract_participant_metadata_from_bytes`] proves the *train* is the one
+/// this CLI executes, so holding this value is the compatibility proof.
 pub type ParticipantMeta = ParticipantContract;
 
 /// The linker section names a participant attribute places its metadata
@@ -104,11 +94,10 @@ pub fn extract_participant_metadata_from_bytes(
             SECTION_NAMES.join(" or ")
         )
     })?;
-    // The parse IS the compatibility check. Every version identity in the
-    // document is a one-variant enum, so a binary from another train fails
-    // here, naming the token it carries and the token this CLI expects. The
-    // context below adds only the two things serde cannot know: which file it
-    // was, and what an operator does about it.
+    // The parse settles the document grammar: a schema tag, framework
+    // spelling, or field set this CLI does not implement fails here, naming
+    // what it found. The context below adds only the two things serde cannot
+    // know: which file it was, and what an operator does about it.
     let metadata = ParticipantMetadata::from_bytes(&bytes).with_context(|| {
         format!(
             "{describe} was built against a different phoxal train than this CLI.\n\nIf the \
@@ -118,12 +107,15 @@ pub fn extract_participant_metadata_from_bytes(
         )
     })?;
     let contract = metadata.contract();
-    let expected_api = phoxal_runtime_contract::version::RobotApiVersion::new(0, 1);
+    // The framework train is the single compatibility identity two Phoxal
+    // processes compare, and they compare it for exact equality. `phoxald`
+    // enforces the same equality over the whole bundle when it opens one; this
+    // check is what makes the disagreement arrive while the operator is still
+    // building, naming the binary that carries it.
     anyhow::ensure!(
-        contract.api == expected_api,
-        "{describe} was built against robot API {}, but this CLI executes {}. Update the project dependency and rebuild with `cargo update -p phoxal`, or update the CLI to the matching release.",
-        contract.api,
-        expected_api,
+        contract.framework == CURRENT_FRAMEWORK,
+        "{describe} was built from phoxal framework {}, but this CLI speaks framework {CURRENT_FRAMEWORK}. Update the project dependency and rebuild with `cargo update -p phoxal`, or update the CLI to the matching release.",
+        contract.framework,
     );
     Ok(contract.clone())
 }
@@ -325,7 +317,6 @@ pub fn inspect_selected_binary_for_target(
 mod tests {
     use super::*;
     use phoxal_runtime_contract::metadata::ParticipantKind;
-    use phoxal_runtime_contract::version::RobotApiVersion;
 
     #[test]
     fn malformed_object_file_fails_with_a_clear_error() -> Result<()> {
@@ -390,8 +381,7 @@ mod tests {
         serde_json::to_value(
             phoxal_runtime_contract::emit::ParticipantMetadataRecord::V0 {
                 contract: phoxal_runtime_contract::emit::ParticipantContractRecord {
-                    api: RobotApiVersion::new(0, 1),
-                    schemas: CURRENT_SCHEMAS,
+                    framework: CURRENT_FRAMEWORK,
                     id,
                     kind: ParticipantKind::Service,
                     requirement: None,
@@ -547,15 +537,14 @@ mod tests {
         );
     }
 
-    /// A binary from another train is rejected before its config schema is
-    /// trusted. The rejection is the *parse*, not a comparison: the diagnostic
-    /// therefore names the token the binary carries, the token this CLI
-    /// expects, and - from this module's own context - the fix for either
-    /// direction.
+    /// A binary from another framework train is rejected before its config
+    /// schema is trusted. The document parses - a well-formed record from any
+    /// train does - and the *comparison* is what fails, so the diagnostic names
+    /// both trains and the fix for either direction.
     #[test]
-    fn a_binary_on_another_api_revision_is_rejected_with_an_actionable_diagnostic() {
+    fn a_binary_from_another_framework_train_is_rejected_with_an_actionable_diagnostic() {
         let mut record = current_record("cleaning");
-        record["api"] = serde_json::json!("phoxal/robot-api/v9.9");
+        record["framework"] = serde_json::json!("9.9.9");
         let elf = synthesize_object(
             object::BinaryFormat::Elf,
             object::Architecture::Aarch64,
@@ -564,21 +553,26 @@ mod tests {
             serde_json::to_vec(&record).unwrap().as_slice(),
         );
         let error = extract_participant_metadata_from_bytes(&elf, "bin/cleaning")
-            .expect_err("a foreign API revision must be rejected");
+            .expect_err("a foreign framework train must be rejected");
         let message = format!("{error:#}");
         assert!(message.contains("bin/cleaning"), "{message}");
-        assert!(message.contains("phoxal/robot-api/v9.9"), "{message}");
-        assert!(message.contains("phoxal/robot-api/v0.1"), "{message}");
+        assert!(message.contains("9.9.9"), "{message}");
+        assert!(
+            message.contains(&CURRENT_FRAMEWORK.to_string()),
+            "{message}"
+        );
         assert!(message.contains("cargo update -p phoxal"), "{message}");
         assert!(message.contains("update the CLI"), "{message}");
     }
 
-    /// The same for the persisted runtime grammar.
+    /// A framework version spelled any way but the canonical SemVer string is
+    /// not a document this CLI reads at all, so it fails at the parse rather
+    /// than at the comparison.
     #[test]
-    fn a_binary_on_another_document_schema_is_rejected_naming_the_contract() {
-        for unsupported in ["runtime/v0", "phoxal/runtime/v9"] {
+    fn a_non_canonical_framework_spelling_is_rejected_by_the_parse() {
+        for unsupported in ["v0.56.2", "0.56", "0.56.2-rc.1"] {
             let mut record = current_record("drive");
-            record["schemas"]["runtime"] = serde_json::json!(unsupported);
+            record["framework"] = serde_json::json!(unsupported);
             let elf = synthesize_object(
                 object::BinaryFormat::Elf,
                 object::Architecture::Aarch64,
@@ -589,28 +583,32 @@ mod tests {
             let message = format!(
                 "{:#}",
                 extract_participant_metadata_from_bytes(&elf, "bin/phoxal-service-drive")
-                    .expect_err("a foreign robot document schema must be rejected")
+                    .expect_err("a non-canonical framework spelling must be rejected")
             );
             assert!(message.contains(unsupported), "{message}");
-            assert!(message.contains("phoxal/runtime-bundle/v0"), "{message}");
+            assert!(message.contains("different phoxal train"), "{message}");
         }
     }
 
-    /// An unknown metadata schema tag and an unknown field are both rejected by
-    /// the tagged document itself: there is no post-hoc string comparison the
-    /// CLI could get wrong.
+    /// An unknown metadata schema tag, a missing framework claim, and an
+    /// unknown field are all rejected by the tagged document itself: there is
+    /// no post-hoc string comparison the CLI could get wrong.
     #[test]
     fn an_unsupported_metadata_document_is_rejected() {
-        let mut with_framework = current_record("drive");
-        with_framework["framework"] = serde_json::json!("0.54.0");
+        let mut without_framework = current_record("drive");
+        without_framework
+            .as_object_mut()
+            .expect("the record is an object")
+            .remove("framework");
         for record in [
             serde_json::json!({
                 "schema": "phoxal/participant-metadata/v1",
+                "framework": CURRENT_FRAMEWORK.to_string(),
                 "id": "drive",
                 "kind": "service",
                 "config_schema": null,
             }),
-            with_framework,
+            without_framework,
         ] {
             let bytes = serde_json::to_vec(&record).unwrap();
             let elf = synthesize_object(

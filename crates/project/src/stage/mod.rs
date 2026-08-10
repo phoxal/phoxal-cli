@@ -63,8 +63,7 @@ pub(crate) fn test_metadata_payload(
     serde_json::to_vec(
         &phoxal_runtime_contract::emit::ParticipantMetadataRecord::V0 {
             contract: phoxal_runtime_contract::emit::ParticipantContractRecord {
-                api: phoxal_runtime_contract::version::RobotApiVersion::new(0, 1),
-                schemas: crate::check::participant_metadata::CURRENT_SCHEMAS,
+                framework: crate::check::participant_metadata::CURRENT_FRAMEWORK,
                 id,
                 kind,
                 requirement: None,

@@ -19,9 +19,9 @@ pub(crate) mod ports;
 pub(crate) mod state;
 
 use anyhow::{Context, Result};
+use phoxal_api::supervisor::{self, command::CommandOutcome, logs};
 use phoxal_cli_observation::{AttachmentEpoch, AttachmentEvent, ConnectionObservation};
 use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
-use phoxal_supervisor_api::{CommandOutcome, payload};
 use phoxal_supervisor_client::{Attachment, AttachmentConfig, AttachmentPort};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -150,12 +150,12 @@ impl Session {
     /// Observe the highest-revision snapshot this session has installed.
     pub(crate) fn snapshots(
         &self,
-    ) -> tokio::sync::watch::Receiver<Option<phoxal_supervisor_api::Snapshot>> {
+    ) -> tokio::sync::watch::Receiver<Option<supervisor::snapshot::Snapshot>> {
         self.attachment.port().snapshots()
     }
 
     /// The most recent snapshot, without awaiting.
-    pub(crate) fn snapshot(&self) -> Option<phoxal_supervisor_api::Snapshot> {
+    pub(crate) fn snapshot(&self) -> Option<supervisor::snapshot::Snapshot> {
         self.attachment.port().snapshot()
     }
 
@@ -164,7 +164,7 @@ impl Session {
         self.attachment.port().disconnected().await;
     }
 
-    pub(crate) async fn wait_ready(&self) -> Result<phoxal_supervisor_api::Snapshot> {
+    pub(crate) async fn wait_ready(&self) -> Result<supervisor::snapshot::Snapshot> {
         Ok(self.attachment.port().wait_ready().await?)
     }
 
@@ -174,7 +174,7 @@ impl Session {
         participant_id: Option<String>,
         limit: u32,
         before_sequence: Option<u64>,
-    ) -> Result<payload::log::Snapshot> {
+    ) -> Result<logs::Snapshot> {
         Ok(self
             .attachment
             .port()
@@ -185,11 +185,7 @@ impl Session {
     /// The live log stream that continues a [`Self::logs`] page.
     pub(crate) async fn follow_logs(
         &self,
-    ) -> Result<
-        phoxal_bus::StreamReceiver<
-            phoxal_supervisor_api::supervisor::endpoint::log::FollowEndpoint,
-        >,
-    > {
+    ) -> Result<phoxal_bus::StreamReceiver<supervisor::endpoint::logs::FollowEndpoint>> {
         Ok(self.attachment.port().follow_logs().await?)
     }
 

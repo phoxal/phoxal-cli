@@ -1,19 +1,19 @@
 //! The supervisor's retained participant logs, reconciled with its live feed.
 //!
-//! The endpoint is the supervisor's own (`supervisor/logs/...`), not a
-//! robot-domain tool's: the daemon is the collector now, so there is one
-//! retention and one cursor rather than a tool's history duplicated beside the
-//! supervisor's.
+//! The endpoints are the supervisor's own retained view, not the live
+//! `runtime/logs` stream every participant publishes to: the daemon is the
+//! collector, so there is one retention and one cursor rather than a second
+//! history kept beside the supervisor's.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use phoxal_api::runtime::telemetry::Cursor;
+use phoxal_api::supervisor::{self, logs};
 use phoxal_cli_observation::{
     AttachmentEvent, LogRow, LogSeverity, LogSource, ObservationSource, SourceStatus, StoreChanged,
     bounded_log_text,
 };
-use phoxal_supervisor_api::payload;
-use phoxal_supervisor_api::payload::runtime::Cursor;
 
 use super::FeedContext;
 use crate::reconcile::{ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
@@ -37,7 +37,7 @@ async fn feed(context: &FeedContext) -> Result<()> {
     'query: loop {
         reconciler.begin_query();
         let page = attachment.logs(None, PAGE, None).await?;
-        let payload::log::Snapshot {
+        let logs::Snapshot {
             cursor, records, ..
         } = page;
         let anchor = cursor;
@@ -61,7 +61,7 @@ async fn feed(context: &FeedContext) -> Result<()> {
 
         loop {
             let received = subscriber.recv().await?;
-            let payload::log::Follow { cursor, record, .. } = received.body;
+            let logs::Follow { cursor, record, .. } = received.body;
             let outcome = reconciler.follow(Follow {
                 cursor: Cursor {
                     sequence: cursor.sequence,
@@ -109,9 +109,7 @@ async fn apply(context: &FeedContext, outcome: ReconcileOutcome<Follow>) -> Resu
 }
 
 async fn requery(
-    subscriber: &phoxal_bus::StreamReceiver<
-        phoxal_supervisor_api::supervisor::endpoint::log::FollowEndpoint,
-    >,
+    subscriber: &phoxal_bus::StreamReceiver<supervisor::endpoint::logs::FollowEndpoint>,
     backoff: &mut RetryBackoff,
 ) {
     while subscriber.try_recv().is_ok_and(|item| item.is_some()) {}
@@ -121,7 +119,7 @@ async fn requery(
 #[derive(Debug, Clone)]
 struct Follow {
     cursor: Cursor,
-    record: payload::log::Record,
+    record: logs::Record,
 }
 
 impl Sequenced for Follow {
@@ -130,7 +128,7 @@ impl Sequenced for Follow {
     }
 }
 
-fn row(record: payload::log::Record) -> LogRow {
+fn row(record: logs::Record) -> LogRow {
     let mut text = format!("{:?}: {}", record.level, record.message);
     if record.dropped > 0 {
         text.push_str(&format!(" (producer dropped {})", record.dropped));
@@ -142,11 +140,11 @@ fn row(record: payload::log::Record) -> LogRow {
         participant: record.participant_id,
         source: LogSource::Bus,
         severity: match record.level {
-            payload::log::Level::Error => LogSeverity::Error,
-            payload::log::Level::Warn => LogSeverity::Warn,
-            payload::log::Level::Info => LogSeverity::Info,
-            payload::log::Level::Debug => LogSeverity::Debug,
-            payload::log::Level::Trace => LogSeverity::Trace,
+            logs::Level::Error => LogSeverity::Error,
+            logs::Level::Warn => LogSeverity::Warn,
+            logs::Level::Info => LogSeverity::Info,
+            logs::Level::Debug => LogSeverity::Debug,
+            logs::Level::Trace => LogSeverity::Trace,
         },
         text: bounded_log_text(&text),
         event_time: wall_time(record.time),
@@ -155,7 +153,7 @@ fn row(record: payload::log::Record) -> LogRow {
 
 /// The record's own wall clock, which may be another machine's. It is rendered,
 /// never compared against this client's monotonic clock.
-fn wall_time(time: payload::log::Timestamp) -> SystemTime {
+fn wall_time(time: logs::Timestamp) -> SystemTime {
     let nanos = Duration::from_nanos(u64::from(time.nanos.min(999_999_999)));
     let seconds = if time.unix_seconds >= 0 {
         UNIX_EPOCH.checked_add(Duration::from_secs(time.unix_seconds.unsigned_abs()))

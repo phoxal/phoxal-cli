@@ -21,6 +21,21 @@ use phoxal_cli_catalog::Catalog;
 /// the bundle. Opening the result proves every indexed asset and executable
 /// before the candidate can be published.
 pub(crate) fn write_runtime_document(root: &Path, resolved: &BundlePlan) -> Result<RuntimeBundle> {
+    // `cargo install --root <candidate>` leaves its bookkeeping beside `bin/`.
+    // Those files carry absolute host paths and are not bundle content; the
+    // strict bundle layout rightly refuses them, so they go before the
+    // candidate becomes a bundle.
+    for name in crate::bundle::archive::CARGO_INSTALL_BOOKKEEPING {
+        let path = root.join(name);
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error).with_context(|| {
+                format!("failed to remove {} from the candidate", path.display())
+            });
+        }
+    }
+
     let simulated = SimulationMembership::from_bundle_assets(
         &root.join(phoxal_bundle::ASSETS_DIR),
         &resolved.source_manifest.used_component_types(),
