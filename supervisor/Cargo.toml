@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish = false
+publish = ["phoxal-internal"]
 
 # The durable headless execution supervisor. It takes one finalized bundle root
 # and nothing else: no mode flags, no driver flags, and no
