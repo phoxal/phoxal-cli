@@ -29,8 +29,7 @@ Wants=network-online.target
 Type=notify
 NotifyAccess=main
 User=phoxal
-Group=phoxal-engineering
-SupplementaryGroups=phoxal
+Group=phoxal
 WorkingDirectory={active}
 ExecStart={daemon} {active}
 Restart=on-failure
@@ -59,8 +58,7 @@ WantedBy=multi-user.target
 pub(crate) async fn install(app: &AppContext) -> Result<()> {
     require_root()?;
     require_systemd()?;
-    ensure_group("phoxal", true)?;
-    ensure_group("phoxal-engineering", false)?;
+    ensure_service_group()?;
     ensure_service_user()?;
     ensure_runtime_paths()?;
     write_managed_unit(Path::new(UNIT_PATH))?;
@@ -90,9 +88,8 @@ pub(crate) async fn uninstall(app: &AppContext) -> Result<()> {
         sync_parent(path)?;
         run_status("systemctl", &["daemon-reload"])?;
     }
-    app.ui.info(
-            "removed phoxal.service; releases, state, users, and hardware-group membership were preserved",
-        );
+    app.ui
+        .info("removed phoxal.service; releases, state, and the phoxal user were preserved");
     Ok(())
 }
 
@@ -125,20 +122,17 @@ fn require_systemd() -> Result<()> {
     Ok(())
 }
 
-fn ensure_group(name: &str, system: bool) -> Result<()> {
+/// The unit runs as its own `phoxal` user, so the user's own group has to exist
+/// before `useradd --gid` can name it.
+fn ensure_service_group() -> Result<()> {
     if Command::new("getent")
-        .args(["group", name])
+        .args(["group", "phoxal"])
         .status()
         .is_ok_and(|status| status.success())
     {
         return Ok(());
     }
-    let mut args = Vec::new();
-    if system {
-        args.push("--system");
-    }
-    args.push(name);
-    run_status("groupadd", &args)
+    run_status("groupadd", &["--system", "phoxal"])
 }
 
 fn ensure_service_user() -> Result<()> {
@@ -147,17 +141,7 @@ fn ensure_service_user() -> Result<()> {
         .status()
         .is_ok_and(|status| status.success())
     {
-        return run_status(
-            "usermod",
-            &[
-                "--gid",
-                "phoxal",
-                "--append",
-                "--groups",
-                "phoxal-engineering",
-                "phoxal",
-            ],
-        );
+        return run_status("usermod", &["--gid", "phoxal", "phoxal"]);
     }
     run_status(
         "useradd",
@@ -165,8 +149,6 @@ fn ensure_service_user() -> Result<()> {
             "--system",
             "--gid",
             "phoxal",
-            "--groups",
-            "phoxal-engineering",
             "--home-dir",
             phoxal_cli_project::INSTALL_ROOT,
             "--shell",
@@ -178,7 +160,6 @@ fn ensure_service_user() -> Result<()> {
 
 fn ensure_runtime_paths() -> Result<()> {
     use std::fs::OpenOptions;
-    use std::os::unix::fs::PermissionsExt;
     for path in [
         phoxal_cli_project::RELEASES_ROOT,
         phoxal_cli_project::INSTALLED_STATE_ROOT,
@@ -186,17 +167,12 @@ fn ensure_runtime_paths() -> Result<()> {
     ] {
         std::fs::create_dir_all(path)?;
     }
-    std::fs::set_permissions(
-        phoxal_cli_project::RELEASES_ROOT,
-        std::fs::Permissions::from_mode(0o755),
-    )?;
-    run_status("chown", &["root:root", phoxal_cli_project::RELEASES_ROOT])?;
+    // The unit runs as `phoxal`, so the two roots it writes have to belong to it.
     for path in [
         phoxal_cli_project::INSTALLED_STATE_ROOT,
         phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
     ] {
-        run_status("chown", &["phoxal:phoxal-engineering", path])?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o2775))?;
+        run_status("chown", &["phoxal:phoxal", path])?;
     }
     let lock = Path::new(phoxal_cli_project::INSTALLED_STATE_ROOT).join("project.lock");
     OpenOptions::new()
@@ -206,12 +182,7 @@ fn ensure_runtime_paths() -> Result<()> {
         .truncate(false)
         .open(&lock)?
         .sync_all()?;
-    run_status(
-        "chown",
-        &["phoxal:phoxal-engineering", lock.to_string_lossy().as_ref()],
-    )?;
-    std::fs::set_permissions(lock, std::fs::Permissions::from_mode(0o660))?;
-    Ok(())
+    run_status("chown", &["phoxal:phoxal", lock.to_string_lossy().as_ref()])
 }
 
 fn write_managed_unit(path: &Path) -> Result<()> {
@@ -282,7 +253,7 @@ mod unit_tests {
         assert!(unit.contains("Type=notify"));
         assert!(unit.contains("NotifyAccess=main"));
         assert!(unit.contains("WatchdogSec=30s"));
-        assert!(unit.contains("User=phoxal\nGroup=phoxal-engineering"));
+        assert!(unit.contains("User=phoxal\nGroup=phoxal"));
         assert!(!unit.contains("StateDirectory="));
         assert!(!unit.contains("participant"));
     }

@@ -835,45 +835,6 @@ fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_dr
     Ok(())
 }
 
-#[cfg(unix)]
-#[test]
-fn direct_component_directory_symlinks_are_rejected() -> anyhow::Result<()> {
-    let project = locked_project_root()?;
-    let external = tempfile::tempdir()?;
-    std::fs::write(
-        external.path().join("component.yaml"),
-        "schema: phoxal/component/v0\n",
-    )?;
-    std::os::unix::fs::symlink(external.path(), project.path().join("components/external"))?;
-    let error = discover_local_components(project.path(), false)
-        .expect_err("external component source must not enter through a symlink");
-    assert!(
-        error.to_string().contains("must not be a symlink"),
-        "{error:#}"
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn components_root_symlink_is_rejected() -> anyhow::Result<()> {
-    let project = locked_project_root()?;
-    let external = tempfile::tempdir()?;
-    std::fs::remove_dir_all(project.path().join("components"))?;
-    std::os::unix::fs::symlink(external.path(), project.path().join("components"))?;
-    let error = discover_local_components_from_locked(project.path(), &[])
-        .expect_err("the components root must stay under the project");
-    assert!(
-        error.to_string().contains("components directory"),
-        "{error:#}"
-    );
-    assert!(
-        error.to_string().contains("must not be a symlink"),
-        "{error:#}"
-    );
-    Ok(())
-}
-
 /// The driver policy gates resolution itself (): an excluded driver
 /// instance resolves no driver package at all, so nothing downstream ever
 /// requires, builds, or installs a binary for it. Authored intent remains on

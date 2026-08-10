@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
+use phoxal_cli_project::shell_quote;
 
 use crate::cli::context::AppContext;
 
@@ -179,18 +180,12 @@ pub(crate) fn create_remote_temp(target: &str) -> Result<String> {
         output.status.success(),
         "failed to create remote temporary directory"
     );
-    let path = String::from_utf8(output.stdout)?.trim().to_string();
-    anyhow::ensure!(
-        path.starts_with("/tmp/phoxal-deploy.")
-            && path
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte)),
-        "remote host returned unsafe temporary path `{path}`"
-    );
-    Ok(path)
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
 pub(crate) fn cleanup_remote_temp(target: &str, path: &str) -> Result<()> {
+    // `rm -rf` is destructive and the path came back over a pipe, so the prefix
+    // this call created is what it is allowed to remove.
     anyhow::ensure!(
         path.starts_with("/tmp/phoxal-deploy."),
         "refusing to clean unexpected remote path `{path}`"
@@ -226,10 +221,6 @@ pub(crate) fn run_local(program: &str, args: &[&str]) -> Result<()> {
         args.join(" ")
     );
     Ok(())
-}
-
-pub(crate) fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 pub(crate) async fn deploy_command(

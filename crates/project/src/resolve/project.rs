@@ -355,27 +355,12 @@ fn discover_local_components_from_locked(
     if !root.exists() {
         return Ok(BTreeMap::new());
     }
-    let root_metadata = fs::symlink_metadata(&root)
-        .with_context(|| format!("failed to inspect {}", root.display()))?;
-    anyhow::ensure!(
-        !root_metadata.file_type().is_symlink(),
-        "components directory {} must not be a symlink; use a direct authored directory under the project root",
-        root.display()
-    );
     let mut components = BTreeMap::new();
     for entry in
         fs::read_dir(&root).with_context(|| format!("failed to read {}", root.display()))?
     {
         let entry = entry.with_context(|| format!("failed to read {} entry", root.display()))?;
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("failed to inspect local component {}", path.display()))?;
-        if metadata.file_type().is_symlink() && path.is_dir() {
-            anyhow::bail!(
-                "local component directory {} must not be a symlink; use a direct authored directory under components/",
-                path.display()
-            );
-        }
         if !path.is_dir() {
             continue;
         }

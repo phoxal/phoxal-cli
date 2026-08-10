@@ -228,6 +228,16 @@ pub fn run_stdout(
     );
 }
 
+/// Quote one argument for a POSIX shell, so a path with a space or a quote in
+/// it reaches the remote or in-container shell as the single word it is.
+///
+/// Always quotes: an unquoted fast path buys nothing and is one more spelling
+/// of the same rule to keep right.
+#[must_use]
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

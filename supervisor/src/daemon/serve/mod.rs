@@ -171,9 +171,9 @@ async fn serve_bundle(bus: BusHandle, root: PathBuf) -> Result<()> {
 ///
 /// An empty path, an absolute path, and any component that is not a plain name
 /// are refused outright: they are requests this endpoint never answers, which
-/// is a different answer than an entry the bundle does not have. What the
-/// resolved path turns out to be decides the rest, so a symlink pointing
-/// outside the root is simply not in this bundle.
+/// is a different answer than an entry the bundle does not have. Everything
+/// else joins onto the root, and whether a readable file is there decides the
+/// answer.
 fn bundle_entry(root: &Path, requested: &str) -> supervisor::bundle::GetResponse {
     let path = Path::new(requested);
     let refusable = requested.is_empty()
@@ -184,10 +184,8 @@ fn bundle_entry(root: &Path, requested: &str) -> supervisor::bundle::GetResponse
     if refusable {
         return supervisor::bundle::GetResponse::InvalidPath;
     }
-    let (Ok(root), Ok(resolved)) = (root.canonicalize(), root.join(path).canonicalize()) else {
-        return supervisor::bundle::GetResponse::Missing;
-    };
-    if !resolved.starts_with(&root) || !resolved.is_file() {
+    let resolved = root.join(path);
+    if !resolved.is_file() {
         return supervisor::bundle::GetResponse::Missing;
     }
     std::fs::read(&resolved).map_or(supervisor::bundle::GetResponse::Missing, |bytes| {

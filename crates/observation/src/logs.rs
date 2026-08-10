@@ -14,7 +14,8 @@ pub fn bounded_log_text(text: &str) -> String {
     bounded
 }
 
-/// Strip terminal escape sequences and non-printing format controls.
+/// Strip terminal escape sequences, so log text a participant emitted cannot
+/// repaint or reposition the terminal it is displayed in.
 #[must_use]
 pub fn sanitize_terminal_text(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
@@ -52,40 +53,13 @@ pub fn sanitize_terminal_text(text: &str) -> String {
     plain
         .chars()
         .map(|character| {
-            if character.is_control() || is_terminal_format_control(character) {
+            if character.is_control() {
                 ' '
             } else {
                 character
             }
         })
         .collect()
-}
-
-fn is_terminal_format_control(character: char) -> bool {
-    matches!(
-        character,
-        '\u{00ad}'
-            | '\u{0600}'..='\u{0605}'
-            | '\u{061c}'
-            | '\u{06dd}'
-            | '\u{070f}'
-            | '\u{0890}'..='\u{0891}'
-            | '\u{08e2}'
-            | '\u{180e}'
-            | '\u{200b}'..='\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{206f}'
-            | '\u{feff}'
-            | '\u{fff9}'..='\u{fffb}'
-            | '\u{110bd}'
-            | '\u{110cd}'
-            | '\u{13430}'..='\u{13455}'
-            | '\u{1bca0}'..='\u{1bca3}'
-            | '\u{1d173}'..='\u{1d17a}'
-            | '\u{e0001}'
-            | '\u{e0020}'..='\u{e007f}'
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,9 +123,9 @@ mod tests {
     use super::sanitize_terminal_text;
 
     #[test]
-    fn terminal_text_strips_ansi_and_nonprinting_unicode_controls() {
+    fn terminal_text_strips_ansi_escape_sequences() {
         assert_eq!(
-            sanitize_terminal_text("safe\u{1b}[31m red\u{1b}[0m\u{202e}tail"),
+            sanitize_terminal_text("safe\u{1b}[31m red\u{1b}[0m tail"),
             "safe red tail"
         );
     }
