@@ -1,12 +1,12 @@
 //! Prepare responsibilities for run.
 //!
-//! `run` is universal (): it prepares the same [`PreparedRun`] whether the
-//! root is a buildable source project or an already-staged runtime layout (an
-//! extracted `build.phoxal` or a `.phoxal/bundle/` directory). Both end
-//! at one execution artifact: a verified [`phoxal_bundle::RuntimeBundle`]. The
-//! two entry points differ only in the staging step before it: a source root
-//! resolves, checks, and stages; a bundle root has nothing to build and runs in
-//! place.
+//! `run` is universal: it prepares the same execution whether the root is a
+//! buildable source project or an already-built deployment release (an
+//! installed release, or an extracted `build.phoxal`). Both end at one
+//! execution artifact: a verified deployment release - one bundle and the
+//! `phoxald` that runs it. The two entry points differ only in the staging step
+//! before it: a source root resolves, checks, stages, and packages the
+//! executor; a release has nothing to build and is executed as it stands.
 
 use super::{DriverPolicy, RunOptions};
 use super::{PrepareRunRequest, PreparedExecution};
@@ -46,8 +46,8 @@ use std::path::PathBuf;
 pub(crate) struct StagedProject {
     pub(crate) resolved: BundlePlan,
     pub(crate) driver_policy: DriverPolicy,
-    /// The staged runtime layout root - `.phoxal/bundle/`.
-    pub(crate) staged_root: std::path::PathBuf,
+    /// The published deployment release - `.phoxal/release/`.
+    pub(crate) release: crate::deployment::ReleaseLayout,
 }
 
 /// One source/package resolution plus the exact options and staging profile
@@ -180,13 +180,15 @@ pub(crate) fn refresh_staging(
 }
 
 /// Materialize one resolved source graph, validate the whole compiled layout
-/// through the loader, and publish only a complete candidate.
+/// through the loader, package the executor, and publish only a complete
+/// candidate.
 ///
 /// `run`, `start`, and every local/container build backend converge here after
 /// resolution. All materialization, source validation, flat `bin/` completion,
 /// and loader validation happens against an unpublished candidate exactly once;
-/// only then is it published as `.phoxal/bundle/`.
-/// A failure anywhere therefore leaves the previous live bundle untouched.
+/// only then is it completed with its executor and published as
+/// `.phoxal/release/`. A failure anywhere therefore leaves the previous live
+/// release untouched, and a published release always has both halves.
 pub(crate) fn refresh_staging_resolved(
     input: ResolvedStagingInput,
     check_source: bool,
@@ -200,10 +202,15 @@ pub(crate) fn refresh_staging_resolved(
         options,
         build,
     } = input;
+    // The executor this release will carry was resolved before anything was
+    // compiled: a release that cannot be executed is not worth building, and
+    // the refusal arrives in seconds rather than after a full build.
+    let executor = build.executor().to_path_buf();
+    let expected_executor = build.expected_executor_target()?;
     // Stage into an UNPUBLISHED candidate. Every install, source build,
     // metadata read, and loader validation below runs against
-    // `candidate.path()`; only the final `publish_runtime_layout` call at the
-    // bottom of this function ever touches the live `.phoxal/bundle/`.
+    // `candidate.path()`; only the final `finalize_release` call at the bottom
+    // of this function ever touches the live `.phoxal/release/`.
     // Driver exclusion is applied HERE, at finalization, before any binary is
     // resolved or inspected: the excluded `driver:` blocks are stripped out of
     // the finalized document, so nothing downstream can see them.
@@ -306,38 +313,39 @@ pub(crate) fn refresh_staging_resolved(
     // staged binaries were cross-compiled (or container-built) for it, not
     // for this host.
     // Every install, build, check, and validation above succeeded against the
-    // candidate alone - publish it as the live layout now, and only now.
-    let staged_root = crate::progress::run_phase(
+    // candidate alone - complete it with its executor and publish it as the
+    // live release now, and only now.
+    let release = crate::progress::run_phase(
         ui,
         crate::progress_phase::PhaseId::new("publish"),
-        "Publishing runtime layout",
+        "Publishing deployment release",
         || {
-            crate::stage::publish_runtime_layout(candidate)
-                .context("failed to publish the staged runtime layout")
+            crate::stage::finalize_release(candidate, &executor, &expected_executor)
+                .context("failed to publish the staged deployment release")
         },
     )?;
 
     Ok(StagedProject {
         resolved,
         driver_policy,
-        staged_root,
+        release,
     })
 }
 
-/// Prepare a run from a buildable source project: refresh the staged runtime
-/// layout through the shared [`refresh_staging`] entry, then construct and
-/// validate the launch plan from that staged layout. The plan and every
-/// executable come from the staged layout, never the resolved graph directly
-/// () - the resolved graph is a staging-side input only.
+/// Prepare a run from a buildable source project: refresh the staged deployment
+/// release through the shared [`refresh_staging`] entry. The plan and every
+/// executable come from the staged bundle, never the resolved graph directly -
+/// the resolved graph is a staging-side input only.
 pub(crate) fn prepare_source_run(
     project_start: &Path,
     options: RunOptions,
+    executor: PathBuf,
     ui: &dyn crate::Reporter,
-) -> Result<PathBuf> {
+) -> Result<crate::deployment::ReleaseLayout> {
     let staged = refresh_staging(
         project_start,
         &options,
-        &StagingBuild::host_runtime(),
+        &StagingBuild::host_runtime(executor),
         true,
         ui,
     )?;
@@ -351,25 +359,21 @@ pub(crate) fn prepare_source_run(
         ui,
     );
 
-    // The staging-side record of source crate directories the source-free plan
-    // no longer carries: a participant built from local source runs from its
-    // crate directory (relative asset resolution) and is rebuilt there under
-    // Execution identity always comes from the plan's `bin/` name.
-    Ok(staged.staged_root)
+    Ok(staged.release)
 }
 
-/// Prepare a run from an already-staged runtime layout at `layout_root` - an
-/// extracted `build.phoxal` or a `.phoxal/bundle/` directory. There is
-/// nothing to build, resolve, or materialize: the launch plan and every
-/// executable come from the layout's flat `bin/` store, so this needs no
-/// Cargo, toolchain, or network. An arbitrary layout keeps runtime state
-/// under `<layout_root>/.phoxal`; the installed `/var/phoxal` identity maps
-/// persistent state to `/var/lib/phoxal/state` and sockets to `/run/phoxal`.
-pub(crate) fn prepare_layout_run(
-    layout_root: &Path,
+/// Prepare a run from an already-built deployment release at `release_root` -
+/// an installed release, or an extracted `build.phoxal`. There is nothing to
+/// build, resolve, or materialize: the executor and every participant
+/// executable are already in the release, so this needs no Cargo, toolchain, or
+/// network. The installed `/var/phoxal` identity maps persistent state to
+/// `/var/lib/phoxal/state` and sockets to `/run/phoxal`, so nothing is ever
+/// written into the release itself.
+pub(crate) fn prepare_release_run(
+    release_root: &Path,
     options: RunOptions,
     reporter: &dyn crate::Reporter,
-) -> Result<PathBuf> {
+) -> Result<crate::deployment::ReleaseLayout> {
     // Driver selection was applied at finalization, by stripping the excluded
     // `driver:` blocks out of this bundle's own document. There is nothing left
     // to select here, so a driver flag against an existing bundle is refused
@@ -379,19 +383,19 @@ pub(crate) fn prepare_layout_run(
         "driver selection is written into the bundle at build time; run the source project to \
          change it, or run this bundle as it was finalized"
     );
-    crate::progress::run_phase(
+    let release = crate::progress::run_phase(
         reporter,
         crate::progress_phase::PhaseId::new("validate"),
-        "Opening runtime bundle",
+        "Opening deployment release",
         || {
-            phoxal_bundle::RuntimeBundle::open_verified(layout_root)
-                .context("failed to verify the compiled runtime bundle")
+            crate::deployment::validate_release(release_root)
+                .context("failed to verify the deployment release")
         },
     )?;
     reporter.report(crate::PreparationEvent::ProjectResolved {
         train: "staged".to_string(),
     });
-    Ok(layout_root.to_path_buf())
+    Ok(release)
 }
 
 pub fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecution> {
@@ -403,16 +407,28 @@ pub fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecution> {
     };
     let execution_root =
         crate::paths::runtime::pin_installed_release(&request.target.logical_root)?;
-    let prepared = match classify_run_root(&execution_root)? {
+    let release = match classify_run_root(&execution_root)? {
         RunRootKind::Source => {
-            prepare_source_run(&execution_root, options, request.reporter.as_ref())?
+            // A locally run release is executed by this host, so it packages
+            // the daemon this client's own installation provides.
+            let executor = request.executor.executor_for(
+                &crate::source::host_target_triple(),
+                request.offline,
+                request.reporter.as_ref(),
+            )?;
+            prepare_source_run(
+                &execution_root,
+                options,
+                executor,
+                request.reporter.as_ref(),
+            )?
         }
-        RunRootKind::Layout => {
-            prepare_layout_run(&execution_root, options, request.reporter.as_ref())?
+        RunRootKind::Release => {
+            prepare_release_run(&execution_root, options, request.reporter.as_ref())?
         }
     };
     Ok(PreparedExecution {
-        staged_root: prepared,
+        release,
         simulation: None,
     })
 }
@@ -420,29 +436,34 @@ pub fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecution> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunRootKind {
     Source,
-    Layout,
+    Release,
 }
 
 /// Classify the root from its filesystem shape only. In particular, do not use
 /// locked-train resolution as a probe: a malformed or missing lock is a source
 /// project validation error, not evidence that the root is neither source nor
-/// layout.
+/// release.
 fn classify_run_root(root: &Path) -> Result<RunRootKind> {
     let has_robot = root.join("robot.yaml").is_file();
     if has_robot && root.join("Cargo.toml").is_file() {
         return Ok(RunRootKind::Source);
     }
-    if root.join(phoxal_bundle::RUNTIME_FILE).is_file() {
-        return Ok(RunRootKind::Layout);
+    if crate::deployment::is_release_root(root) {
+        return Ok(RunRootKind::Release);
     }
     if has_robot {
         return Ok(RunRootKind::Source);
     }
+    // A bare bundle directory is deliberately not runnable: an execution is a
+    // release, so the daemon that runs a bundle is the one packaged with it.
+    crate::deployment::refuse_bundle_shaped_release(root)?;
     anyhow::bail!(
         "{} is neither a buildable source project (no robot.yaml/root Cargo package) nor a \
-         staged runtime layout (no robot.json/assets next to bin/); run from a robot project or extract \
-         a build.phoxal bundle first",
-        root.display()
+         deployment release (no `{}` beside `{}/`); run from a robot project or extract a \
+         build.phoxal first",
+        root.display(),
+        crate::deployment::EXECUTOR_FILE,
+        crate::deployment::BUNDLE_DIR,
     );
 }
 

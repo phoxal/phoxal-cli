@@ -145,9 +145,11 @@ async fn build_publish_and_launch(
     let (reporter, signal_task) =
         crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
     let offline = app.offline;
+    let executor = crate::pair::PairExecutors::shared();
     let prepared = tokio::task::spawn_blocking(move || {
         phoxal_cli_project::prepare_run(phoxal_cli_project::PrepareRunRequest {
             target: runtime_target,
+            executor,
             drivers: phoxal_cli_project::DriverRequest {
                 mode: match options.drivers {
                     DriversMode::On => phoxal_cli_project::DriverMode::On,
@@ -164,10 +166,10 @@ async fn build_publish_and_launch(
     let prepared = prepared?;
 
     app.ui.info(format!(
-        "launching the supervisor on {}",
-        prepared.staged_root.display()
+        "launching the deployment release at {}",
+        prepared.release.root.display()
     ));
-    daemon::spawn(&prepared.staged_root)
+    daemon::spawn(&prepared.release)
 }
 
 /// Fail with the commands that actually apply when an execution already

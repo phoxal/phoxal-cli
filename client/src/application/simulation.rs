@@ -66,10 +66,12 @@ pub(crate) async fn run_command(
     let (reporter, signal_task) =
         crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
     let offline = app.offline;
+    let executor = crate::pair::PairExecutors::shared();
     let prepared = tokio::task::spawn_blocking(move || {
         phoxal_cli_project::prepare_simulation(phoxal_cli_project::PrepareSimulationRequest {
             target: runtime_target,
             world,
+            executor,
             offline,
             webots,
             reporter,
@@ -84,16 +86,16 @@ pub(crate) async fn run_command(
         .context("simulation preparation returned no simulation data")?;
 
     app.ui.info(format!(
-        "world source: {}; bundle: {}",
+        "world source: {}; release: {}",
         simulation.world_source.display(),
-        prepared.staged_root.display()
+        prepared.release.root.display()
     ));
 
     // The daemon owns execution identity. Start and attach first, then derive
     // the Webots controller launch from that exact execution and the verified
     // runtime bundle. The daemon may wait for the external simulator's
     // readiness while its supervisor API remains attachable.
-    let launched = daemon::spawn(&prepared.staged_root)?;
+    let launched = daemon::spawn(&prepared.release)?;
     let session = await_simulated_attachment(&target, launched, app).await;
     let session = match session {
         Ok(session) => session,
@@ -102,7 +104,7 @@ pub(crate) async fn run_command(
         }
     };
     let stage_request = phoxal_cli_project::StageWebotsRequest {
-        staged_root: prepared.staged_root.clone(),
+        staged_root: prepared.release.bundle.clone(),
         project_root: simulation.project_root.clone(),
         world_source: simulation.world_source.clone(),
         webots_executable: simulation.webots_executable.clone(),

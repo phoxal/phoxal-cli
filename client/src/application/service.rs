@@ -12,9 +12,12 @@ const UNIT_MARKER: &str = "# Managed by phoxal";
 
 /// The managed unit.
 ///
-/// `ExecStart` is the daemon and its bundle root, and nothing else
-///: `phoxald <INSTALLED_BUNDLE_ROOT>`. The interactive
-/// client is never run as the daemon - it builds, and a durable systemd-owned
+/// `ExecStart` is the active release's own daemon and that release's bundle
+/// root, and nothing else: `/var/phoxal/phoxald /var/phoxal/bundle`. Both paths
+/// resolve through the same symlink at spawn, so systemd always starts the
+/// executor and the bundle of whichever release is active - install and
+/// rollback switch them together by moving that one link. The interactive
+/// client is never run as the daemon: it builds, and a durable systemd-owned
 /// service must never acquire Cargo, registries, a toolchain, or a terminal.
 /// `Type=notify` because the daemon owns READY and the watchdog itself.
 fn unit_contents() -> String {
@@ -31,7 +34,7 @@ NotifyAccess=main
 User=phoxal
 Group=phoxal
 WorkingDirectory={active}
-ExecStart={daemon} {active}
+ExecStart={active}/{daemon} {active}/{bundle}
 Restart=on-failure
 RestartSec=2s
 WatchdogSec=30s
@@ -48,7 +51,8 @@ ReadWritePaths={state} {volatile}
 [Install]
 WantedBy=multi-user.target
 "#,
-        daemon = phoxal_cli_project::INSTALLED_DAEMON_BINARY,
+        daemon = phoxal_cli_project::EXECUTOR_FILE,
+        bundle = phoxal_cli_project::BUNDLE_DIR,
         active = phoxal_cli_project::ACTIVE_RUNTIME_ROOT,
         state = phoxal_cli_project::INSTALLED_STATE_ROOT,
         volatile = phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
@@ -228,14 +232,21 @@ fn run_status(program: &str, args: &[&str]) -> Result<()> {
 mod unit_tests {
     use super::*;
 
-    /// The unit runs the daemon on the installed bundle root and nothing else.
-    /// The interactive client is never the daemon: it builds, and no `phoxal`
-    /// invocation may appear in `ExecStart`.
+    /// The unit runs the ACTIVE RELEASE's own daemon on that release's bundle,
+    /// and nothing else. Both halves resolve through `/var/phoxal` at spawn, so
+    /// an activation or a rollback moves the executor and the bundle together
+    /// and the unit can never start a host-wide daemon on someone else's
+    /// bundle. The interactive client is never the daemon: it builds, and no
+    /// `phoxal` invocation may appear in `ExecStart`.
     #[test]
-    fn managed_service_executes_the_daemon_on_the_installed_bundle_root() {
+    fn managed_service_executes_the_active_releases_own_daemon_on_its_own_bundle() {
         let unit = unit_contents();
         assert_eq!(unit.matches("ExecStart=").count(), 1);
-        assert!(unit.contains("ExecStart=/usr/local/bin/phoxald /var/phoxal"));
+        assert!(unit.contains("ExecStart=/var/phoxal/phoxald /var/phoxal/bundle"));
+        assert!(
+            !unit.contains(phoxal_cli_project::INSTALLED_DAEMON_BINARY),
+            "the installed pair's daemon never executes an installed release: {unit}"
+        );
         let exec_start = unit
             .lines()
             .find(|line| line.starts_with("ExecStart="))

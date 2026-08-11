@@ -18,6 +18,8 @@ use crate::Reporter;
 pub struct PrepareSimulationRequest {
     pub target: RuntimeTarget,
     pub world: String,
+    /// Where the simulation release gets the `phoxald` that runs it.
+    pub executor: crate::deployment::SharedExecutorSource,
     pub offline: bool,
     pub webots: WebotsHost,
     pub reporter: Arc<dyn Reporter>,

@@ -2,11 +2,16 @@
 
 use std::path::{Path, PathBuf};
 
-pub(crate) const RUNTIME_BUNDLE_ROOT_RELATIVE: &str = ".phoxal/bundle";
+/// A source project's own deployment release, holding the executor and the
+/// bundle this project's last staging produced. It is a directory of its own so
+/// the release stays exactly its three entries, with all local runtime state
+/// (locks, sockets, caches, archives) beside it under `.phoxal/` rather than
+/// inside it.
+pub(crate) const RUNTIME_RELEASE_ROOT_RELATIVE: &str = ".phoxal/release";
 
 #[must_use]
-pub(crate) fn runtime_bundle_root(project_root: &Path) -> PathBuf {
-    project_root.join(RUNTIME_BUNDLE_ROOT_RELATIVE)
+pub(crate) fn runtime_release_root(project_root: &Path) -> PathBuf {
+    project_root.join(RUNTIME_RELEASE_ROOT_RELATIVE)
 }
 
 pub use phoxal_cli_host::paths::{

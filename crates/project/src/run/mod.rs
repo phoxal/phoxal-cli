@@ -5,7 +5,6 @@ pub(crate) mod report;
 pub use prepare::prepare_run;
 pub(crate) use report::DriverPolicy;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::RuntimeTarget;
@@ -27,13 +26,17 @@ pub struct DriverRequest {
 pub struct PrepareRunRequest {
     pub target: RuntimeTarget,
     pub drivers: DriverRequest,
+    /// Where the release this run publishes gets the `phoxald` that runs it.
+    pub executor: crate::deployment::SharedExecutorSource,
     pub offline: bool,
     pub reporter: Arc<dyn Reporter>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedExecution {
-    pub staged_root: PathBuf,
+    /// The verified deployment release to launch: the executor and the bundle
+    /// it runs, which always come from the same release.
+    pub release: crate::deployment::ReleaseLayout,
     pub simulation: Option<super::simulation::PreparedSimulation>,
 }
 

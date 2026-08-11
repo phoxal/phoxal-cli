@@ -90,6 +90,7 @@ impl DeployRequest {
             phoxal_cli_project::build_bundle(phoxal_cli_project::BuildBundleRequest {
                 target,
                 backend: phoxal_cli_project::BuildBackend::Ssh { host, target: None },
+                executor: crate::pair::PairExecutors::shared(),
                 output: Some(output),
                 publish: false,
                 offline,

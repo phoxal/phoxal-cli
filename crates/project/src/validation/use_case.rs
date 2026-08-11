@@ -17,13 +17,25 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         ValidationSource::Project(target) => target,
         ValidationSource::Archive(archive) => {
             crate::bundle::archive::extract_build_archive(&archive.archive, &archive.destination)?;
-            let bundle = crate::load::layout::validate_runtime_bundle(
-                &archive.destination,
-                crate::check::participant_metadata::expected_target_for_host(),
+            // A build archive is a whole deployment release. Its shape is
+            // proven here, executor beside bundle, so an installer never
+            // activates a release that is missing the daemon that runs it -
+            // including an archive built before releases owned their executor.
+            let release = crate::deployment::validate_release(&archive.destination)
+                .context("build archive is not a valid deployment release")?;
+            let expected = crate::check::participant_metadata::expected_target_for_host();
+            crate::check::participant_metadata::ensure_target(
+                &std::fs::read(&release.executor).with_context(|| {
+                    format!("failed to read executor {}", release.executor.display())
+                })?,
+                &release.executor.display().to_string(),
+                &expected,
             )
-            .context("runtime archive failed verification")?;
+            .context("this release's executor cannot run on this host")?;
+            let bundle = crate::load::layout::validate_runtime_bundle(&release.bundle, expected)
+                .context("runtime archive failed verification")?;
             return Ok(ValidationReport {
-                robot_path: archive.destination.join(phoxal_bundle::RUNTIME_FILE),
+                robot_path: release.bundle.join(phoxal_bundle::RUNTIME_FILE),
                 robot: bundle.robot_id().to_string(),
                 train: String::new(),
                 platform_services: Vec::new(),

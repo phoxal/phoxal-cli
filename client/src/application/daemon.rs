@@ -1,13 +1,16 @@
 //! Launching `phoxald` and watching it until a client can attach.
 //!
-//! The daemon is a sibling executable, never a mode of this one: `phoxal` can
-//! never run the supervision loop in process. Everything
-//! this module knows about the child is process facts and stderr - the
-//! completed Zenoh handshake is readiness, and a socket file's existence
-//! proves nothing.
+//! The daemon is a separate executable, never a mode of this one: `phoxal` can
+//! never run the supervision loop in process. Everything this module knows
+//! about the child is process facts and stderr - the completed Zenoh handshake
+//! is readiness, and a socket file's existence proves nothing.
+//!
+//! The daemon launched is always the one inside the release being executed,
+//! never whatever `phoxald` this host happens to have. That is the whole point
+//! of a release owning its executor: the bundle and the binary that runs it
+//! move together, so a local run and an installed run are the same launch.
 
 use std::io::Read;
-use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -55,34 +58,29 @@ impl LaunchedDaemon {
     }
 }
 
-/// Spawn `phoxald <BUNDLE_ROOT>`.
+/// Spawn `<release>/phoxald <release>/bundle`.
 ///
 /// The daemon is placed in its own process group. That is not tidiness: a
 /// Ctrl+C in the terminal running this client goes to the client's foreground
 /// process group, and the daemon is durable - it must survive the client that
 /// started it, because detaching is not stopping.
-pub(crate) fn spawn(bundle_root: &Path) -> Result<LaunchedDaemon> {
-    // The daemon a machine runs is the sibling of the `phoxal` running here: a
-    // client out of a build directory drives the daemon beside it, never an
-    // unrelated one on `PATH`. Whether that file exists at all is settled by
-    // the spawn below, which names it.
-    let executable = crate::pair::resolve_daemon();
-    let mut command = Command::new(&executable);
+pub(crate) fn spawn(release: &phoxal_cli_project::ReleaseLayout) -> Result<LaunchedDaemon> {
+    // The executor and the bundle come from the same verified release, so the
+    // argv this builds cannot pair one release's daemon with another's bundle.
+    // The daemon still receives a bundle root and nothing else.
+    let mut command = Command::new(&release.executor);
     command
-        .arg(bundle_root)
+        .arg(&release.bundle)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     isolate_process_group(&mut command);
     let mut child = command.spawn().with_context(|| {
         format!(
-            "failed to launch the supervisor {} on {}; `{}` and `{}` install as one archive, so \
-             reinstall the CLI with `{} self upgrade` if it is missing",
-            executable.display(),
-            bundle_root.display(),
-            crate::pair::CLIENT_BINARY,
-            crate::pair::DAEMON_BINARY,
-            crate::pair::CLIENT_BINARY,
+            "failed to launch the supervisor {} on {}; a deployment release carries the daemon \
+             that runs it, so rebuild the release if its executor is missing",
+            release.executor.display(),
+            release.bundle.display(),
         )
     })?;
 
@@ -129,6 +127,56 @@ fn isolate_process_group(command: &mut Command) {
 mod tests {
     use super::*;
     use crate::pair::DAEMON_BINARY;
+
+    /// The launch is the release's own: the executor that runs is the file
+    /// inside that release, and the one thing it is told is that release's
+    /// bundle root. A second release sitting beside it never enters the launch,
+    /// which is what makes an executor/bundle mix impossible at the spawn.
+    #[test]
+    fn a_launch_runs_the_releases_own_executor_on_its_own_bundle() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut releases = Vec::new();
+        for tag in ["first-release", "second-release"] {
+            let root = temp.path().join(tag);
+            std::fs::create_dir_all(root.join("bundle")).expect("bundle directory");
+            let executor = root.join(DAEMON_BINARY);
+            std::fs::write(
+                &executor,
+                format!("#!/bin/sh\necho \"{tag} ran with $1\" >&2\nexit 0\n"),
+            )
+            .expect("write the fixture executor");
+            std::fs::set_permissions(&executor, std::fs::Permissions::from_mode(0o755))
+                .expect("make the fixture executable");
+            releases.push(phoxal_cli_project::ReleaseLayout {
+                executor,
+                bundle: root.join("bundle"),
+                root,
+            });
+        }
+        let launching = &releases[1];
+
+        let mut launched = spawn(launching).expect("the release launches");
+        while launched.exited().expect("wait for the fixture").is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while launched.diagnostics().trim().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let reported = launched.diagnostics();
+        assert_eq!(
+            reported.trim(),
+            format!("second-release ran with {}", launching.bundle.display()),
+            "the release's own executor runs, on its own bundle root"
+        );
+        assert!(
+            !reported.contains("first-release ran"),
+            "no other release's executor may be launched: {reported}"
+        );
+    }
 
     /// The daemon must not be in this client's process group, or a terminal
     /// Ctrl+C would stop the robot the client only meant to detach from.

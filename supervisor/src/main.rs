@@ -164,8 +164,8 @@ mod tests {
     #[test]
     fn exactly_one_bundle_root_runs_and_everything_else_is_a_misuse() {
         assert_eq!(
-            parse(arguments([".phoxal/bundle"])),
-            Invocation::Run(".phoxal/bundle".into())
+            parse(arguments([".phoxal/release/bundle"])),
+            Invocation::Run(".phoxal/release/bundle".into())
         );
         assert_eq!(parse(arguments(["-h"])), Invocation::Usage);
         assert_eq!(parse(arguments(["--help"])), Invocation::Usage);
@@ -177,7 +177,7 @@ mod tests {
             arguments(["one", "two"]),
             arguments(["--drivers", "off"]),
             arguments(["--offline"]),
-            arguments([".phoxal/bundle", "--drivers=off"]),
+            arguments([".phoxal/release/bundle", "--drivers=off"]),
         ] {
             assert_eq!(parse(misuse.clone()), Invocation::Misuse, "{misuse:?}");
         }

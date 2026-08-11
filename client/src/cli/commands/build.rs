@@ -99,11 +99,11 @@ impl Build {
         )
         .await?;
         app.ui.info(format!(
-            "staged runtime layout at {}",
+            "staged deployment release at {}",
             built
-                .staged_root
+                .release_root
                 .as_ref()
-                .context("build did not publish its staged runtime layout")?
+                .context("build did not publish its staged deployment release")?
                 .display()
         ));
         println!("{}", built.archive.display());

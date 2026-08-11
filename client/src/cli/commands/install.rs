@@ -1,4 +1,5 @@
-//! Install an immutable compiled runtime release.
+//! Install an immutable deployment release: its bundle and the daemon that
+//! runs it, activated together.
 
 use std::path::PathBuf;
 

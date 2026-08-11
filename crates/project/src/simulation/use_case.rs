@@ -71,14 +71,27 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
     )?;
     crate::stage::write_runtime_document(candidate.path(), &resolved.resolved)?;
     crate::progress::ensure_active(request.reporter.as_ref())?;
-    let staged_root = crate::progress::run_phase(
+    // A simulation runs on this host, so its release packages the daemon this
+    // client's own installation provides - the same shape `run` produces.
+    let executor = request.executor.executor_for(
+        &crate::source::host_target_triple(),
+        request.offline,
+        request.reporter.as_ref(),
+    )?;
+    let release = crate::progress::run_phase(
         request.reporter.as_ref(),
         crate::progress_phase::PhaseId::new("publish"),
-        "Publishing simulation runtime layout",
-        || crate::stage::publish_runtime_layout(candidate),
+        "Publishing the simulation deployment release",
+        || {
+            crate::stage::finalize_release(
+                candidate,
+                &executor,
+                &crate::check::participant_metadata::expected_target_for_host(),
+            )
+        },
     )?;
     Ok(PreparedExecution {
-        staged_root,
+        release,
         simulation: Some(PreparedSimulation {
             project_root: resolved.project_root,
             world_source: resolved.world_path,

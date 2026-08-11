@@ -280,7 +280,7 @@ mod startup_timeline_tests {
             StartupStep {
                 kind: StartupStepKind::Bundle,
                 state: StartupStepState::Done,
-                detail: Some(Detail::new(".phoxal/bundle")),
+                detail: Some(Detail::new(".phoxal/release/bundle")),
                 elapsed_ms: Some(125),
             },
             StartupStep {
