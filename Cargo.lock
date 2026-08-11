@@ -1200,7 +1200,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2758,7 +2758,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3218,9 +3218,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-api"
-version = "0.58.1"
+version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92f924e86932fe7c17097393edb5a03f5001be26a6da164aecada8d17c69ba36"
+checksum = "9cfed11fd4f8c659c9da09913c4777cb338284aa10fc2fa747cd3046af52de66"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -3232,11 +3232,12 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bundle"
-version = "0.58.1"
+version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ab56e6284b0237fb11ee5a953808b2da40798a6d0119e85d6636bd6b7edb25c"
+checksum = "eefa886eb2f4db7deedd6eab2f931a30e99863532ddaf0331cb66fc60f78df3b"
 dependencies = [
  "jsonschema",
+ "phoxal-macros",
  "phoxal-model",
  "phoxal-runtime-contract",
  "serde",
@@ -3247,12 +3248,13 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bus"
-version = "0.58.1"
+version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30c2075cb89ed0330450c50015e8f0e7489a931100906ecd04dcc5cfb9a16d86"
+checksum = "db9952f8fbde0f88153270007155327bd6d3bcb56e932bef175437e74499318d"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
+ "phoxal-macros",
  "phoxal-runtime-contract",
  "rmp-serde",
  "serde",
@@ -3392,9 +3394,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.58.1"
+version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d7b7e693b31c3c61c1f05eca288a8fe261130906098a6d102f31bba1565013e"
+checksum = "48cedde1a939929096687aeb4fab97dcd9e6b31182cd94e57d266ece9ad4da94"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3405,9 +3407,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-manifest"
-version = "0.58.1"
+version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16f8f52e4705a41a9e190c87b19aca41dce2b9ccb5683bd3b7972cd11b363e29"
+checksum = "3277a779f2cf8d672b15b1f616499e1b32e5900458454d6c38d37fc4f9bd228f"
 dependencies = [
  "phoxal-model",
  "phoxal-runtime-contract",
@@ -3422,10 +3424,11 @@ dependencies = [
 
 [[package]]
 name = "phoxal-model"
-version = "0.58.1"
+version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20ac0e6f3dfd53ebd0df56f97961e07d960e6dbaa2858f7eecedd98d31edebc8"
+checksum = "c00d2707be811d3d127f9a6054bad1d76ef341c5a898ddbeb00b5acd9cbbe554"
 dependencies = [
+ "phoxal-macros",
  "phoxal-runtime-contract",
  "schemars 1.2.2",
  "serde",
@@ -3435,9 +3438,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-runtime-contract"
-version = "0.58.1"
+version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9126ce3fb7077bdc1b0182796716e595813abcec634421a158b8d8bb577f54d"
+checksum = "a7937c14044e46e1b6f9daadc83d1e76f1d877d3088fca6ad3895293c2b56352"
 dependencies = [
  "const_format",
  "getrandom 0.3.4",
@@ -3653,7 +3656,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4066,7 +4069,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4134,7 +4137,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4815,7 +4818,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5727,7 +5730,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -8,8 +8,8 @@
 //! process boundary: `phoxal` and `phoxald` ship as one exact pair, participants
 //! never read it, and an attaching client derives topology from the supervisor
 //! snapshot rather than from a catalog. Compatibility at a process boundary is
-//! the framework train version each binary was built from, compared for exact
-//! equality, so a catalog identity would be a second claim about the same
+//! the framework compatibility line each binary was built on, so a catalog
+//! identity would be a second claim about the same
 //! thing. There is consequently no `CatalogId` and no catalog constant in any
 //! wire contract: this remains an identity-free index of where official
 //! participants live.
@@ -184,8 +184,8 @@ const SIMULATION: &[OfficialRuntime] = &[OfficialRuntime {
 /// The official participant set one `phoxal`/`phoxald` pair interprets.
 ///
 /// A single current snapshot, deliberately not a table keyed by framework
-/// train: pre-v1 every binary in one execution is built from one train, and the
-/// embedded compatibility record of each built binary - not a catalog
+/// train: every binary in one execution is built on one compatibility line, and
+/// the embedded compatibility record of each built binary - not a catalog
 /// version - is what proves it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Catalog;

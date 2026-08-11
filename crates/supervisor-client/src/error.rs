@@ -4,7 +4,7 @@
 //! one of these should never have to compare two version strings by hand.
 
 use phoxal_bus::{BusError, QueryError, SourceLabelError};
-use phoxal_runtime_contract::version::{CompatibilityLine, FrameworkVersion};
+use phoxal_runtime_contract::version::FrameworkVersion;
 
 /// A failure while establishing or running an attachment.
 #[derive(Debug, thiserror::Error)]
@@ -39,9 +39,9 @@ pub enum AttachError {
     #[error("the supervisor returned an invalid snapshot: {0}")]
     Snapshot(#[from] phoxal_api::supervisor::snapshot::SnapshotError),
 
-    /// The robot and this client were built from different framework trains.
-    /// The whole remediation is the message: the operator is told which side
-    /// to move and the exact command that moves it.
+    /// The robot and this client were built on different framework
+    /// compatibility lines. The whole remediation is the message: the operator
+    /// is told which side to move and the exact command that moves it.
     #[error("{}", incompatible_framework(*robot, *client))]
     IncompatibleFramework {
         robot: FrameworkVersion,
@@ -103,6 +103,11 @@ impl AttachError {
 
 /// The operator-facing account of one framework mismatch.
 ///
+/// It renders only for a genuine line disagreement, because that is the only
+/// thing the gate refuses; two trains on one line never reach it. The versions
+/// named are still the exact ones the frozen bootstrap reported, since that is
+/// the provenance an operator acts on.
+///
 /// Which side is asked to move follows from which side is behind: a client
 /// older than the robot upgrades itself, and a client newer than the robot
 /// names the line the robot would have to be rebuilt onto.
@@ -117,25 +122,16 @@ fn incompatible_framework(robot: FrameworkVersion, client: FrameworkVersion) -> 
         format!(
             "{preamble}Rebuild or redeploy the robot with a compatible framework,\nor use a \
              client that speaks framework {}.",
-            line(robot)
+            robot.compatibility_line()
         )
     }
 }
 
-/// A version's ordering key. `FrameworkVersion` is compared for equality on the
-/// wire and deliberately carries no ordering; a diagnostic still needs to know
+/// A version's ordering key. `FrameworkVersion` decides compatibility by its
+/// line and deliberately carries no ordering; a diagnostic still needs to know
 /// which side is behind.
 const fn ordering(version: FrameworkVersion) -> (u16, u16, u16) {
     (version.major(), version.minor(), version.patch())
-}
-
-/// The SemVer line a version belongs to, spelled the way an operator would name
-/// a compatible release.
-fn line(version: FrameworkVersion) -> String {
-    match version.compatibility_line() {
-        CompatibilityLine::PreV1 { minor } => format!("0.{minor}.x"),
-        CompatibilityLine::Stable { major } => format!("{major}.x"),
-    }
 }
 
 #[cfg(test)]
@@ -146,8 +142,8 @@ mod tests {
         AttachError::IncompatibleFramework { robot, client }.to_string()
     }
 
-    /// A client behind the robot is told to upgrade itself, with the command
-    /// that does it.
+    /// A client a line behind the robot is told to upgrade itself, with the
+    /// command that does it.
     #[test]
     fn a_newer_robot_asks_the_operator_to_upgrade_the_client() {
         assert_eq!(
@@ -166,8 +162,8 @@ mod tests {
         );
     }
 
-    /// A client ahead of the robot cannot fix itself, so the message names the
-    /// robot's own line instead.
+    /// A client a line ahead of the robot cannot fix itself, so the message
+    /// names the robot's own line instead.
     #[test]
     fn an_older_robot_asks_the_operator_to_move_the_robot() {
         assert_eq!(
@@ -186,15 +182,29 @@ mod tests {
         );
     }
 
-    /// Two patches of one line are still two trains: compatibility is exact
-    /// equality, and the same two texts carry that too.
+    /// Two patches of one line are still two trains, but they interoperate, so
+    /// neither text is ever rendered for them: the gate produces no error at
+    /// all, in either direction.
     #[test]
-    fn a_patch_difference_on_one_line_renders_the_same_two_texts() {
+    fn a_difference_within_one_line_is_not_a_mismatch() {
         let older = FrameworkVersion::new(0, 56, 1);
         let newer = FrameworkVersion::new(0, 56, 2);
+        assert_ne!(older, newer);
         assert_eq!(older.compatibility_line(), newer.compatibility_line());
-        assert!(rendered(newer, older).contains("phoxal self upgrade"));
-        assert!(rendered(older, newer).contains("framework 0.56.x."));
+        assert!(older.is_compatible_with(newer));
+        assert!(newer.is_compatible_with(older));
+    }
+
+    /// The line a remediation names is the framework's one spelling of it, not
+    /// a second one invented here.
+    #[test]
+    fn the_remediation_names_the_robot_line_the_way_the_framework_spells_it() {
+        let robot = FrameworkVersion::new(0, 56, 2);
+        let rendered = rendered(robot, FrameworkVersion::new(0, 57, 0));
+        assert!(
+            rendered.contains(&format!("framework {}.", robot.compatibility_line())),
+            "{rendered}"
+        );
     }
 
     /// A released train names its major, so the remediation stays the release
