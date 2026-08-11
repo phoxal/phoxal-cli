@@ -242,6 +242,12 @@ impl std::fmt::Debug for Attachment {
 }
 
 impl Attachment {
+    /// Attach to the one execution reachable at `config.endpoint`.
+    ///
+    /// A robot and a client interoperate exactly when their trains share a
+    /// compatibility line, so that is what the gate below asks. The frozen
+    /// bootstrap still reports each side's exact train, which is the
+    /// provenance the refusal names.
     pub async fn open(config: &AttachmentConfig) -> Result<Self, AttachError> {
         let executions = BusOwner::probe_routers(&config.endpoint).await?;
         let execution = exactly_one_execution(&config.endpoint, &executions)?;
@@ -254,11 +260,13 @@ impl Attachment {
         .await?;
 
         // The frozen bootstrap answers before any ordinary endpoint is
-        // touched: a peer on another train can decode this one reply and name
-        // the disagreement, where a richer reply would only fail to parse.
+        // touched: a peer on another line can decode this one reply and name
+        // the disagreement, where a richer reply would only fail to parse. The
+        // exact trains it reports are carried into the refusal; only the
+        // decision is the line.
         let robot = framework(&bus).await?;
         let client = FrameworkVersion::CURRENT;
-        if robot != client {
+        if !robot.is_compatible_with(client) {
             return Err(AttachError::IncompatibleFramework { robot, client });
         }
 

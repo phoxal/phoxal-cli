@@ -7,9 +7,9 @@
 //!
 //! The supervisor surface carries exactly one negotiated identity: the
 //! framework train each binary was built from, exchanged over the frozen
-//! `supervisor/connect` bootstrap and compared for exact equality. Every other
-//! endpoint is reached only once that comparison agrees, so no ordinary reply
-//! ever has to carry a version of its own.
+//! `supervisor/connect` bootstrap and compared by compatibility line. Every
+//! other endpoint is reached only once that comparison agrees, so no ordinary
+//! reply ever has to carry a version of its own.
 
 #![cfg_attr(
     test,

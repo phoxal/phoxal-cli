@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use phoxal_api::supervisor;
@@ -241,30 +242,52 @@ async fn issue(
     outcome
 }
 
-/// A client refuses a robot from another framework train at the bootstrap,
+/// A client refuses a robot from another compatibility line at the bootstrap,
 /// before it asks for anything else.
 ///
 /// The stub answers `supervisor/connect` and nothing at all besides, so an
 /// attachment that got past the gate could not have completed: the refusal is
 /// the only way this can end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_foreign_framework_train_is_refused_at_the_bootstrap() {
+async fn a_foreign_framework_line_is_refused_at_the_bootstrap() {
     let robot = FrameworkVersion::new(9, 9, 9);
+    assert!(!robot.is_compatible_with(FrameworkVersion::CURRENT));
     let reply =
         MessagePack::encode(&ConnectReply::V0 { framework: robot }).expect("the reply encodes");
-    let error = attach_to_bootstrap_stub(reply).await;
+    let error = attach_to_bootstrap_stub(reply, |error, _| error.is_framework_mismatch()).await;
     let AttachError::IncompatibleFramework {
         robot: reported,
         client,
     } = &error
     else {
-        panic!("a foreign train must be reported as one: {error}");
+        panic!("a foreign line must be reported as one: {error}");
     };
     assert_eq!(*reported, robot);
     assert_eq!(*client, FrameworkVersion::CURRENT);
     let rendered = error.to_string();
     assert!(rendered.contains("Robot framework: 9.9.9"), "{rendered}");
     assert!(rendered.contains("phoxal self upgrade"), "{rendered}");
+}
+
+/// A robot on another train of this client's own line is admitted by the
+/// bootstrap gate: the attachment goes on to the ordinary endpoints, which the
+/// stub does not serve, and fails there instead of as a contract disagreement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_train_on_this_line_is_admitted_at_the_bootstrap() {
+    let client = FrameworkVersion::CURRENT;
+    let robot = FrameworkVersion::new(
+        client.major(),
+        client.minor(),
+        client.patch().wrapping_add(1),
+    );
+    assert_ne!(robot, client);
+    let reply =
+        MessagePack::encode(&ConnectReply::V0 { framework: robot }).expect("the reply encodes");
+    let error = attach_to_bootstrap_stub(reply, |_, answered| answered > 0).await;
+    assert!(
+        !error.is_framework_mismatch(),
+        "a train on this line must not be refused as a contract disagreement: {error}"
+    );
 }
 
 /// A bootstrap reply this client cannot decode is the same answer by another
@@ -277,7 +300,7 @@ async fn an_unreadable_bootstrap_reply_names_the_foreign_schema_tag() {
         "framework": "9.9.9",
     }))
     .expect("the foreign reply encodes");
-    let error = attach_to_bootstrap_stub(reply).await;
+    let error = attach_to_bootstrap_stub(reply, |error, _| error.is_framework_mismatch()).await;
     let AttachError::UnreadableConnectReply { detail } = &error else {
         panic!("an unreadable bootstrap must be reported as a contract mismatch: {error}");
     };
@@ -290,7 +313,17 @@ async fn an_unreadable_bootstrap_reply_names_the_foreign_schema_tag() {
 /// It exists because no two binaries built from this workspace can disagree
 /// about the train: the peer the gate is written for has to be stood up
 /// deliberately.
-async fn attach_to_bootstrap_stub(reply: Vec<u8>) -> AttachError {
+///
+/// Attaching is retried until `settled` accepts the failure, because the
+/// embedded router and the stub server come up asynchronously and the early
+/// attempts see neither. `settled` is given the failure and how many bootstrap
+/// queries the stub has answered by then, so a caller that expects the gate to
+/// *admit* the peer can tell "the bootstrap completed and the attachment went
+/// on" apart from "the bootstrap was never reached".
+async fn attach_to_bootstrap_stub(
+    reply: Vec<u8>,
+    settled: impl Fn(&AttachError, usize) -> bool,
+) -> AttachError {
     let socket = tempfile::Builder::new()
         .prefix("phoxal-connect-")
         .tempdir_in("/tmp")
@@ -313,7 +346,9 @@ async fn attach_to_bootstrap_stub(reply: Vec<u8>) -> AttachError {
     .await
     .expect("stub supervisor bus");
 
+    let answered = Arc::new(AtomicUsize::new(0));
     let server_bus = bus.clone();
+    let counter = Arc::clone(&answered);
     let served = tokio::spawn(async move {
         let server = server_bus
             .declare_server(
@@ -327,16 +362,17 @@ async fn attach_to_bootstrap_stub(reply: Vec<u8>) -> AttachError {
                 .reply(&server_bus, reply.clone())
                 .await
                 .expect("the stub answers");
+            counter.fetch_add(1, Ordering::SeqCst);
         }
     });
 
     let config = AttachmentConfig::new(&endpoint, "test-client");
-    let mut refusal = None;
+    let mut outcome = None;
     for _ in 0..100 {
         match Attachment::open(&config).await {
-            Ok(_) => panic!("a foreign bootstrap must never produce an attachment"),
-            Err(error) if error.is_framework_mismatch() => {
-                refusal = Some(error);
+            Ok(_) => panic!("a stub that serves only the bootstrap can never be attached to"),
+            Err(error) if settled(&error, answered.load(Ordering::SeqCst)) => {
+                outcome = Some(error);
                 break;
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
@@ -346,7 +382,7 @@ async fn attach_to_bootstrap_stub(reply: Vec<u8>) -> AttachError {
     served.abort();
     assert!(owner.close().await.is_clean());
     router.close().await.expect("router closes");
-    refusal.expect("the stub bootstrap answered and the gate refused it")
+    outcome.expect("the stub bootstrap answered and the gate reached its verdict")
 }
 
 async fn attach(endpoint: &str) -> Attachment {

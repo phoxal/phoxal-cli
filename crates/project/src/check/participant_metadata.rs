@@ -16,8 +16,8 @@ use object::{Object, ObjectSection};
 use phoxal_runtime_contract::metadata::{ParticipantContract, ParticipantMetadata};
 use phoxal_runtime_contract::version::FrameworkVersion;
 
-/// The framework train every participant binary this CLI accepts must have
-/// been built from.
+/// The framework train this CLI speaks, and so the compatibility line every
+/// participant binary it accepts must have been built on.
 ///
 /// It is the train the CLI itself links, which is the same train `phoxald`
 /// links: the two ship as one exact pair. Naming it here lets a test that
@@ -29,10 +29,10 @@ pub const CURRENT_FRAMEWORK: FrameworkVersion = FrameworkVersion::CURRENT;
 /// document destructured into the fields callers actually branch on.
 ///
 /// The document's whole compatibility claim is the framework train it was
-/// built from, and that claim is settled by exact equality. The parse proves
-/// the *grammar* is one this CLI reads; the equality check in
-/// [`extract_participant_metadata_from_bytes`] proves the *train* is the one
-/// this CLI executes, so holding this value is the compatibility proof.
+/// built from, and that claim is settled by the line that train belongs to.
+/// The parse proves the *grammar* is one this CLI reads; the line check in
+/// [`extract_participant_metadata_from_bytes`] proves the *contracts* are the
+/// ones this CLI executes, so holding this value is the compatibility proof.
 pub type ParticipantMeta = ParticipantContract;
 
 /// The linker section names a participant attribute places its metadata
@@ -108,14 +108,15 @@ pub fn extract_participant_metadata_from_bytes(
     })?;
     let contract = metadata.contract();
     // The framework train is the single compatibility identity two Phoxal
-    // processes compare, and they compare it for exact equality. `phoxald`
-    // enforces the same equality over the whole bundle when it opens one; this
-    // check is what makes the disagreement arrive while the operator is still
-    // building, naming the binary that carries it.
+    // processes compare, and they compare the line it belongs to. `phoxald`
+    // re-enforces the same line rule over the whole bundle when it opens one;
+    // this check is what makes the disagreement arrive while the operator is
+    // still building, naming the binary that carries it.
     anyhow::ensure!(
-        contract.framework == CURRENT_FRAMEWORK,
-        "{describe} was built from phoxal framework {}, but this CLI speaks framework {CURRENT_FRAMEWORK}. Update the project dependency and rebuild with `cargo update -p phoxal`, or update the CLI to the matching release.",
+        contract.framework.is_compatible_with(CURRENT_FRAMEWORK),
+        "{describe} was built from phoxal framework {}, which is not on the {} line this CLI speaks (framework {CURRENT_FRAMEWORK}). Update the project dependency and rebuild with `cargo update -p phoxal`, or update the CLI to the matching release.",
         contract.framework,
+        CURRENT_FRAMEWORK.compatibility_line(),
     );
     Ok(contract.clone())
 }
@@ -537,12 +538,12 @@ mod tests {
         );
     }
 
-    /// A binary from another framework train is rejected before its config
+    /// A binary from another compatibility line is rejected before its config
     /// schema is trusted. The document parses - a well-formed record from any
     /// train does - and the *comparison* is what fails, so the diagnostic names
     /// both trains and the fix for either direction.
     #[test]
-    fn a_binary_from_another_framework_train_is_rejected_with_an_actionable_diagnostic() {
+    fn a_binary_from_another_framework_line_is_rejected_with_an_actionable_diagnostic() {
         let mut record = current_record("cleaning");
         record["framework"] = serde_json::json!("9.9.9");
         let elf = synthesize_object(
@@ -563,6 +564,31 @@ mod tests {
         );
         assert!(message.contains("cargo update -p phoxal"), "{message}");
         assert!(message.contains("update the CLI"), "{message}");
+    }
+
+    /// A binary from a different train on this CLI's own line is accepted:
+    /// trains on one line speak the same contracts, so a rebuild is not what
+    /// the operator owes here.
+    #[test]
+    fn a_binary_from_another_train_on_this_line_is_accepted() {
+        let neighbour = FrameworkVersion::new(
+            CURRENT_FRAMEWORK.major(),
+            CURRENT_FRAMEWORK.minor(),
+            CURRENT_FRAMEWORK.patch().wrapping_add(1),
+        );
+        assert_ne!(neighbour, CURRENT_FRAMEWORK);
+        let mut record = current_record("cleaning");
+        record["framework"] = serde_json::json!(neighbour.to_string());
+        let elf = synthesize_object(
+            object::BinaryFormat::Elf,
+            object::Architecture::Aarch64,
+            b".phoxal_meta",
+            b"",
+            serde_json::to_vec(&record).unwrap().as_slice(),
+        );
+        let contract = extract_participant_metadata_from_bytes(&elf, "bin/cleaning")
+            .expect("a train on this line is accepted");
+        assert_eq!(contract.framework, neighbour);
     }
 
     /// A framework version spelled any way but the canonical SemVer string is
