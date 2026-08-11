@@ -625,7 +625,7 @@ fn selected_registry_officials(
         .filter(|official| !overridden.contains(official.package))
         .map(|official| ContainerOfficial {
             package: phoxal_cli_catalog::cargo_package_name(official.package),
-            train: resolved.train.clone(),
+            train: resolved.train.version().to_string(),
         })
         .collect::<Vec<_>>();
     officials.extend(component_driver_officials(resolved));
@@ -1122,7 +1122,7 @@ robot:
                     .expect("minimal fixture robot.yaml parses"),
             )
             .expect("the fixture project compiles"),
-            train: "0.36.0".to_string(),
+            train: crate::stage::test_project_train(),
             target: "aarch64-unknown-linux-gnu".to_string(),
             brain: crate::source::resolver::ResolvedBrain {
                 crate_dir: std::path::PathBuf::from("/tmp/robot"),
@@ -1208,7 +1208,7 @@ robot:
             package: "phoxal/service-map".to_string(),
             kind: ArtifactKind::Service,
             path_override: Some(PathBuf::from("services/map")),
-            train: resolved.train.clone(),
+            train: resolved.train.version().to_string(),
             target: Some(resolved.target.clone()),
         });
         resolved.components = vec![registry_driver_component(

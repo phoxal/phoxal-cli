@@ -1,9 +1,16 @@
-//! The exact `phoxal` + `phoxald` pair.
+//! The `phoxal` + `phoxald` pair, as a packaging unit.
 //!
-//! The two binaries ship in one archive, install together, and upgrade together.
-//! Nothing negotiates between them: the client resolves the
-//! daemon as its own sibling, confirms the two report the same version, and
-//! refuses to do project work for a pair that is missing a half or mixed.
+//! The two binaries ship in one archive, install together, and upgrade
+//! together, so the client resolves the daemon as its own sibling and can
+//! report whether the installation it is part of is whole.
+//!
+//! That is a statement about an installation, never about a robot project. A
+//! project selects its own framework in its own Cargo graph, and the installed
+//! CLI product version is not a compatibility identity for anything the
+//! project builds - so no project-bound command gates on the two halves
+//! reporting the same product version. What remains here is resolution (how a
+//! machine finds its daemon), self-upgrade and bootstrap packaging (how the
+//! archive lands), and the `doctor` report.
 //!
 //! Resolution is deliberately *not* `PATH`-first. A `phoxal` run out of a build
 //! directory must not silently drive an older installed daemon, so the answer is
@@ -86,15 +93,20 @@ impl PairStatus {
         }
     }
 
-    /// The actionable failure a command that needs a working daemon earns.
+    /// What an incomplete installation earns in a report: what is wrong with
+    /// the installed archive, and how to make it whole again.
+    ///
+    /// It is an installation problem, so the remedy is reinstalling the CLI -
+    /// never aligning a robot project with a product version.
     pub(crate) fn failure(&self) -> Option<String> {
         if self.is_exact() {
             return None;
         }
         Some(format!(
-            "{}. `{CLIENT_BINARY}` and `{DAEMON_BINARY}` ship, install, and upgrade as one exact \
-             pair - a mixed pair is never supported. Reinstall the CLI with `{CLIENT_BINARY} self \
-             upgrade`, or with `curl -fsSL https://phoxal.com/install.sh | sh`",
+            "{}. `{CLIENT_BINARY}` and `{DAEMON_BINARY}` ship, install, and upgrade as one \
+             archive, so a half-installed or mixed installation is a packaging problem. Reinstall \
+             the CLI with `{CLIENT_BINARY} self upgrade`, or with `curl -fsSL \
+             https://phoxal.com/install.sh | sh`",
             self.summary()
         ))
     }
@@ -104,14 +116,6 @@ impl PairStatus {
 pub(crate) fn status() -> PairStatus {
     let daemon = resolve_daemon();
     classify(client_version(), &daemon, probe_daemon_version(&daemon))
-}
-
-/// Fail before anything is built when the pair is not exact.
-pub(crate) fn require_exact() -> Result<()> {
-    match status().failure() {
-        None => Ok(()),
-        Some(message) => bail!(message),
-    }
 }
 
 /// Ask a `phoxald` what it is.
@@ -217,8 +221,9 @@ mod tests {
         );
     }
 
-    /// Every non-exact status is a refusal with a fix in it - a mixed pair is
-    /// never something a command quietly proceeds through.
+    /// Every non-exact status reports a fix, and the fix is always about the
+    /// installation: reinstall the archive. A robot project is never asked to
+    /// match a product version, because the project selects its own framework.
     #[test]
     fn only_an_exact_pair_has_no_failure_and_every_failure_names_the_fix() {
         assert_eq!(
@@ -241,9 +246,15 @@ mod tests {
                 error: "permission denied".to_string(),
             },
         ] {
-            let failure = status.failure().expect("a broken pair always fails");
-            assert!(failure.contains("exact"), "{failure}");
+            let failure = status
+                .failure()
+                .expect("an incomplete installation always reports one");
+            assert!(failure.contains("packaging problem"), "{failure}");
             assert!(failure.contains("self upgrade"), "{failure}");
+            assert!(
+                !failure.contains("cargo update"),
+                "the remedy is never a project change: {failure}"
+            );
         }
     }
 

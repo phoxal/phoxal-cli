@@ -1118,7 +1118,7 @@ fn resolved_with_components(components: Vec<ResolvedComponent>) -> Result<Bundle
         compiled: crate::stage::compile_test_bundle(
             &crate::source::resolver::parse_robot_from_string(MINIMAL_ROBOT)?,
         )?,
-        train: "0.36.0".to_string(),
+        train: crate::stage::test_project_train(),
         target: crate::resolve::project::host_target_triple(),
         brain: crate::source::resolver::ResolvedBrain {
             crate_dir: std::path::PathBuf::from("/tmp/robot"),

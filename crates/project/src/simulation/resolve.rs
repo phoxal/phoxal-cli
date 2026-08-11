@@ -198,6 +198,7 @@ pub(crate) fn build_checked_sim_launch_plan(
         })
         .collect::<BTreeMap<_, _>>();
 
+    let project_framework = resolved.train.framework();
     let metadata_outcome = run_check_with_context(
         &platform_refs,
         &metadata_source_participants,
@@ -206,7 +207,11 @@ pub(crate) fn build_checked_sim_launch_plan(
         },
         |binary_name| {
             if let Some(runtime) = official_by_name.get(binary_name) {
-                return extract_participant_report_from_staged_runtime(&bin_dir, runtime);
+                return extract_participant_report_from_staged_runtime(
+                    &bin_dir,
+                    runtime,
+                    project_framework,
+                );
             }
             Err(anyhow!(
                 "resolved official artifact {binary_name} was not materialized into bin/"
@@ -216,6 +221,7 @@ pub(crate) fn build_checked_sim_launch_plan(
             build_participant_report_from_binary(
                 participant,
                 source_artifacts.binary(participant)?,
+                project_framework,
                 reporter,
             )
         },
@@ -444,7 +450,7 @@ services:
         Ok(BundlePlan {
             source_manifest: robot,
             compiled,
-            train: "0.42.0".to_string(),
+            train: crate::stage::test_project_train(),
             target: target.clone(),
             brain: crate::source::resolver::ResolvedBrain {
                 crate_dir: brain.0,

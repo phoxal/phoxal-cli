@@ -74,7 +74,8 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         },
         &project,
     )?;
-    let train = resolved.train;
+    let project_framework = resolved.train.framework();
+    let train = resolved.train.version().to_string();
     let workspace = workspace_runtime_report(&robot, &project);
     for success in &workspace.successes {
         request.reporter.success(success.clone());
@@ -114,6 +115,7 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         build_participant_report_from_binary(
             participant,
             artifacts.binary(participant)?,
+            project_framework,
             request.reporter.as_ref(),
         )
     })?;
@@ -282,9 +284,8 @@ mod tests {
 
     fn locked_project(runtimes: Vec<WorkspaceRuntime>) -> LockedProject {
         LockedProject {
-            train: LockedTrain {
-                version: "0.42.0".to_string(),
-            },
+            train: LockedTrain::from_locked_version("0.42.0")
+                .expect("the fixture locks a canonical framework version"),
             brain: crate::source::train::RootBrainPackage {
                 package: "testbot-robot".to_string(),
                 crate_dir: PathBuf::from("/fake/project"),

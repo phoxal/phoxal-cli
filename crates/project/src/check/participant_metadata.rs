@@ -1,4 +1,5 @@
-//! Project participant metadata extraction.
+//! Project participant metadata: reading a binary's embedded contract, and
+//! validating it against the framework the project selected.
 //!
 //! A `#[phoxal::brain]`/`service`/`driver`/`simulator` attribute embeds one JSON
 //! manifest per participant binary in a dedicated linker section -
@@ -8,6 +9,21 @@
 //! the object file without ever executing the artifact. This module targets
 //! the same linker-section shape `phoxal-macros` embeds and is format- and
 //! architecture-agnostic through the `object` crate.
+//!
+//! Reading and judging are two separate steps here.
+//! [`extract_participant_metadata`] answers only what a binary claims, with no
+//! policy at all; [`ensure_built_for_project`] is the whole compatibility
+//! decision, and its authority is the framework the *project* selected in its
+//! lockfile. The CLI's own linked train is not an input: a robot project
+//! chooses its framework, and an installed CLI product version is not a
+//! compatibility identity for anything the project builds.
+//!
+//! This is authority and diagnostics, not cross-line build support. The
+//! toolchain still stages and launches through one CLI and one sibling
+//! `phoxald`, and those speak their own linked train, so the lines a project
+//! can actually be *run* on remain the CLI's native one. What changes is that
+//! a mismatch is now stated against the project's own selection, in terms an
+//! operator can act on in the project.
 use std::fs;
 use std::path::Path;
 
@@ -16,23 +32,14 @@ use object::{Object, ObjectSection};
 use phoxal_runtime_contract::metadata::{ParticipantContract, ParticipantMetadata};
 use phoxal_runtime_contract::version::FrameworkVersion;
 
-/// The framework train this CLI speaks, and so the compatibility line every
-/// participant binary it accepts must have been built on.
-///
-/// It is the train the CLI itself links, which is the same train `phoxald`
-/// links: the two ship as one exact pair. Naming it here lets a test that
-/// synthesizes a participant binary emit the document a role macro does
-/// without restating a version string.
-pub const CURRENT_FRAMEWORK: FrameworkVersion = FrameworkVersion::CURRENT;
-
-/// One binary's accepted embedded compatibility record: the tagged `V0`
-/// document destructured into the fields callers actually branch on.
+/// One binary's embedded contract: the tagged `V0` document destructured into
+/// the fields callers actually branch on.
 ///
 /// The document's whole compatibility claim is the framework train it was
 /// built from, and that claim is settled by the line that train belongs to.
-/// The parse proves the *grammar* is one this CLI reads; the line check in
-/// [`extract_participant_metadata_from_bytes`] proves the *contracts* are the
-/// ones this CLI executes, so holding this value is the compatibility proof.
+/// Holding this value proves only that the *grammar* is one this CLI reads;
+/// whether the binary belongs to a given project is
+/// [`ensure_built_for_project`].
 pub type ParticipantMeta = ParticipantContract;
 
 /// The linker section names a participant attribute places its metadata
@@ -96,38 +103,81 @@ pub fn extract_participant_metadata_from_bytes(
     })?;
     // The parse settles the document grammar: a schema tag, framework
     // spelling, or field set this CLI does not implement fails here, naming
-    // what it found. The context below adds only the two things serde cannot
-    // know: which file it was, and what an operator does about it.
+    // what it found. That is a statement about the reader, not about any
+    // project: the context below adds only the two things serde cannot know -
+    // which file it was, and what an operator does about it.
     let metadata = ParticipantMetadata::from_bytes(&bytes).with_context(|| {
         format!(
-            "{describe} was built against a different phoxal train than this CLI.\n\nIf the \
-                 binary is older, update the project dependency and rebuild:\n    cargo update -p \
-                 phoxal\n\nIf it is newer, update the phoxal CLI to the release that ships this \
-                 contract."
+            "{describe} carries a phoxal participant metadata document this CLI cannot \
+             read.\n\nIf the binary is older, update the project dependency and rebuild:\n    \
+             cargo update -p phoxal\n\nIf it is newer, update the phoxal CLI to a release that \
+             reads this document."
         )
     })?;
-    let contract = metadata.contract();
-    // The framework train is the single compatibility identity two Phoxal
-    // processes compare, and they compare the line it belongs to. `phoxald`
-    // re-enforces the same line rule over the whole bundle when it opens one;
-    // this check is what makes the disagreement arrive while the operator is
-    // still building, naming the binary that carries it.
-    anyhow::ensure!(
-        contract.framework.is_compatible_with(CURRENT_FRAMEWORK),
-        "{describe} was built from phoxal framework {}, which is not on the {} line this CLI speaks (framework {CURRENT_FRAMEWORK}). Update the project dependency and rebuild with `cargo update -p phoxal`, or update the CLI to the matching release.",
-        contract.framework,
-        CURRENT_FRAMEWORK.compatibility_line(),
-    );
-    Ok(contract.clone())
+    Ok(metadata.contract().clone())
 }
 
 /// Extracts and parses `binary_path`'s embedded participant metadata: reads
 /// the compiled-in linker section straight off the object file, never
-/// executing it.
+/// executing it. Policy-free - see [`ensure_built_for_project`] for the
+/// compatibility decision.
 pub fn extract_participant_metadata(binary_path: &Path) -> Result<ParticipantMeta> {
     let data = fs::read(binary_path)
         .with_context(|| format!("failed to read {}", binary_path.display()))?;
     extract_participant_metadata_from_bytes(&data, &binary_path.display().to_string())
+}
+
+/// The whole build-time compatibility decision for one participant binary:
+/// the train it was built from must be on the line the project targets.
+///
+/// The authority is the project, never the CLI. A robot project selects its
+/// framework in its own Cargo graph, so `project_target` is the framework that
+/// project's committed `Cargo.lock` resolved; the version of the `phoxal`
+/// product doing the reading says nothing about whether these contracts fit
+/// together.
+///
+/// Comparing every selected binary against this one target is also the
+/// project-side proof that the finalized participant graph shares a single
+/// compatibility line: agreeing with the project's line is transitive, so a
+/// bundle that passes cannot be mixed. `phoxald` re-derives the same rule over
+/// a bundle it opens; this check is what makes the disagreement arrive while
+/// the operator is still building, naming the binary that carries it.
+pub fn ensure_built_for_project(
+    contract: &ParticipantMeta,
+    describe: &str,
+    project_target: FrameworkVersion,
+) -> Result<()> {
+    anyhow::ensure!(
+        contract.framework.is_compatible_with(project_target),
+        "{describe} was built from phoxal framework {}, which is not on the {} line this project \
+         targets (phoxal {project_target} in Cargo.lock). Run `cargo update -p phoxal` in the \
+         project or rebuild the binary.",
+        contract.framework,
+        project_target.compatibility_line(),
+    );
+    Ok(())
+}
+
+/// The framework train every synthesized participant fixture in this crate is
+/// built from, and the train its fixture projects lock.
+///
+/// Fixtures state a train explicitly instead of borrowing the one this CLI
+/// links, because that train is not an authority for anything a project
+/// builds - a fixture that reached for it would quietly reintroduce the
+/// dependency these checks exist to remove.
+#[cfg(test)]
+pub(crate) const FIXTURE_FRAMEWORK: FrameworkVersion = FrameworkVersion::new(0, 42, 0);
+
+/// [`extract_participant_metadata`] followed by [`ensure_built_for_project`]:
+/// what a binary claims, judged against what the project selected.
+pub fn extract_participant_metadata_for_project(
+    binary_path: &Path,
+    project_target: FrameworkVersion,
+) -> Result<ParticipantMeta> {
+    let describe = binary_path.display().to_string();
+    let contract = extract_participant_metadata(binary_path)?;
+    ensure_built_for_project(&contract, &describe, project_target)?;
+    Ok(contract)
 }
 
 /// The [`object::Architecture`] this CLI process runs on, mapped from
@@ -303,6 +353,13 @@ pub fn ensure_target(object_bytes: &[u8], describe: &str, expected: &ExpectedTar
 
 /// Reads `binary_path`, verifies it matches the `expected` target signature, and
 /// returns its embedded participant metadata in one read.
+///
+/// Deliberately no framework judgement: this serves bundle verification, and a
+/// finalized bundle carries its own compatibility statement. Its document is
+/// constructible only when every selected artifact shares one line, and the
+/// caller proves each binary's embedded contract equals the one recorded for
+/// it, so the bundle answers the question by itself - including for an
+/// extracted archive, where there is no project to ask.
 pub fn inspect_selected_binary_for_target(
     binary_path: &Path,
     expected: &ExpectedTarget,
@@ -374,15 +431,15 @@ mod tests {
         obj.write().expect("synthesize object file")
     }
 
-    /// The exact document a role macro embeds, for a binary that agrees with
-    /// this CLI on every process-boundary contract. Written through the
-    /// framework's own serialize twin, so the fixture cannot drift from the
-    /// parser it is meant to satisfy.
+    /// The exact document a role macro embeds, for a binary built from the
+    /// train the fixture project targets. Written through the framework's own
+    /// serialize twin, so the fixture cannot drift from the parser it is meant
+    /// to satisfy.
     fn current_record(id: &str) -> serde_json::Value {
         serde_json::to_value(
             phoxal_runtime_contract::emit::ParticipantMetadataRecord::V0 {
                 contract: phoxal_runtime_contract::emit::ParticipantContractRecord {
-                    framework: CURRENT_FRAMEWORK,
+                    framework: FIXTURE_FRAMEWORK,
                     id,
                     kind: ParticipantKind::Service,
                     requirement: None,
@@ -538,12 +595,11 @@ mod tests {
         );
     }
 
-    /// A binary from another compatibility line is rejected before its config
-    /// schema is trusted. The document parses - a well-formed record from any
-    /// train does - and the *comparison* is what fails, so the diagnostic names
-    /// both trains and the fix for either direction.
+    /// Extraction is policy-free: a well-formed record from ANY train reads
+    /// back exactly as written, because what a binary claims is a separate
+    /// question from whether it belongs to a project.
     #[test]
-    fn a_binary_from_another_framework_line_is_rejected_with_an_actionable_diagnostic() {
+    fn extraction_reports_whatever_train_a_binary_claims() {
         let mut record = current_record("cleaning");
         record["framework"] = serde_json::json!("9.9.9");
         let elf = synthesize_object(
@@ -553,30 +609,53 @@ mod tests {
             b"",
             serde_json::to_vec(&record).unwrap().as_slice(),
         );
-        let error = extract_participant_metadata_from_bytes(&elf, "bin/cleaning")
-            .expect_err("a foreign framework train must be rejected");
-        let message = format!("{error:#}");
-        assert!(message.contains("bin/cleaning"), "{message}");
-        assert!(message.contains("9.9.9"), "{message}");
-        assert!(
-            message.contains(&CURRENT_FRAMEWORK.to_string()),
-            "{message}"
-        );
-        assert!(message.contains("cargo update -p phoxal"), "{message}");
-        assert!(message.contains("update the CLI"), "{message}");
+        let contract = extract_participant_metadata_from_bytes(&elf, "bin/cleaning")
+            .expect("reading a binary's claim never judges it");
+        assert_eq!(contract.framework, FrameworkVersion::new(9, 9, 9));
     }
 
-    /// A binary from a different train on this CLI's own line is accepted:
+    /// A binary off the line the PROJECT targets is rejected before its config
+    /// schema is trusted, and the diagnostic is written from the project's
+    /// point of view: the train the binary carries, the line the project
+    /// targets, the exact `phoxal` its lockfile selected, and what to do in
+    /// the project.
+    #[test]
+    fn a_binary_off_the_project_line_is_rejected_with_a_project_authored_diagnostic() {
+        let mut record = current_record("cleaning");
+        record["framework"] = serde_json::json!("9.9.9");
+        let elf = synthesize_object(
+            object::BinaryFormat::Elf,
+            object::Architecture::Aarch64,
+            b".phoxal_meta",
+            b"",
+            serde_json::to_vec(&record).unwrap().as_slice(),
+        );
+        let contract = extract_participant_metadata_from_bytes(&elf, "bin/cleaning")
+            .expect("the document parses");
+        let message = format!(
+            "{:#}",
+            ensure_built_for_project(&contract, "bin/cleaning", FIXTURE_FRAMEWORK)
+                .expect_err("a binary off the project's line must be rejected")
+        );
+        assert_eq!(
+            message,
+            "bin/cleaning was built from phoxal framework 9.9.9, which is not on the 0.42.x line \
+             this project targets (phoxal 0.42.0 in Cargo.lock). Run `cargo update -p phoxal` in \
+             the project or rebuild the binary."
+        );
+    }
+
+    /// A binary from a different train on the project's line is accepted:
     /// trains on one line speak the same contracts, so a rebuild is not what
     /// the operator owes here.
     #[test]
-    fn a_binary_from_another_train_on_this_line_is_accepted() {
+    fn a_binary_from_another_train_on_the_project_line_is_accepted() {
         let neighbour = FrameworkVersion::new(
-            CURRENT_FRAMEWORK.major(),
-            CURRENT_FRAMEWORK.minor(),
-            CURRENT_FRAMEWORK.patch().wrapping_add(1),
+            FIXTURE_FRAMEWORK.major(),
+            FIXTURE_FRAMEWORK.minor(),
+            FIXTURE_FRAMEWORK.patch().wrapping_add(1),
         );
-        assert_ne!(neighbour, CURRENT_FRAMEWORK);
+        assert_ne!(neighbour, FIXTURE_FRAMEWORK);
         let mut record = current_record("cleaning");
         record["framework"] = serde_json::json!(neighbour.to_string());
         let elf = synthesize_object(
@@ -589,11 +668,14 @@ mod tests {
         let contract = extract_participant_metadata_from_bytes(&elf, "bin/cleaning")
             .expect("a train on this line is accepted");
         assert_eq!(contract.framework, neighbour);
+        ensure_built_for_project(&contract, "bin/cleaning", FIXTURE_FRAMEWORK)
+            .expect("a neighbouring train on the project's line belongs to the project");
     }
 
     /// A framework version spelled any way but the canonical SemVer string is
     /// not a document this CLI reads at all, so it fails at the parse rather
-    /// than at the comparison.
+    /// than at the comparison. That failure is about the reader, so it is the
+    /// one place a remediation may still mention the CLI.
     #[test]
     fn a_non_canonical_framework_spelling_is_rejected_by_the_parse() {
         for unsupported in ["v0.56.2", "0.56", "0.56.2-rc.1"] {
@@ -612,7 +694,7 @@ mod tests {
                     .expect_err("a non-canonical framework spelling must be rejected")
             );
             assert!(message.contains(unsupported), "{message}");
-            assert!(message.contains("different phoxal train"), "{message}");
+            assert!(message.contains("this CLI cannot read"), "{message}");
         }
     }
 
@@ -629,7 +711,7 @@ mod tests {
         for record in [
             serde_json::json!({
                 "schema": "phoxal/participant-metadata/v1",
-                "framework": CURRENT_FRAMEWORK.to_string(),
+                "framework": FIXTURE_FRAMEWORK.to_string(),
                 "id": "drive",
                 "kind": "service",
                 "config_schema": null,

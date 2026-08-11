@@ -5,16 +5,62 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
+use phoxal_runtime_contract::version::FrameworkVersion;
 use serde::Deserialize;
 
-/// The exact framework version a robot project's Cargo graph locks. It is
-/// provenance for diagnostics and package resolution: the compatibility
-/// decision is made against the train embedded in each built binary, which is
-/// what a process boundary actually compares, rather than against what the
-/// lockfile intended to build.
+/// The framework a robot project selects, read from its committed Cargo graph.
+///
+/// The project picks the framework; nothing else does. The `phoxal` version
+/// its lockfile resolves is therefore the authority every build-time
+/// compatibility decision is made against: a participant binary belongs to
+/// this project exactly when the train it was built from shares a
+/// compatibility line with [`Self::framework`].
+///
+/// The exact version is kept alongside that identity because the two answer
+/// different questions. The identity decides what interoperates; the exact
+/// version is the provenance a diagnostic names and the pin package resolution
+/// installs (`<package>@<exact>`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LockedTrain {
-    pub version: String,
+    version: String,
+    framework: FrameworkVersion,
+}
+
+impl LockedTrain {
+    /// The project target for the `phoxal` version a lockfile resolved.
+    ///
+    /// A version that is not a canonical framework version is refused here
+    /// rather than carried: such a project selects no framework at all, so
+    /// every later participant check would have nothing to compare a binary
+    /// against.
+    pub fn from_locked_version(version: &str) -> Result<Self> {
+        let framework = version.parse::<FrameworkVersion>().with_context(|| {
+            format!(
+                "the locked `phoxal` version `{version}` is not a canonical \
+                 <major>.<minor>.<patch> framework version, so this project selects no framework \
+                 to build against; depend on a released `phoxal` version and commit the resulting \
+                 lockfile"
+            )
+        })?;
+        Ok(Self {
+            version: version.to_string(),
+            framework,
+        })
+    }
+
+    /// The exact locked version, for provenance and package resolution.
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// The compatibility identity this project targets. Every participant
+    /// binary the project builds or stages is validated against the line this
+    /// version belongs to.
+    #[must_use]
+    pub const fn framework(&self) -> FrameworkVersion {
+        self.framework
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,9 +175,12 @@ pub fn resolve_locked_project(project_root: &Path, offline: bool) -> Result<Lock
         packages.len()
     );
     let package = &packages[0];
-    let train = LockedTrain {
-        version: package.version.clone(),
-    };
+    let train = LockedTrain::from_locked_version(&package.version).with_context(|| {
+        format!(
+            "failed to read the framework target from {}",
+            lock.display()
+        )
+    })?;
     let runtimes = discover_workspace_runtimes(project_root, &metadata)?;
     let local_components = discover_local_component_packages(project_root, &metadata)?;
     Ok(LockedProject {
@@ -369,6 +418,94 @@ struct Target {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// The project target is exactly what the lockfile selected: the precise
+    /// version for provenance, and the line it belongs to for compatibility.
+    #[test]
+    fn the_project_target_is_the_locked_version_and_the_line_it_belongs_to() {
+        let train = LockedTrain::from_locked_version("0.42.3")
+            .expect("a canonical locked version yields a project target");
+        assert_eq!(train.version(), "0.42.3");
+        assert_eq!(train.framework(), FrameworkVersion::new(0, 42, 3));
+        assert_eq!(train.framework().compatibility_line().to_string(), "0.42.x");
+        assert!(
+            train
+                .framework()
+                .is_compatible_with(FrameworkVersion::new(0, 42, 9))
+        );
+        assert!(
+            !train
+                .framework()
+                .is_compatible_with(FrameworkVersion::new(0, 43, 0))
+        );
+    }
+
+    /// A `phoxal` version that is not a framework version leaves the project
+    /// with nothing to build against, so it is refused where it is read - and
+    /// the resolution failure names the lockfile the version came from.
+    #[test]
+    fn a_locked_phoxal_version_that_is_not_a_framework_version_is_refused() {
+        for unsupported in ["0.42", "v0.42.3", "0.42.3-rc.1"] {
+            let message = format!(
+                "{:#}",
+                LockedTrain::from_locked_version(unsupported)
+                    .expect_err("a non-canonical locked version has no compatibility identity")
+            );
+            assert!(message.contains(unsupported), "{message}");
+            assert!(message.contains("selects no framework"), "{message}");
+            assert!(
+                message.contains("commit the resulting lockfile"),
+                "{message}"
+            );
+        }
+    }
+
+    /// A robot project never declares or resolves a CLI compatibility
+    /// requirement. The framework it targets comes from its own lockfile, and
+    /// this crate keeps no second authority to fall back on - not the CLI
+    /// product version, and not the framework train the CLI happens to link.
+    ///
+    /// The rule is textual because it is about what this crate may read at
+    /// all, and it covers fixtures too: a test that reached for the CLI's own
+    /// train would quietly reintroduce exactly the dependency being removed.
+    #[test]
+    fn the_project_crate_never_reads_the_cli_as_a_compatibility_input() {
+        // Assembled from parts so this policy test cannot match itself.
+        let forbidden = [
+            ["FrameworkVersion::", "CURRENT"].concat(),
+            ["CURRENT_", "SPELLING"].concat(),
+            ["CARGO_PKG_", "VERSION"].concat(),
+        ];
+        let mut offences = Vec::new();
+        let mut pending = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).expect("the crate source tree is readable") {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = fs::read_to_string(&path).expect("a readable Rust source file");
+                for (index, line) in source.lines().enumerate() {
+                    if forbidden
+                        .iter()
+                        .any(|needle| line.contains(needle.as_str()))
+                    {
+                        offences.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offences.is_empty(),
+            "the robot project's framework comes from its own Cargo.lock; these read the CLI \
+             instead:\n{}",
+            offences.join("\n")
+        );
+    }
 
     #[test]
     fn missing_lock_is_actionable_and_never_created() {
