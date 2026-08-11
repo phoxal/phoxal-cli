@@ -51,7 +51,10 @@ pub(crate) use candidate::compile_test_bundle;
 /// synthesize a participant binary.
 ///
 /// Built through the framework's own serialize twin rather than a JSON literal,
-/// so a fixture can never claim a version spelling the parser would reject.
+/// so a fixture can never claim a version spelling the parser would reject. The
+/// train it declares is the fixture train, which is also the one
+/// [`test_project_train`] locks - together they keep a synthesized binary on
+/// the line its fixture project targets.
 #[cfg(test)]
 pub(crate) fn test_metadata_payload(
     id: &str,
@@ -63,7 +66,7 @@ pub(crate) fn test_metadata_payload(
     serde_json::to_vec(
         &phoxal_runtime_contract::emit::ParticipantMetadataRecord::V0 {
             contract: phoxal_runtime_contract::emit::ParticipantContractRecord {
-                framework: crate::check::participant_metadata::CURRENT_FRAMEWORK,
+                framework: crate::check::participant_metadata::FIXTURE_FRAMEWORK,
                 id,
                 kind,
                 requirement: None,
@@ -72,4 +75,14 @@ pub(crate) fn test_metadata_payload(
         },
     )
     .expect("metadata serializes")
+}
+
+/// The framework target a fixture project selects: the train the binaries
+/// [`test_metadata_payload`] describes were built from.
+#[cfg(test)]
+pub(crate) fn test_project_train() -> crate::source::train::LockedTrain {
+    crate::source::train::LockedTrain::from_locked_version(
+        &crate::check::participant_metadata::FIXTURE_FRAMEWORK.to_string(),
+    )
+    .expect("the fixture framework is a canonical version")
 }

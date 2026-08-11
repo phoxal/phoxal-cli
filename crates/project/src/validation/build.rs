@@ -8,24 +8,32 @@ use crate::check::source::SourceParticipantKind;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use phoxal_runtime_contract::version::FrameworkVersion;
 use std::path::Path;
 
 /// Read a source participant's report from the exact executable Cargo selected
 /// for the preparation plan. Preparation builds a compatible group once, then
 /// both graph checking and staging consume this path without asking Cargo again.
+///
+/// `project_framework` is the framework the project selected in its lockfile,
+/// which is what the built binary's own train has to agree with.
 pub(crate) fn build_participant_report_from_binary(
     participant: &SourceParticipant,
     binary_path: &Path,
+    project_framework: FrameworkVersion,
     reporter: &dyn crate::Reporter,
 ) -> Result<RawParticipantReport> {
-    let meta =
-        participant_metadata::extract_participant_metadata(binary_path).with_context(|| {
-            format!(
-                "failed to extract participant metadata for {} from {}",
-                participant.name,
-                binary_path.display()
-            )
-        })?;
+    let meta = participant_metadata::extract_participant_metadata_for_project(
+        binary_path,
+        project_framework,
+    )
+    .with_context(|| {
+        format!(
+            "failed to extract participant metadata for {} from {}",
+            participant.name,
+            binary_path.display()
+        )
+    })?;
     report_source_build_progress(
         Some(reporter),
         format!(

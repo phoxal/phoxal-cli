@@ -59,7 +59,7 @@ pub(crate) fn resolve_with_train_using_registry_cache(
     // workspace lock must not mask a dual/official declaration error.
     validate_runtime_declarations(robot)?;
     let project = crate::source::train::resolve_locked_project(project_root, options.offline)?;
-    resolved_train(&project.train.version);
+    resolved_train(project.train.version());
     resolve_with_locked_project_using_registry_cache(
         robot,
         project_root,
@@ -107,7 +107,7 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
     // so reject a locked train it
     // predates before applying it, rather than silently resolving an
     // official set that never existed for that train.
-    let train = project.train.version.clone();
+    let train = project.train.version().to_string();
     let target = options
         .official_target_triple
         .clone()
@@ -174,7 +174,7 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
     Ok(BundlePlan {
         source_manifest: robot.clone(),
         compiled,
-        train,
+        train: project.train.clone(),
         target,
         // The root package IS the brain; locked resolution already proved its
         // exact Cargo shape ().

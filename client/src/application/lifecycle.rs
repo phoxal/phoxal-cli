@@ -84,7 +84,6 @@ pub(crate) async fn run_command(
     requested_target: Option<&Path>,
     options: RunOptions,
 ) -> Result<()> {
-    crate::pair::require_exact()?;
     let target = Target::resolve(requested_target, app.project.root())?;
     let launched = build_publish_and_launch(app, &target, options).await?;
     let session = await_attachment(&target, launched, HANDSHAKE_BUDGET).await?;
@@ -97,7 +96,6 @@ pub(crate) async fn start_command(
     requested_target: Option<&Path>,
     options: RunOptions,
 ) -> Result<()> {
-    crate::pair::require_exact()?;
     let target = Target::resolve(requested_target, app.project.root())?;
     let launched = build_publish_and_launch(app, &target, options).await?;
     let session = await_attachment(&target, launched, HANDSHAKE_BUDGET).await?;
@@ -112,10 +110,12 @@ pub(crate) async fn start_command(
 
 /// The shared front half of `run` and `start`.
 ///
-/// Both callers confirm the exact `phoxal` + `phoxald` pair before they even
-/// resolve a project: a build no matching daemon can execute is wasted work,
-/// and the operator's real problem is a broken installation rather than their
-/// robot.
+/// Neither caller asks what version the sibling `phoxald` reports. The project
+/// selects the framework it builds against, and the installed CLI product
+/// version says nothing about that, so a product-version difference is not a
+/// reason to refuse a robot's work. Launch still resolves the sibling daemon,
+/// and a machine with no daemon at all fails there, naming the binary it could
+/// not run.
 ///
 /// The live check is a real handshake, not a socket-file probe: an execution
 /// that answers connect is live, and `run` refuses rather than silently
@@ -745,12 +745,12 @@ mod tests {
         );
     }
 
-    /// The pair is confirmed before a project is even resolved, let alone
-    /// built: `run` and `start` are the two commands that need a `phoxald`, and
-    /// a missing or mismatched one is an installation problem the operator must
-    /// hear about first.
+    /// Project work never gates on the two installed halves reporting the same
+    /// product version: the project selects its framework, and the CLI product
+    /// version is not a compatibility identity for it. `run` and `start` go
+    /// straight from the requested target to resolving the project.
     #[test]
-    fn run_and_start_confirm_the_exact_pair_before_resolving_anything() {
+    fn run_and_start_do_not_gate_project_work_on_the_cli_product_version() {
         let source = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/application/lifecycle.rs"),
         )
@@ -764,8 +764,8 @@ mod tests {
                 .split_once("Target::resolve")
                 .expect("it resolves a target");
             assert!(
-                opening.contains("crate::pair::require_exact()?"),
-                "{command} must confirm the pair before it resolves a project"
+                !opening.contains("crate::pair::"),
+                "{command} must not consult the installed pair before doing project work"
             );
         }
     }

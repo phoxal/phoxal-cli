@@ -62,8 +62,10 @@ impl LaunchedDaemon {
 /// process group, and the daemon is durable - it must survive the client that
 /// started it, because detaching is not stopping.
 pub(crate) fn spawn(bundle_root: &Path) -> Result<LaunchedDaemon> {
-    // The pair is confirmed before anything is built, so by here the sibling is
-    // known to exist and to be this client's exact version.
+    // The daemon a machine runs is the sibling of the `phoxal` running here: a
+    // client out of a build directory drives the daemon beside it, never an
+    // unrelated one on `PATH`. Whether that file exists at all is settled by
+    // the spawn below, which names it.
     let executable = crate::pair::resolve_daemon();
     let mut command = Command::new(&executable);
     command
@@ -74,9 +76,13 @@ pub(crate) fn spawn(bundle_root: &Path) -> Result<LaunchedDaemon> {
     isolate_process_group(&mut command);
     let mut child = command.spawn().with_context(|| {
         format!(
-            "failed to launch the supervisor {} on {}",
+            "failed to launch the supervisor {} on {}; `{}` and `{}` install as one archive, so \
+             reinstall the CLI with `{} self upgrade` if it is missing",
             executable.display(),
-            bundle_root.display()
+            bundle_root.display(),
+            crate::pair::CLIENT_BINARY,
+            crate::pair::DAEMON_BINARY,
+            crate::pair::CLIENT_BINARY,
         )
     })?;
 

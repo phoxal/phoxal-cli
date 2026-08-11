@@ -35,26 +35,26 @@ impl Doctor {
             app.project.root(),
             app.offline,
         )?;
-        println!("framework train: {}", train.version);
+        println!("framework train: {}", train.version());
         println!("root package: Cargo.toml and Cargo.lock are coherent");
         {
             if app.offline {
                 println!("framework facade: crates.io probe skipped in offline mode");
             } else {
-                match inspect_registry_train(train.version.clone()).await {
+                match inspect_registry_train(train.version().to_string()).await {
                     Ok(RegistryStatus::Available) => {
                         println!("framework facade: available on crates.io");
                     }
                     Ok(RegistryStatus::Yanked) => {
                         println!(
                             "warning: locked framework train {} is yanked; existing locked deployment remains valid, but a new Cargo update will not select it",
-                            train.version
+                            train.version()
                         );
                     }
                     Err(error) => {
                         eprintln!(
                             "warning: could not inspect framework train {} on crates.io: {error:#}",
-                            train.version
+                            train.version()
                         );
                     }
                 }

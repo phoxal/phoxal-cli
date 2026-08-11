@@ -460,6 +460,7 @@ fn run_source_check(
     reporter: &dyn crate::Reporter,
 ) -> Result<()> {
     let bin_dir = staged_root.join("bin");
+    let project_framework = resolved.train.framework();
     let platform_refs = check_artifact_refs_from_resolved(resolved, drivers);
     let mut official_by_name = resolved
         .platform_runtimes
@@ -480,7 +481,11 @@ fn run_source_check(
         CheckGraphContext { robot: Some(robot) },
         |binary_name| {
             if let Some(runtime) = official_by_name.get(binary_name) {
-                return extract_participant_report_from_staged_runtime(&bin_dir, runtime);
+                return extract_participant_report_from_staged_runtime(
+                    &bin_dir,
+                    runtime,
+                    project_framework,
+                );
             }
             Err(anyhow!(
                 "resolved official artifact {binary_name} was not materialized into bin/"
@@ -490,6 +495,7 @@ fn run_source_check(
             build_participant_report_from_binary(
                 participant,
                 source_artifacts.binary(participant)?,
+                project_framework,
                 reporter,
             )
         },

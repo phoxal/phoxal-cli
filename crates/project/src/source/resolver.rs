@@ -64,7 +64,11 @@ pub struct BundlePlan {
     /// planning, and simulation. Source documents remain available only for
     /// package resolution and CLI-owned settings such as router policy.
     pub compiled: CompiledBundle,
-    pub train: String,
+    /// The framework this project selected, read from its committed Cargo
+    /// graph. It is the authority every participant binary in the plan is
+    /// validated against, and the exact version official packages are pinned
+    /// to.
+    pub train: crate::source::train::LockedTrain,
     pub target: String,
     /// The one mandatory root brain, discovered from the root Cargo package
     /// (). Never optional and never registry-resolved: every

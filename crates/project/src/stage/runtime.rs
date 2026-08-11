@@ -20,6 +20,13 @@ use phoxal_cli_catalog::Catalog;
 /// Source manifests and catalog entries are consumed here and never copied into
 /// the bundle. Opening the result proves every indexed asset and executable
 /// before the candidate can be published.
+///
+/// Every selected binary is judged against the framework the project selected
+/// before it enters the document. That is the project-side proof that the
+/// finalized graph shares one compatibility line: it arrives with the project
+/// as the stated authority and names the offending binary, rather than being
+/// left to the document's own mixed-line refusal at construction. The exact
+/// per-artifact train still flows into the document as provenance.
 pub(crate) fn write_runtime_document(root: &Path, resolved: &BundlePlan) -> Result<RuntimeBundle> {
     // `cargo install --root <candidate>` leaves its bookkeeping beside `bin/`.
     // Those files carry absolute host paths and are not bundle content; the
@@ -60,8 +67,11 @@ pub(crate) fn write_runtime_document(root: &Path, resolved: &BundlePlan) -> Resu
         ))?;
         let binary_path = root.join(relative.as_str());
         let contract =
-            crate::check::participant_metadata::extract_participant_metadata(&binary_path)
-                .with_context(|| format!("failed to inspect {}", binary_path.display()))?;
+            crate::check::participant_metadata::extract_participant_metadata_for_project(
+                &binary_path,
+                resolved.train.framework(),
+            )
+            .with_context(|| format!("failed to inspect {}", binary_path.display()))?;
         anyhow::ensure!(
             contract.id == artifact_id,
             "{} declares artifact {}, expected {}",

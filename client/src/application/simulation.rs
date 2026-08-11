@@ -39,7 +39,6 @@ pub(crate) async fn run_command(
     world: String,
     project: Option<&Path>,
 ) -> Result<()> {
-    crate::pair::require_exact()?;
     let target = Target::resolve(project, app.project.root())?;
     phoxal_cli_project::source::train::resolve_locked_train(&target.project, app.offline)
         .with_context(|| {

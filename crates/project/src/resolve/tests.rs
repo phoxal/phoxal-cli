@@ -343,7 +343,7 @@ fn platform_runtimes_resolve_from_the_catalog_at_the_locked_train() -> anyhow::R
 
     let resolved = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
 
-    assert_eq!(resolved.train, "0.1.0");
+    assert_eq!(resolved.train.version(), "0.1.0");
     let drive = resolved
         .platform_runtimes
         .iter()

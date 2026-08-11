@@ -27,13 +27,17 @@ pub(crate) fn official_simulator_participants(
     for runtime in resolved.simulators.iter().filter(|runtime| {
         runtime.source_path().is_none() && runtime.name == SIMULATOR_CONTROLLER_ARTIFACT_NAME
     }) {
-        let raw = extract_participant_report_from_staged_runtime(&simulation_bin_dir, runtime)
-            .with_context(|| {
-                format!(
-                    "failed to extract participant report for simulator {}",
-                    runtime.name
-                )
-            })?;
+        let raw = extract_participant_report_from_staged_runtime(
+            &simulation_bin_dir,
+            runtime,
+            resolved.train.framework(),
+        )
+        .with_context(|| {
+            format!(
+                "failed to extract participant report for simulator {}",
+                runtime.name
+            )
+        })?;
         if raw.artifact.kind != "simulator" || raw.artifact.id != runtime.name {
             bail!(
                 "official simulator participant report artifact {} '{}' does not match expected simulator '{}'",

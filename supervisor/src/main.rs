@@ -12,9 +12,11 @@
 //! whoever built the bundle, so the bundle root is the daemon's complete input.
 //!
 //! The one non-executing invocation is `--version`. It exists because `phoxal`
-//! and `phoxald` ship as one exact pair: the client probes
-//! its sibling with it and refuses to build anything for a missing or
-//! mismatched daemon. It is a pair check, not an execution option.
+//! and `phoxald` ship as one archive: the client probes its sibling with it to
+//! report whether that installation is whole. It is an installation check, not
+//! an execution option, and not a compatibility gate - what a bundle is
+//! compatible with is the framework train its artifacts carry, which this
+//! daemon reads from the bundle itself.
 //!
 //! Everything an operator does *to* a running execution goes through the
 //! supervisor API on the bus - `phoxal attach`, `phoxal status`, `phoxal stop`
