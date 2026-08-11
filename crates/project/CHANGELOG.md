@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.37.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.37.1) - 2026-08-11
+
+
+### Fixed
+
+- Derive simulation membership from the compiled robot ([#308](https://github.com/phoxal/phoxal-cli/pull/308))
+
+
 ## [0.37.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.37.0) - 2026-08-11
 
 
