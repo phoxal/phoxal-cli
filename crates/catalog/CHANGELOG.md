@@ -4,6 +4,15 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.37.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.37.0) - 2026-08-11
+
+
+### Added
+
+- Adopt the framework wire families and gate attachment on exact framework equality ([#303](https://github.com/phoxal/phoxal-cli/pull/303)) [**breaking**]
+- Accept same-line framework trains at attach and bundle admission ([#307](https://github.com/phoxal/phoxal-cli/pull/307)) [**breaking**]
+
+
 ## [0.36.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.36.1) - 2026-08-10
 
 
