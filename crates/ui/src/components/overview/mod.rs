@@ -7,7 +7,7 @@ use tuirealm::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tuirealm::ratatui::text::{Line, Span, Text};
 use tuirealm::ratatui::widgets::Paragraph;
 
-use phoxal_api::supervisor::snapshot::{StartupStep, StartupStepKind, StartupStepState};
+use phoxal_client::supervisor::snapshot::{StartupStep, StartupStepKind, StartupStepState};
 
 use crate::Theme;
 use crate::app::AppModel;
@@ -193,7 +193,7 @@ fn startup_timeline(
                     text: step
                         .detail
                         .as_ref()
-                        .map(phoxal_api::supervisor::snapshot::Detail::as_str)
+                        .map(phoxal_client::supervisor::snapshot::Detail::as_str)
                         .map_or_else(
                             || format!("active: {}", startup_step_label(step.kind)),
                             |detail| {
@@ -272,7 +272,7 @@ fn sanitize(value: &str) -> String {
 #[cfg(test)]
 mod startup_timeline_tests {
     use super::*;
-    use phoxal_api::supervisor::snapshot::Detail;
+    use phoxal_client::supervisor::snapshot::Detail;
 
     /// The daemon's own sequence, including one failure and one pending step.
     fn timeline() -> Vec<StartupStep> {

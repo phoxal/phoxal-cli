@@ -2,6 +2,12 @@
 //!
 //! This crate deliberately contains no stores, tasks, channels, transports,
 //! reconciliation, commands, or rendering.
+//!
+//! Every remote fact an observation carries comes in as a `phoxal_client`
+//! type, so this crate names no wire crate directly.
+//! `phoxal-runtime-contract` stays a direct dependency because identities,
+//! participant kinds, and the clock are shared domain primitives that also
+//! appear in observations this crate composes locally.
 
 #![cfg_attr(
     test,

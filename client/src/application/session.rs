@@ -9,8 +9,8 @@ use std::path::Path;
 
 use crate::cli::output::diagnostics::RuntimeEvent;
 use anyhow::{Context, Result};
-use phoxal_api::supervisor::command::CommandOutcome;
 use phoxal_cli_ui::{AttachmentOutcome, Effect, EffectSenders, SessionInput, UiOptions};
+use phoxal_client::supervisor::command::{CommandOutcome, CommandRejection};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
@@ -298,8 +298,7 @@ fn accepted(outcome: CommandOutcome) -> Result<()> {
     }
 }
 
-fn rejection(reason: phoxal_api::supervisor::command::CommandRejection) -> &'static str {
-    use phoxal_api::supervisor::command::CommandRejection;
+fn rejection(reason: CommandRejection) -> &'static str {
     match reason {
         CommandRejection::UnknownParticipant => {
             "no process in the current snapshot has that key; the graph moved on"
@@ -355,7 +354,6 @@ impl Drop for DiagnosticGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_api::supervisor::command::CommandRejection;
 
     /// The operator sees the supervisor's own reason, not "command failed".
     #[test]

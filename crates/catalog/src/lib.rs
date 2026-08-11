@@ -5,9 +5,10 @@
 //! component instances; the official set comes from here alone.
 //!
 //! The catalog is **internal data with no identity token**. It never crosses a
-//! process boundary: `phoxal` and `phoxald` ship as one exact pair, participants
-//! never read it, and an attaching client derives topology from the supervisor
-//! snapshot rather than from a catalog. Compatibility at a process boundary is
+//! process boundary: it is compiled into this binary and never serialized,
+//! participants never read it, and an attaching client derives topology from
+//! the supervisor snapshot rather than from a catalog. Compatibility at a
+//! process boundary is
 //! the framework compatibility line each binary was built on, so a catalog
 //! identity would be a second claim about the same
 //! thing. There is consequently no `CatalogId` and no catalog constant in any

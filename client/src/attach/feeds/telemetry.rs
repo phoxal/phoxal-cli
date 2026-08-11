@@ -6,12 +6,12 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use phoxal_api::runtime::telemetry::Cursor;
-use phoxal_api::supervisor::telemetry;
 use phoxal_cli_observation::{
     AttachmentEvent, ObservationSource, RuntimeFeedStatus, RuntimePerformanceSample, SourceStatus,
     StoreChanged, sanitize_terminal_text,
 };
+use phoxal_client::runtime::telemetry::Cursor;
+use phoxal_client::supervisor::telemetry;
 
 use super::FeedContext;
 use crate::reconcile::{ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};

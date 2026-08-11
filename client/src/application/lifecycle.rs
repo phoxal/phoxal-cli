@@ -18,8 +18,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use phoxal_api::supervisor::snapshot::{Lifecycle, Snapshot};
-use phoxal_supervisor_client::{AttachError, Attachment, AttachmentConfig};
+use phoxal_client::supervisor::snapshot::{Lifecycle, Snapshot};
+use phoxal_client::transport::{BusError, QueryError};
+use phoxal_client::{AttachError, Attachment, AttachmentConfig};
 
 use super::daemon::{self, LaunchedDaemon};
 use super::session::{self, Detachable};
@@ -350,10 +351,10 @@ pub(crate) async fn stop_command(
 ) -> Result<()> {
     let (target, session) = open_existing(app, requested_target, endpoint).await?;
     let outcome = match session.ports.supervisor.stop().await {
-        Ok(phoxal_api::supervisor::command::CommandOutcome::Accepted { .. }) => {
+        Ok(phoxal_client::supervisor::command::CommandOutcome::Accepted { .. }) => {
             await_terminal(&session).await
         }
-        Ok(phoxal_api::supervisor::command::CommandOutcome::Rejected { reason }) => {
+        Ok(phoxal_client::supervisor::command::CommandOutcome::Rejected { reason }) => {
             session.shutdown().await;
             bail!("the supervisor rejected the stop: {reason:?}")
         }
@@ -384,10 +385,7 @@ pub(crate) async fn stop_command(
 fn ended_before_answering(error: &anyhow::Error) -> bool {
     matches!(
         error.downcast_ref::<AttachError>(),
-        Some(
-            AttachError::Query(phoxal_bus::QueryError::Unavailable)
-                | AttachError::Bus(phoxal_bus::BusError::Closed)
-        )
+        Some(AttachError::Query(QueryError::Unavailable) | AttachError::Bus(BusError::Closed))
     )
 }
 
@@ -438,7 +436,7 @@ pub(crate) async fn status_command(
 /// derive from local state.
 pub(crate) fn render_status(
     snapshot: &Snapshot,
-    connected: &phoxal_supervisor_client::Connected,
+    connected: &phoxal_client::Connected,
 ) -> Vec<String> {
     let mut lines = vec![
         format!("robot:     {}", connected.robot),
@@ -529,7 +527,7 @@ async fn follow_logs(session: &Session, participant: Option<&str>) {
     }
 }
 
-fn render_log(record: &phoxal_api::supervisor::logs::Record) -> String {
+fn render_log(record: &phoxal_client::supervisor::logs::Record) -> String {
     let mut line = format!(
         "[{}] {:?}: {}",
         record.participant_id, record.level, record.message
@@ -574,9 +572,10 @@ pub(crate) fn report_outcome(
 
 #[cfg(test)]
 mod tests {
-    use phoxal_api::supervisor::snapshot::{
+    use phoxal_client::supervisor::snapshot::{
         DaemonFailure, DaemonFailureReason, DesiredState, Detail, Process, ProcessState,
     };
+    use phoxal_client::transport::QueryFailure;
     use phoxal_runtime_contract::clock::Clock;
     use phoxal_runtime_contract::identity::{ParticipantId, ProducerId, RobotId};
     use phoxal_runtime_contract::metadata::ParticipantKind;
@@ -605,8 +604,8 @@ mod tests {
         }
     }
 
-    fn connected() -> phoxal_supervisor_client::Connected {
-        phoxal_supervisor_client::Connected {
+    fn connected() -> phoxal_client::Connected {
+        phoxal_client::Connected {
             execution: phoxal_runtime_contract::identity::ExecutionId::mint(),
             robot: RobotId::new("rover").expect("fixture robot"),
             clock: Clock::Simulated,
@@ -778,8 +777,8 @@ mod tests {
     #[test]
     fn a_stop_answer_lost_to_teardown_is_the_execution_ending_not_a_failure() {
         for ended in [
-            AttachError::Query(phoxal_bus::QueryError::Unavailable),
-            AttachError::Bus(phoxal_bus::BusError::Closed),
+            AttachError::Query(QueryError::Unavailable),
+            AttachError::Bus(BusError::Closed),
         ] {
             let rendered = ended.to_string();
             assert!(
@@ -791,9 +790,9 @@ mod tests {
         // A wedged daemon that never answered may still be running: reporting
         // that as a clean stop would be a lie, so it stays an error.
         assert!(!ended_before_answering(&anyhow::Error::new(
-            AttachError::Query(phoxal_bus::QueryError::Timeout(
-                phoxal_bus::QueryFailure::deadline_exceeded("query deadline exceeded")
-            ))
+            AttachError::Query(QueryError::Timeout(QueryFailure::deadline_exceeded(
+                "query deadline exceeded"
+            )))
         )));
         // So does a failure that is not an attachment error at all.
         assert!(!ended_before_answering(&anyhow::anyhow!("something else")));

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use phoxal_api::supervisor::snapshot::Process;
+use phoxal_client::supervisor::snapshot::Process;
 use phoxal_runtime_contract::identity::ParticipantId;
 use phoxal_runtime_contract::metadata::ParticipantKind;
 

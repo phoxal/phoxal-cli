@@ -113,12 +113,10 @@ impl ServiceControl {
             // signal, exactly as it is for an interactive `run`. A unit that is
             // up but whose graph never came together answers connect and
             // reports why.
-            let attached = phoxal_supervisor_client::Attachment::open(
-                &phoxal_supervisor_client::AttachmentConfig::new(
-                    endpoint,
-                    crate::attach::CLIENT_PARTICIPANT,
-                ),
-            )
+            let attached = phoxal_client::Attachment::open(&phoxal_client::AttachmentConfig::new(
+                endpoint,
+                crate::attach::CLIENT_PARTICIPANT,
+            ))
             .await;
             match attached {
                 Ok(attachment) => {

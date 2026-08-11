@@ -18,13 +18,13 @@ use phoxal_bus::{
     BusConfig, BusOwner, Codec, DEFAULT_QUERY_TIMEOUT, EndpointDescriptor, MessagePack, Querier,
     SourceLabel,
 };
+use phoxal_client::{AttachError, Attachment, AttachmentConfig};
 use phoxal_model::RobotBuilder;
 use phoxal_runtime_contract::identity::{
     ExecutionId, ParticipantArtifactId, ParticipantId, ProducerId,
 };
 use phoxal_runtime_contract::metadata::{ParticipantContract, ParticipantKind as ContractKind};
 use phoxal_runtime_contract::version::FrameworkVersion;
-use phoxal_supervisor_client::{AttachError, Attachment, AttachmentConfig};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

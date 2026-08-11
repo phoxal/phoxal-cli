@@ -1,7 +1,7 @@
 //! The supervised process table, with this client's own local timings.
 
-use phoxal_api::supervisor::snapshot::{ProcessState, Snapshot};
 use phoxal_cli_observation::{ProcessObservation, ProcessTable};
+use phoxal_client::supervisor::snapshot::{ProcessState, Snapshot};
 
 #[derive(Default)]
 pub(crate) struct ProcessStore {
@@ -62,7 +62,7 @@ impl ProcessStore {
 
 #[cfg(test)]
 mod tests {
-    use phoxal_api::supervisor::snapshot::{DesiredState, Lifecycle, Process};
+    use phoxal_client::supervisor::snapshot::{DesiredState, Lifecycle, Process};
     use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
     use phoxal_runtime_contract::metadata::ParticipantKind;
 

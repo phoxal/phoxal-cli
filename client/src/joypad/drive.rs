@@ -5,7 +5,7 @@
 //! hands them here.
 
 use super::manual::ManualDrive;
-use phoxal_api::robot as api;
+use phoxal_client::robot as api;
 
 /// Below this, a resting trigger reads as zero rather than as creep.
 const TRIGGER_DEADZONE: f32 = 0.08;

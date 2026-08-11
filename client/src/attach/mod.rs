@@ -1,8 +1,9 @@
 //! The disposable attachment session.
 //!
 //! One [`Session`] is one attachment to one execution: it opens a
-//! [`phoxal_supervisor_client::Attachment`] and runs the feeds the terminal
-//! application renders.
+//! [`phoxal_client::Attachment`] and runs the feeds the terminal application
+//! renders. Everything remote arrives through `phoxal_client`; this crate
+//! names no wire crate of its own.
 //!
 //! There is no private IPC anywhere below. Every fact this
 //! session has comes off the execution-scoped Zenoh supervisor API or out of
@@ -19,10 +20,11 @@ pub(crate) mod ports;
 pub(crate) mod state;
 
 use anyhow::{Context, Result};
-use phoxal_api::supervisor::{self, command::CommandOutcome, logs};
 use phoxal_cli_observation::{AttachmentEpoch, AttachmentEvent, ConnectionObservation};
+use phoxal_client::supervisor::{self, command::CommandOutcome, logs};
+use phoxal_client::transport::StreamReceiver;
+use phoxal_client::{Attachment, AttachmentConfig, AttachmentPort};
 use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
-use phoxal_supervisor_client::{Attachment, AttachmentConfig, AttachmentPort};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -86,7 +88,7 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn connected(&self) -> &phoxal_supervisor_client::Connected {
+    pub(crate) fn connected(&self) -> &phoxal_client::Connected {
         self.attachment.connected()
     }
 
@@ -185,7 +187,7 @@ impl Session {
     /// The live log stream that continues a [`Self::logs`] page.
     pub(crate) async fn follow_logs(
         &self,
-    ) -> Result<phoxal_bus::StreamReceiver<supervisor::endpoint::logs::FollowEndpoint>> {
+    ) -> Result<StreamReceiver<supervisor::endpoint::logs::FollowEndpoint>> {
         Ok(self.attachment.port().follow_logs().await?)
     }
 

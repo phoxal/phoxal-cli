@@ -37,5 +37,11 @@ fail_if_found "tracker history belongs in GitHub, not Rust source" \
   client supervisor crates --glob '*.rs'
 fail_if_found "the two application packages stay bin-only" \
   '^\[lib\]' client/Cargo.toml supervisor/Cargo.toml
+# The remote protocol has one owner. `phoxal` and the crates it renders with
+# reach a running robot through `phoxal-client` and never name a wire crate,
+# so a protocol change lands in one crate instead of five. `phoxald` serves
+# that protocol and keeps its own direct wire dependencies.
+fail_if_found "remote protocol ownership is phoxal-client's" \
+  '^phoxal-(api|bus) *=' client/Cargo.toml crates/ui/Cargo.toml crates/observation/Cargo.toml
 fail_if_found "the retired catch-all core crate must not return" \
   'phoxal-cli-core|phoxal_cli_core' Cargo.toml client supervisor crates release-plz.toml

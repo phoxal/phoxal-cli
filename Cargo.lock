@@ -3281,18 +3281,16 @@ dependencies = [
  "gilrs",
  "hex",
  "libc",
- "phoxal-api",
  "phoxal-bundle",
- "phoxal-bus",
  "phoxal-cli-catalog",
  "phoxal-cli-host",
  "phoxal-cli-observation",
  "phoxal-cli-project",
  "phoxal-cli-ui",
+ "phoxal-client",
  "phoxal-manifest",
  "phoxal-model",
  "phoxal-runtime-contract",
- "phoxal-supervisor-client",
  "reqwest",
  "self-replace",
  "semver",
@@ -3320,7 +3318,7 @@ dependencies = [
 name = "phoxal-cli-observation"
 version = "0.37.1"
 dependencies = [
- "phoxal-api",
+ "phoxal-client",
  "phoxal-runtime-contract",
 ]
 
@@ -3366,9 +3364,9 @@ dependencies = [
  "phoxal-bundle",
  "phoxal-bus",
  "phoxal-cli-host",
+ "phoxal-client",
  "phoxal-model",
  "phoxal-runtime-contract",
- "phoxal-supervisor-client",
  "serde",
  "serde_json",
  "tempfile",
@@ -3385,12 +3383,23 @@ version = "0.37.1"
 dependencies = [
  "anyhow",
  "console",
- "phoxal-api",
  "phoxal-cli-observation",
+ "phoxal-client",
  "phoxal-runtime-contract",
  "tokio",
  "tracing",
  "tuirealm",
+]
+
+[[package]]
+name = "phoxal-client"
+version = "0.37.1"
+dependencies = [
+ "phoxal-api",
+ "phoxal-bus",
+ "phoxal-runtime-contract",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -3450,17 +3459,6 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "phoxal-supervisor-client"
-version = "0.37.1"
-dependencies = [
- "phoxal-api",
- "phoxal-bus",
- "phoxal-runtime-contract",
- "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]

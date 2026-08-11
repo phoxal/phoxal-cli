@@ -1,4 +1,12 @@
 //! Building and installing a runtime on a remote host over SSH.
+//!
+//! The robot's own `phoxal` installs the archive this deploy sends. That is
+//! the only thing deploy asks of the remote host, and the release layout is
+//! the whole boundary between the two sides: a remote CLI that can read the
+//! layout can install it, and one that cannot refuses the archive itself.
+//! Product versions are never compared. The deploying client and the robot's
+//! CLI upgrade on their own schedules, and neither is required to match the
+//! other.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -9,7 +17,6 @@ use phoxal_cli_project::shell_quote;
 use crate::cli::context::AppContext;
 
 pub(crate) const REMOTE_PHOXAL: &str = phoxal_cli_project::INSTALLED_CLIENT_BINARY;
-pub(crate) const REMOTE_PHOXALD: &str = phoxal_cli_project::INSTALLED_DAEMON_BINARY;
 
 pub(crate) struct DeployRequest {
     pub(crate) target: String,
@@ -20,7 +27,7 @@ pub(crate) struct DeployRequest {
 impl DeployRequest {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
         validate_ssh_target(&self.target)?;
-        require_remote_phoxal(&self.target)?;
+        require_remote_installer(&self.target)?;
         if let Some(archive) = &self.build {
             self.deploy_archive(archive)?;
         } else {
@@ -65,8 +72,14 @@ impl DeployRequest {
                 &format!("{}:{remote_archive}", self.target),
             ],
         )?;
-        run_remote(&self.target, &remote_install_command(&remote_archive))
-            .context("remote installer rejected the prebuilt runtime")
+        run_remote(&self.target, &remote_install_command(&remote_archive)).with_context(|| {
+            format!(
+                "the remote installer rejected this release. If `{REMOTE_PHOXAL}` on \
+                 {} predates this release layout, upgrade it once with \
+                 `ssh {} sudo {REMOTE_PHOXAL} self upgrade` and deploy again",
+                self.target, self.target
+            )
+        })
     }
 
     async fn build_source(
@@ -123,54 +136,25 @@ pub(crate) fn validate_ssh_target(target: &str) -> Result<()> {
     Ok(())
 }
 
-/// Require the remote host to carry the exact CLI pair.
+/// The one question deploy asks the target before it builds or copies
+/// anything: is there a `phoxal` here that this user can run installs with?
 ///
-/// The unit executes `phoxald`, so a host with only `phoxal` installed accepts
-/// an install and then cannot execute it. Both halves are
-/// checked here, before anything is built or copied.
-pub(crate) fn require_remote_phoxal(target: &str) -> Result<()> {
-    let output = remote_output(
-        target,
-        &format!(
-            "test -x {REMOTE_PHOXAL} && sudo -n test -x {REMOTE_PHOXAL} && \
-             test -x {REMOTE_PHOXALD} && sudo -n test -x {REMOTE_PHOXALD} && \
-             {REMOTE_PHOXAL} --version && {REMOTE_PHOXALD} --version"
-        ),
-    )?;
-    anyhow::ensure!(
-        output.status.success(),
-        "{target} does not have the phoxal CLI pair installed. `phoxal` and `phoxald` ship and \
-         install together: place both verified Linux release binaries as `{REMOTE_PHOXAL}` and \
-         `{REMOTE_PHOXALD}`, then run `sudo {REMOTE_PHOXAL} service install` and \
-         `{REMOTE_PHOXAL} service status`; deploy never provisions the device"
-    );
-    verify_remote_pair_output(target, &output.stdout)
+/// It is a presence and permission probe, never a version probe. What a
+/// release needs on the far side is an installer that understands the release
+/// layout, and the archive's own validation is what decides that - loudly, on
+/// the remote, naming the layout it could not read.
+fn remote_installer_probe() -> String {
+    format!("test -x {REMOTE_PHOXAL} && sudo -n test -x {REMOTE_PHOXAL}")
 }
 
-fn verify_remote_pair_output(target: &str, stdout: &[u8]) -> Result<()> {
-    let stdout =
-        String::from_utf8(stdout.to_vec()).context("remote version output was not UTF-8")?;
-    let versions = stdout.lines().filter_map(|line| {
-        let mut fields = line.split_whitespace();
-        let binary = fields.next()?;
-        matches!(binary, "phoxal" | "phoxald").then(|| (binary, fields.next()))
-    });
-    let mut client = None;
-    let mut daemon = None;
-    for (binary, version) in versions {
-        match binary {
-            "phoxal" => client = version,
-            "phoxald" => daemon = version,
-            _ => {}
-        }
-    }
-    let expected = env!("CARGO_PKG_VERSION");
+/// Require the target to carry a `phoxal` that can install a release.
+pub(crate) fn require_remote_installer(target: &str) -> Result<()> {
+    let output = remote_output(target, &remote_installer_probe())?;
     anyhow::ensure!(
-        client == Some(expected) && daemon == Some(expected),
-        "{target} has a mixed or unsupported CLI pair: expected phoxal and phoxald {expected}, \
-         found phoxal {} and phoxald {}",
-        client.unwrap_or("<unreported>"),
-        daemon.unwrap_or("<unreported>")
+        output.status.success(),
+        "{target} has no phoxal CLI this deploy can install with. Place a verified Linux release \
+         binary as `{REMOTE_PHOXAL}`, then run `sudo {REMOTE_PHOXAL} service install` and \
+         `{REMOTE_PHOXAL} service status`; deploy never provisions the device"
     );
     Ok(())
 }
@@ -263,26 +247,43 @@ mod tests {
         );
     }
 
+    /// Deploy compares no product versions. The preflight asks whether the
+    /// target has an installer it may run, and nothing about which release
+    /// that installer came from - the two sides upgrade independently.
     #[test]
-    fn remote_pair_requires_both_exact_versions() {
-        assert!(
-            verify_remote_pair_output(
-                "robot@host",
-                format!(
-                    "phoxal {} (linux-aarch64)\nphoxald {}\n",
-                    env!("CARGO_PKG_VERSION"),
-                    env!("CARGO_PKG_VERSION")
-                )
-                .as_bytes(),
-            )
-            .is_ok()
+    fn the_preflight_asks_for_an_installer_and_never_for_a_version() {
+        let probe = remote_installer_probe();
+        assert_eq!(
+            probe,
+            "test -x /usr/local/bin/phoxal && sudo -n test -x /usr/local/bin/phoxal"
         );
+        assert!(!probe.contains("--version"), "{probe}");
+        assert!(!probe.contains(env!("CARGO_PKG_VERSION")), "{probe}");
+    }
+
+    /// The remote daemon is not deploy's business: systemd runs the daemon a
+    /// release brought with it, so a global `phoxald` is neither required nor
+    /// consulted here.
+    #[test]
+    fn the_preflight_never_mentions_a_globally_installed_daemon() {
+        assert!(!remote_installer_probe().contains("phoxald"));
+        assert!(!remote_install_command("/tmp/x/build.phoxal").contains("phoxald"));
+    }
+
+    /// No step of the deploy path reads this client's own product version, so
+    /// there is nothing for a remote binary's version to be measured against.
+    #[test]
+    fn the_deploy_path_never_reads_this_clients_product_version() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/application/deployment.rs"),
+        )
+        .expect("this module is readable");
+        let (behavior, _) = source
+            .split_once("#[cfg(test)]")
+            .expect("the tests follow the behavior");
         assert!(
-            verify_remote_pair_output(
-                "robot@host",
-                format!("phoxal {}\nphoxald 0.0.0\n", env!("CARGO_PKG_VERSION")).as_bytes(),
-            )
-            .is_err()
+            !behavior.contains("CARGO_PKG_VERSION"),
+            "deploy compares no product versions"
         );
     }
 }
