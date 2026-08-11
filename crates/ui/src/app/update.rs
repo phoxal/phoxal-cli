@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-use phoxal_api::supervisor::snapshot::Lifecycle;
 use phoxal_cli_observation::{
     AttachmentEvent, LogAnchor, LogFilters, LogQuery, LogRead, LogRow, ProcessTable, QueryToken,
     RuntimeQuery, RuntimeRead, RuntimeRow, StoreChanged, StoreRevision, WindowDirection,
 };
+use phoxal_client::supervisor::snapshot::Lifecycle;
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
 use crate::components::input::InputModel;
@@ -783,13 +783,13 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use phoxal_api::supervisor::snapshot::{
-        DaemonFailure, DaemonFailureReason, DesiredState, Detail, Process, ProcessState,
-    };
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, InputObservation, JoypadDevice, JoypadDeviceStatus,
         JoypadDevicesSample, LogSeverity, LogSource, LogWindow, ObservationWindow,
         ProcessObservation, SupervisorObservation,
+    };
+    use phoxal_client::supervisor::snapshot::{
+        DaemonFailure, DaemonFailureReason, DesiredState, Detail, Process, ProcessState,
     };
     use phoxal_runtime_contract::clock::Clock;
     use phoxal_runtime_contract::identity::ExecutionId;

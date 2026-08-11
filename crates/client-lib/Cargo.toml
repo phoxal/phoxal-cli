@@ -1,17 +1,17 @@
 [package]
-name = "phoxal-supervisor-client"
+name = "phoxal-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = ["phoxal-internal"]
-description = "Attachment and session behavior for the Phoxal supervisor contract over phoxal-bus."
+description = "The external client boundary for talking to a running Phoxal robot."
 documentation.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
 [lib]
-name = "phoxal_supervisor_client"
+name = "phoxal_client"
 path = "src/lib.rs"
 
 [dependencies]

@@ -135,8 +135,8 @@ fn is_terminal_supervisor(input: &SessionInput) -> bool {
         SessionInput::Client(AttachmentEvent::SupervisorChanged(supervisor))
             if matches!(
                 supervisor.lifecycle,
-                phoxal_api::supervisor::snapshot::Lifecycle::Stopped
-                    | phoxal_api::supervisor::snapshot::Lifecycle::Failed
+                phoxal_client::supervisor::snapshot::Lifecycle::Stopped
+                    | phoxal_client::supervisor::snapshot::Lifecycle::Failed
             )
     )
 }
@@ -219,11 +219,11 @@ impl PollAsync<UserEvent> for InputPort {
 mod tests {
     use std::sync::Arc;
 
-    use phoxal_api::supervisor::snapshot::Lifecycle;
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, LogWindow, QueryToken, StoreChanged, StoreRevision,
         SupervisorObservation,
     };
+    use phoxal_client::supervisor::snapshot::Lifecycle;
     use phoxal_runtime_contract::clock::Clock;
     use phoxal_runtime_contract::identity::ExecutionId;
     use phoxal_runtime_contract::identity::RobotId;

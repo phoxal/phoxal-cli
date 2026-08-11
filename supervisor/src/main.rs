@@ -113,8 +113,11 @@ fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Invocation 
     }
 }
 
-/// What `--version` prints. `phoxal` parses exactly this to decide whether the
-/// installed pair is exact.
+/// What `--version` prints. The `phoxal` installed beside this daemon parses
+/// exactly this line to report whether its own CLI installation is whole, so
+/// the shape is a contract between two halves of one archive. It says nothing
+/// about any other machine: a robot and a client agree on the framework
+/// compatibility line, never on a product version.
 const VERSION_LINE: &str = concat!("phoxald ", env!("CARGO_PKG_VERSION"));
 
 const USAGE: &str = "\
@@ -129,8 +132,9 @@ Build one with `phoxal build`. The daemon validates and executes it; it never
 builds, and it takes no other options - the clock and the participant set are
 already written into runtime.json.
 
-`--version` reports this daemon's version so `phoxal` can confirm the two ship
-as the exact pair they must be.";
+`--version` reports this daemon's own version. The `phoxal` installed beside it
+reads that line to report whether its installation is whole; nothing else
+compares product versions.";
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -187,10 +191,11 @@ mod tests {
         assert_eq!(parse(arguments(["run"])), Invocation::Run("run".into()));
     }
 
-    /// `phoxal` parses this exact line to decide whether the installed pair is
-    /// exact, so its shape is a contract between the two binaries.
+    /// The `phoxal` beside this daemon parses this exact line to report
+    /// whether its own installation is whole, so the shape is a contract
+    /// between the two halves of one archive.
     #[test]
-    fn the_version_line_is_the_pair_probes_contract() {
+    fn the_version_line_is_the_sibling_probes_contract() {
         assert_eq!(
             VERSION_LINE,
             format!("phoxald {}", env!("CARGO_PKG_VERSION"))

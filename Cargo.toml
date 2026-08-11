@@ -18,10 +18,10 @@ resolver = "3"
 members = [
     "client",
     "crates/catalog",
+    "crates/client-lib",
     "crates/host",
     "crates/observation",
     "crates/project",
-    "crates/supervisor-client",
     "crates/ui",
     "supervisor",
 ]
@@ -67,12 +67,15 @@ phoxal-manifest = "0.59.0"
 phoxal-model = "0.59.0"
 phoxal-runtime-contract = "0.59.0"
 
+# The external client boundary. Anything in this workspace that speaks to a
+# running robot depends on this and not on the wire crates above.
+phoxal-client = { path = "crates/client-lib" }
+
 phoxal-cli-catalog = { path = "crates/catalog" }
 phoxal-cli-host = { path = "crates/host" }
 phoxal-cli-observation = { path = "crates/observation" }
 phoxal-cli-project = { path = "crates/project" }
 phoxal-cli-ui = { path = "crates/ui" }
-phoxal-supervisor-client = { path = "crates/supervisor-client" }
 
 [workspace.lints.rust]
 unused = "warn"

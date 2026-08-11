@@ -13,6 +13,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use phoxal_client::supervisor::command::CommandOutcome;
+use phoxal_client::supervisor::snapshot::{Lifecycle, Snapshot};
 
 use super::daemon::{self, LaunchedDaemon};
 use super::lifecycle::Target;
@@ -154,9 +156,7 @@ pub(crate) async fn run_command(
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status.clone());
                     if plan(&SessionEnd::WebotsExited { status }).stop_daemon {
                         match supervisor.stop().await {
-                            Ok(phoxal_api::supervisor::command::CommandOutcome::Accepted {
-                                ..
-                            }) => {
+                            Ok(CommandOutcome::Accepted { .. }) => {
                                 if await_terminal(&mut snapshots, TERMINAL_BUDGET)
                                     .await
                                     .is_err()
@@ -168,9 +168,7 @@ pub(crate) async fn run_command(
                                     );
                                 }
                             }
-                            Ok(phoxal_api::supervisor::command::CommandOutcome::Rejected {
-                                reason,
-                            }) => {
+                            Ok(CommandOutcome::Rejected { reason }) => {
                                 tracing::warn!(?reason, "the supervisor rejected the Webots stop");
                             }
                             Err(error) => {
@@ -221,12 +219,12 @@ pub(crate) async fn run_command(
 async fn stop_failed_simulation_start(session: Session) {
     let mut snapshots = session.snapshots();
     match session.ports.supervisor.stop().await {
-        Ok(phoxal_api::supervisor::command::CommandOutcome::Accepted { .. }) => {
+        Ok(CommandOutcome::Accepted { .. }) => {
             if let Err(error) = await_terminal(&mut snapshots, TERMINAL_BUDGET).await {
                 tracing::warn!(%error, "failed simulation did not reach a terminal state");
             }
         }
-        Ok(phoxal_api::supervisor::command::CommandOutcome::Rejected { reason }) => {
+        Ok(CommandOutcome::Rejected { reason }) => {
             tracing::warn!(?reason, "the supervisor rejected failed-simulation cleanup");
         }
         Err(error) => tracing::warn!(%error, "failed-simulation cleanup request failed"),
@@ -239,19 +237,13 @@ async fn stop_failed_simulation_start(session: Session) {
 /// The feed ending is terminal too: a daemon whose snapshots stopped arriving
 /// is a daemon that is no longer executing anything.
 async fn await_terminal(
-    snapshots: &mut tokio::sync::watch::Receiver<
-        Option<phoxal_api::supervisor::snapshot::Snapshot>,
-    >,
+    snapshots: &mut tokio::sync::watch::Receiver<Option<Snapshot>>,
     budget: Duration,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
         if let Some(snapshot) = snapshots.borrow_and_update().clone()
-            && matches!(
-                snapshot.lifecycle,
-                phoxal_api::supervisor::snapshot::Lifecycle::Stopped
-                    | phoxal_api::supervisor::snapshot::Lifecycle::Failed
-            )
+            && matches!(snapshot.lifecycle, Lifecycle::Stopped | Lifecycle::Failed)
         {
             return Ok(());
         }
@@ -405,6 +397,8 @@ async fn await_simulated_attachment(
 
 #[cfg(test)]
 mod tests {
+    use phoxal_client::supervisor::snapshot::{DaemonFailure, DaemonFailureReason, Detail};
+
     use super::*;
 
     /// A simulation session is never detachable: this client owns Webots, so
@@ -467,11 +461,9 @@ mod tests {
     /// supervisor API, and Webots must not be left behind.
     #[test]
     fn the_daemon_ending_first_asks_nothing_of_it_and_still_reports() {
-        let failure = phoxal_api::supervisor::snapshot::DaemonFailure {
-            reason: phoxal_api::supervisor::snapshot::DaemonFailureReason::ControlPlaneLost,
-            detail: phoxal_api::supervisor::snapshot::Detail::new(
-                "the world clock never became ready",
-            ),
+        let failure = DaemonFailure {
+            reason: DaemonFailureReason::ControlPlaneLost,
+            detail: Detail::new("the world clock never became ready"),
         };
         let end = SessionEnd::observe(
             None,

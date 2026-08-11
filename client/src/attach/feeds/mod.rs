@@ -15,7 +15,7 @@ use std::sync::Arc;
 use phoxal_cli_observation::{
     AttachmentEpoch, AttachmentEvent, ManualDriveUnsupported, ObservationSource, SourceStatus,
 };
-use phoxal_supervisor_client::AttachmentPort;
+use phoxal_client::AttachmentPort;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;

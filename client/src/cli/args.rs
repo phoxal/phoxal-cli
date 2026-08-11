@@ -62,7 +62,12 @@ pub enum RootCommand {
                       `--builder` selects where compilation happens, never a different output: `local` (the default) compiles on this host with `cargo build --target`; `container` compiles natively inside the pinned official rust image for the target platform; `ssh://user@host` snapshots the source, compiles in a remote temporary directory, and pulls back the same archive. Every backend produces the identical deterministic build.phoxal."
     )]
     Build(build::Build),
-    #[command(about = "Build and install a deployment release on a prepared robot over SSH.")]
+    #[command(
+        about = "Build and install a deployment release on a prepared robot over SSH.",
+        long_about = "Build a deployment release and install it on a prepared robot over SSH.\n\n\
+                      A prepared robot is one carrying an executable `/usr/local/bin/phoxal` that your SSH user may run under sudo, with `phoxal.service` already installed. That CLI is what installs the archive; deploy never provisions the device.\n\n\
+                      The robot's `phoxal` need not be this client's version. A release carries the `phoxald` that executes it, so the two sides only have to agree on the release layout - and a robot CLI too old to read that layout refuses the archive by name, which is the one case worth upgrading it for."
+    )]
     Deploy(deploy::Deploy),
     #[command(about = "Install one deployment release archive atomically.")]
     Install(install::Install),

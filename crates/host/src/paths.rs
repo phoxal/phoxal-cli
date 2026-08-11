@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 /// The daemon executable's file name.
 ///
-/// It is one name in three places that must agree: the installed pair beside
+/// It is one name in three places that must agree: the daemon installed beside
 /// the client, the executor a deployment release packages, and the published
 /// release archive's per-target member.
 pub const DAEMON_BINARY: &str = "phoxald";
@@ -16,14 +16,18 @@ pub const INSTALL_ROOT: &str = "/var/lib/phoxal";
 pub const RELEASES_ROOT: &str = "/var/lib/phoxal/releases";
 pub const INSTALLED_STATE_ROOT: &str = "/var/lib/phoxal/state";
 pub const INSTALLED_VOLATILE_ROOT: &str = "/run/phoxal";
-/// Where the exact `phoxal` + `phoxald` pair is installed on a managed host.
-/// The verified release archive carries both binaries and they are placed here
-/// together, so the unit and the client resolve the daemon
-/// from one place rather than from `PATH`.
+/// Where the CLI archive's `phoxal` + `phoxald` are installed on a managed
+/// host. The verified archive carries both binaries and they are placed here
+/// together, so a client run from here resolves its own sibling daemon rather
+/// than something off `PATH`.
 pub const INSTALLED_BINARY_ROOT: &str = "/usr/local/bin";
 /// The installed interactive client. It is never the daemon.
 pub const INSTALLED_CLIENT_BINARY: &str = "/usr/local/bin/phoxal";
-/// The installed supervisor. This is what `phoxal.service` executes.
+/// The installed CLI archive's supervisor. `phoxal.service` does not execute
+/// it: the unit runs the active release's own `phoxald` under
+/// [`ACTIVE_RUNTIME_ROOT`], so the executor moves with the release it belongs
+/// to. This binary is the sibling half of the CLI installation and the
+/// executor a release built for this host packages.
 pub const INSTALLED_DAEMON_BINARY: &str = "/usr/local/bin/phoxald";
 pub const SYSTEMD_UNIT: &str = "phoxal.service";
 pub const SYSTEMD_ACTIVE_ROOT: &str = "/run/systemd/system";

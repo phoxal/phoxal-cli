@@ -1,6 +1,6 @@
 //! The execution-level observation, projected from one supervisor snapshot.
 
-use phoxal_api::supervisor::snapshot::{DaemonFailure, Lifecycle, StartupStep};
+use phoxal_client::supervisor::snapshot::{DaemonFailure, Lifecycle, StartupStep};
 use phoxal_runtime_contract::clock::Clock;
 use phoxal_runtime_contract::identity::{ExecutionId, RobotId};
 

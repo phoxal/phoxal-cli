@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use phoxal_api::robot as api;
-use phoxal_bus::SetpointPublisher;
 use phoxal_cli_observation::{
     AttachmentEvent, ManualDriveUnsupported, ObservationSource, SourceStatus,
 };
+use phoxal_client::robot as api;
+use phoxal_client::transport::SetpointPublisher;
 use tokio::sync::mpsc;
 
 use super::FeedContext;
@@ -174,7 +174,7 @@ const fn stop() -> api::motion::ManualCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_bus::{BusConfig, BusOwner, SetpointReceiver};
+    use phoxal_client::transport::{BusConfig, BusOwner, SetpointReceiver};
     use phoxal_runtime_contract::identity::ExecutionId;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

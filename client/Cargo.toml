@@ -37,9 +37,11 @@ tar = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
-phoxal-api = { workspace = true }
+# Everything remote goes through the client boundary; the wire crates below
+# are reached only for authored-source, bundle, and local identity work.
+phoxal-client = { workspace = true }
+
 phoxal-bundle = { workspace = true }
-phoxal-bus = { workspace = true }
 phoxal-manifest = { workspace = true }
 phoxal-model = { workspace = true }
 phoxal-runtime-contract = { workspace = true }
@@ -49,7 +51,6 @@ phoxal-cli-host = { workspace = true }
 phoxal-cli-observation = { workspace = true }
 phoxal-cli-project = { workspace = true }
 phoxal-cli-ui = { workspace = true }
-phoxal-supervisor-client = { workspace = true }
 
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }

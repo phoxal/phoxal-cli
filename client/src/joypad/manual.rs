@@ -4,8 +4,8 @@
 //! [`ManualDriveUnsupported`] the UI renders, rather than an empty device list
 //! or a sentence composed on another machine.
 
-use phoxal_api::supervisor::info;
 use phoxal_cli_observation::ManualDriveUnsupported;
+use phoxal_client::supervisor::info;
 
 /// Parameters that turn a normalized trigger deflection into a physical
 /// differential-drive command.

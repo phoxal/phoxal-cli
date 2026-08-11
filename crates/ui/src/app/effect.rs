@@ -39,6 +39,6 @@ pub enum AttachmentOutcome {
     /// failure ever observed (see `update_client`'s `ConnectionChanged`
     /// handling).
     ExecutionFailed {
-        reason: Option<phoxal_api::supervisor::snapshot::DaemonFailure>,
+        reason: Option<phoxal_client::supervisor::snapshot::DaemonFailure>,
     },
 }

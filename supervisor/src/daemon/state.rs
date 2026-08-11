@@ -273,7 +273,7 @@ mod tests {
         let mut revisions = vec![state.snapshot().revision];
         state.step_active(StartupStepKind::Bundle);
         revisions.push(state.snapshot().revision);
-        state.step_detail(StartupStepKind::Bundle, "robot.yaml");
+        state.step_detail(StartupStepKind::Bundle, "runtime.json");
         revisions.push(state.snapshot().revision);
         state.step_done(StartupStepKind::Bundle);
         revisions.push(state.snapshot().revision);
@@ -289,7 +289,10 @@ mod tests {
             .find(|step| step.kind == StartupStepKind::Bundle)
             .expect("the bundle step");
         assert_eq!(done.state, StartupStepState::Done);
-        assert_eq!(done.detail.as_ref().map(Detail::as_str), Some("robot.yaml"));
+        assert_eq!(
+            done.detail.as_ref().map(Detail::as_str),
+            Some("runtime.json")
+        );
         assert!(done.elapsed_ms.is_some(), "a finished step is timed");
     }
 

@@ -8,12 +8,13 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use phoxal_api::runtime::telemetry::Cursor;
-use phoxal_api::supervisor::{self, logs};
 use phoxal_cli_observation::{
     AttachmentEvent, LogRow, LogSeverity, LogSource, ObservationSource, SourceStatus, StoreChanged,
     bounded_log_text,
 };
+use phoxal_client::runtime::telemetry::Cursor;
+use phoxal_client::supervisor::{self, logs};
+use phoxal_client::transport::StreamReceiver;
 
 use super::FeedContext;
 use crate::reconcile::{ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
@@ -109,7 +110,7 @@ async fn apply(context: &FeedContext, outcome: ReconcileOutcome<Follow>) -> Resu
 }
 
 async fn requery(
-    subscriber: &phoxal_bus::StreamReceiver<supervisor::endpoint::logs::FollowEndpoint>,
+    subscriber: &StreamReceiver<supervisor::endpoint::logs::FollowEndpoint>,
     backoff: &mut RetryBackoff,
 ) {
     while subscriber.try_recv().is_ok_and(|item| item.is_some()) {}

@@ -34,7 +34,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 [dev-dependencies]
 # The real attachment client, so the served contract is proven against the code
 # `phoxal attach` actually runs rather than against a hand-rolled stand-in.
-phoxal-supervisor-client = { workspace = true }
+phoxal-client = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 
