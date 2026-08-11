@@ -36,8 +36,8 @@ pub(crate) fn write_runtime_document(root: &Path, resolved: &BundlePlan) -> Resu
         }
     }
 
-    let simulated = SimulationMembership::from_bundle_assets(
-        &root.join(phoxal_bundle::ASSETS_DIR),
+    let simulated = SimulationMembership::from_compiled_robot(
+        &resolved.compiled.robot,
         &resolved.source_manifest.used_component_types(),
     );
     let requirements =

@@ -17,42 +17,26 @@ use anyhow::{Result, bail};
 use phoxal_cli_catalog::{ArtifactKind, Catalog};
 use phoxal_manifest::source::robot::v0::{Clock, Manifest, RESERVED_BRAIN_ID};
 
-/// The component types whose frozen definition carries a `simulation.yaml`.
+/// The component types whose frozen definition carries a simulation.
 ///
 /// Simulator selection is a property of the frozen component definitions, not
-/// of the robot document, so it is a separate input: in a finalized bundle it
-/// is read from `assets/components/<type>/simulation.yaml`, and on the build
-/// side from the resolved component roots.
+/// of the robot document, so it is a separate input. The compiled robot is the
+/// one truth about a frozen definition: an authored `simulation.yaml` is
+/// absorbed into the model at compile time and never staged as a bundle asset.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SimulationMembership(BTreeSet<String>);
 
 impl SimulationMembership {
-    /// The membership implied by a set of resolved component roots.
+    /// The membership the compiled robot's frozen component definitions carry.
     #[must_use]
-    pub fn from_component_roots<'a>(
-        roots: impl IntoIterator<Item = (&'a str, &'a std::path::Path)>,
-    ) -> Self {
-        Self(
-            roots
-                .into_iter()
-                .filter(|(_, root)| root.join("simulation.yaml").is_file())
-                .map(|(component_type, _)| component_type.to_string())
-                .collect(),
-        )
-    }
-
-    /// The membership a finalized bundle's frozen component definitions carry.
-    #[must_use]
-    pub fn from_bundle_assets(assets_root: &std::path::Path, types: &BTreeSet<&str>) -> Self {
+    pub fn from_compiled_robot(robot: &phoxal_model::Robot, types: &BTreeSet<&str>) -> Self {
         Self(
             types
                 .iter()
                 .filter(|component_type| {
-                    assets_root
-                        .join("components")
-                        .join(component_type)
-                        .join("simulation.yaml")
-                        .is_file()
+                    robot
+                        .simulation_for_component_type(component_type)
+                        .is_some()
                 })
                 .map(|component_type| (*component_type).to_string())
                 .collect(),
@@ -225,8 +209,8 @@ pub fn derive_runtime_requirements(
         if simulated_clock && !simulated.contains(&component.component) {
             bail!(
                 "component instance '{instance}' has type '{component_type}', whose frozen \
-                 definition carries no simulation.yaml; a `clock: simulated` robot cannot \
-                 simulate it",
+                 definition carries no simulation; author a simulation.yaml beside that \
+                 component and rebuild, because a `clock: simulated` robot cannot simulate it",
                 component_type = component.component
             );
         }

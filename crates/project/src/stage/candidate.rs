@@ -7,17 +7,14 @@
 //! leave a robot with no runtime.
 //!
 //! The candidate is exactly the shape the framework's finalized-bundle loader
-//! reads:
+//! reads. Authored documents are never staged: the compiled `runtime.json`
+//! absorbs them, and only compiled assets ride along.
 //!
 //! ```text
-//! robot.yaml                              finalized phoxal/robot/v0
-//! assets/robot/structure.urdf
+//! runtime.json                            phoxal/runtime-bundle/v0
 //! assets/robot/meshes/...
-//! assets/components/<type>/component.yaml
-//! assets/components/<type>/structure.urdf
-//! assets/components/<type>/simulation.yaml   when the component has one
 //! assets/components/<type>/meshes/...
-//! assets/router/config.json5                 when the robot declares one
+//! assets/router/config.json5              when the robot declares one
 //! bin/...
 //! ```
 
