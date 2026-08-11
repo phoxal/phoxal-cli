@@ -56,17 +56,17 @@ impl Cli {
 #[derive(Debug, Subcommand)]
 pub enum RootCommand {
     #[command(
-        about = "Stage a runtime layout for a target and archive it as build.phoxal.",
-        long_about = "Stage a runtime layout for a target and archive it as a deterministic build.phoxal.\n\n\
-                      `build` refreshes staging exactly as `run` would - but for the selected --target rather than the host - validates the staged layout through the shared loader against the declared target architecture (no execution), and archives the staged layout deterministically: identical contents always produce identical archive bytes. The default output is a sibling of the staged directory, <project>/.phoxal/<triple>.build.phoxal, and the path plus its sha256 are printed at the end.\n\n\
+        about = "Stage a deployment release for a target and archive it as build.phoxal.",
+        long_about = "Stage a deployment release for a target and archive it as a deterministic build.phoxal.\n\n\
+                      `build` refreshes staging exactly as `run` would - but for the selected --target rather than the host - validates the staged bundle through the shared loader against the declared target architecture (no execution), packages that target's phoxald beside it, and archives the whole release deterministically: identical contents always produce identical archive bytes. A release carries the daemon that runs it, so installing one switches the executor and the bundle together. The default output is a sibling of the staged release, <project>/.phoxal/<triple>.build.phoxal, and the path plus its sha256 are printed at the end.\n\n\
                       `--builder` selects where compilation happens, never a different output: `local` (the default) compiles on this host with `cargo build --target`; `container` compiles natively inside the pinned official rust image for the target platform; `ssh://user@host` snapshots the source, compiles in a remote temporary directory, and pulls back the same archive. Every backend produces the identical deterministic build.phoxal."
     )]
     Build(build::Build),
-    #[command(about = "Build and install a runtime on a prepared robot over SSH.")]
+    #[command(about = "Build and install a deployment release on a prepared robot over SSH.")]
     Deploy(deploy::Deploy),
-    #[command(about = "Install one compiled runtime archive atomically.")]
+    #[command(about = "Install one deployment release archive atomically.")]
     Install(install::Install),
-    #[command(about = "Activate an older installed runtime release.")]
+    #[command(about = "Activate an older installed deployment release.")]
     Rollback(rollback::Rollback),
     #[command(
         about = "Validate robot.yaml structure, the root brain, Cargo workspace runtime ownership, and declared service config.",

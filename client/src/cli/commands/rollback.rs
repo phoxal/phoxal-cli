@@ -1,4 +1,5 @@
-//! Activate a previously installed runtime.
+//! Activate a previously installed deployment release, executor and bundle
+//! together.
 
 use anyhow::Result;
 use clap::Args;

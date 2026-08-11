@@ -1,12 +1,13 @@
-//! `phoxal build` - stage a runtime layout for a target and archive it as a
-//! deterministic `build.phoxal` ().
+//! `phoxal build` - stage a deployment release for a target and archive it as a
+//! deterministic `build.phoxal`.
 //!
 //! `build` resolves once and converges with `run` at the shared
 //! `refresh_staging_resolved` materialization entry, but for the selected target
-//! rather than the host. It validates the staged layout through the shared
-//! loader (against the declared target architecture, no execution) and archives
-//! the staged layout deterministically. The bundle matches the staged layout
-//! byte for byte; it is not a second format.
+//! rather than the host. It validates the staged bundle through the shared
+//! loader (against the declared target architecture, no execution), packages
+//! that target's `phoxald` beside it, and archives the whole release
+//! deterministically. The archive matches the staged release byte for byte; it
+//! is not a second format.
 //!
 //! `--builder` selects *where compilation happens*, never a different output:
 //!
@@ -131,7 +132,7 @@ pub fn build_bundle(request: BuildBundleRequest) -> Result<BuiltBundle> {
         image,
     };
     let project_root = worker.request.target.logical_root.clone();
-    let (archive, sha256, staged_root) = match backend {
+    let (archive, sha256, release_root) = match backend {
         ResolvedBackend::Local { target } => worker.build_local(&project_root, &target),
         ResolvedBackend::Container { target } => worker.build_container(&project_root, &target),
         ResolvedBackend::Ssh { host, target } => {
@@ -141,11 +142,26 @@ pub fn build_bundle(request: BuildBundleRequest) -> Result<BuiltBundle> {
     Ok(BuiltBundle {
         archive,
         sha256,
-        staged_root,
+        release_root,
     })
 }
 
 impl Worker {
+    /// The `phoxald` a release for `target` must carry, resolved before any
+    /// compilation so a builder that cannot obtain one refuses under its own
+    /// name rather than producing an archive with no executor in it.
+    fn executor_for(&self, target: &str, builder: &str) -> Result<PathBuf> {
+        self.request
+            .executor
+            .executor_for(target, self.request.offline, self.request.reporter.as_ref())
+            .with_context(|| {
+                format!(
+                    "`--builder {builder}` cannot package the {target} phoxald this deployment \
+                     release must carry"
+                )
+            })
+    }
+
     fn build_ssh(
         &self,
         project_root: &Path,
@@ -200,11 +216,17 @@ impl Worker {
                 reporter,
             )?;
             let extracted = tempfile::Builder::new()
-                .prefix("phoxal-ssh-layout-")
+                .prefix("phoxal-ssh-release-")
                 .tempdir()?;
             crate::bundle::archive::extract_build_archive(pulled.path(), extracted.path())?;
+            // The remote built the release with its own installed `phoxald`,
+            // which is the executor for its own triple. This side proves the
+            // whole thing: the release's shape, and the bundle it runs against
+            // the declared target signature.
+            let release = crate::deployment::validate_release(extracted.path())
+                .context("the remote builder did not return a deployment release")?;
             crate::load::layout::validate_runtime_bundle(
-                extracted.path(),
+                &release.bundle,
                 expected_target_for_triple(&target)?,
             )?;
             let staged_root = self
@@ -238,7 +260,8 @@ impl Worker {
         project_root: &Path,
         target: &str,
     ) -> Result<(PathBuf, String, Option<PathBuf>)> {
-        let staging = StagingBuild::native_bundle(target.to_string());
+        let executor = self.executor_for(target, "local")?;
+        let staging = StagingBuild::native_bundle(target.to_string(), executor);
         // Local builds and stages the live project tree under the lock.
         self.stage_validate_archive(project_root, target, BuildStagingInput::Source(staging))
     }
@@ -271,6 +294,7 @@ impl Worker {
         // sibling of the real project's staged directory.
         let staging = StagingBuild::prebuilt_native_bundle(
             target.to_string(),
+            self.executor_for(target, "container")?,
             cargo_target,
             Some(officials_root.path().to_path_buf()),
         );
@@ -352,6 +376,7 @@ impl Worker {
             snapshot.path(),
             &project_root.join(".phoxal/cache/registry"),
             target,
+            self.executor_for(target, "container")?,
             self.request.offline,
             ui,
         )
@@ -540,15 +565,14 @@ impl Worker {
         }?;
 
         // The container path staged under the frozen snapshot, which is
-        // deleted when the snapshot guard drops. Publish the validated staged
-        // root into the real project's `.phoxal/bundle/` so every
-        // backend leaves the same persistent staged runtime layout the command
-        // reports and the docs promise (); the archive is then written
-        // from that published root.
-        let staged_root = if staged.staged_root.starts_with(project_root) {
-            staged.staged_root.clone()
+        // deleted when the snapshot guard drops. Publish the validated release
+        // into the real project's `.phoxal/release/` so every backend leaves
+        // the same persistent deployment release the command reports; the
+        // archive is then written from that published root.
+        let staged_root = if staged.release.root.starts_with(project_root) {
+            staged.release.root.clone()
         } else {
-            publish_staged_root(project_root, target, &staged.staged_root)?
+            publish_staged_root(project_root, target, &staged.release.root)?
         };
 
         let output = self
@@ -569,6 +593,7 @@ pub(crate) fn resolve_container_staging(
     snapshot_root: &Path,
     registry_cache_root: &Path,
     target: &str,
+    executor: PathBuf,
     offline: bool,
     ui: &dyn crate::Reporter,
 ) -> Result<crate::run::prepare::ResolvedStagingInput> {
@@ -580,7 +605,7 @@ pub(crate) fn resolve_container_staging(
             drivers_subset: Vec::new(),
             offline,
         },
-        StagingBuild::native_bundle(target.to_string()),
+        StagingBuild::native_bundle(target.to_string(), executor),
         ui,
     )
 }
@@ -842,15 +867,16 @@ fn run_local(program: &str, args: &[&str], reporter: &dyn crate::Reporter) -> Re
     Ok(())
 }
 
-/// Copy a validated staged runtime layout produced outside the project (the
-/// container snapshot) into the project's real `.phoxal/bundle/`,
-/// replacing any previous layout via the same candidate-then-rename swap the
-/// stager uses, so a crashed publish never leaves a half-written layout.
+/// Copy a validated deployment release produced outside the project (the
+/// container snapshot, or a remote builder's archive) into the project's real
+/// `.phoxal/release/`, replacing any previous release via the same
+/// candidate-then-rename swap the stager uses, so a crashed publish never
+/// leaves a half-written release.
 fn publish_staged_root(project_root: &Path, target: &str, source: &Path) -> Result<PathBuf> {
-    let destination = crate::paths::runtime::runtime_bundle_root(project_root);
+    let destination = crate::paths::runtime::runtime_release_root(project_root);
     let parent = destination
         .parent()
-        .context("staged runtime layout has no parent directory")?;
+        .context("the staged deployment release has no parent directory")?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("failed to create {}", parent.display()))?;
     let candidate = tempfile::Builder::new()
@@ -896,11 +922,11 @@ fn publish_staged_root(project_root: &Path, target: &str, source: &Path) -> Resu
     Ok(destination)
 }
 
-/// The default bundle path: a sibling of the staged directory,
-/// `<project>/.phoxal/<triple>.build.phoxal`, never inside the staged
-/// `.phoxal/bundle/` tree it archives.
+/// The default archive path: a sibling of the staged release,
+/// `<project>/.phoxal/<triple>.build.phoxal`, never inside the
+/// `.phoxal/release/` tree it archives.
 fn default_output(project_root: &Path, target: &str) -> PathBuf {
-    let staged = crate::paths::runtime::runtime_bundle_root(project_root);
+    let staged = crate::paths::runtime::runtime_release_root(project_root);
     let parent = staged
         .parent()
         .map(Path::to_path_buf)
@@ -1390,8 +1416,8 @@ robot:
             output,
             Path::new("/proj/.phoxal/aarch64-unknown-linux-gnu.build.phoxal")
         );
-        // The sibling file is never inside the staged directory it archives.
-        let staged = crate::paths::runtime::runtime_bundle_root(Path::new("/proj"));
+        // The sibling file is never inside the release directory it archives.
+        let staged = crate::paths::runtime::runtime_release_root(Path::new("/proj"));
         assert!(!output.starts_with(&staged));
     }
 

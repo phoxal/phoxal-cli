@@ -1,10 +1,11 @@
-//! Deterministic `build.phoxal` archiving of a staged runtime layout.
+//! Deterministic `build.phoxal` archiving of a staged deployment release.
 //!
-//! `build.phoxal` is a gzipped tar of a staged runtime layout - the compiled
-//! canonical `robot.yaml`, `assets/`, and the flat `bin/` store - written so that
-//! identical staged contents always produce byte-identical archives. That is
-//! what lets a rebuild or a relink of unchanged content re-produce the same
-//! digest, so a bundle is content-addressable and independently attestable.
+//! `build.phoxal` is a gzipped tar of a staged deployment release - the
+//! `phoxald` that executes it and the `bundle/` that executor runs - written so
+//! that identical staged contents always produce
+//! byte-identical archives. That is what lets a rebuild or a relink of
+//! unchanged content re-produce the same digest, so a release is
+//! content-addressable and independently attestable.
 //!
 //! Determinism comes from normalizing everything the filesystem would otherwise
 //! vary: entries are emitted in sorted path order; every entry's mtime is a
@@ -13,11 +14,10 @@
 //! otherwise). Paths are stored relative with `/` separators and no `.`/`..`
 //! components, so extraction can never escape its destination.
 //!
-//! The archive is not executable. Its `assets/runtime.json` compatibility
-//! declaration is ordinary deterministic runtime content beside the canonical
-//! model, assets, and binaries. Plain
-//! `tar -xzf build.phoxal` extracts it identically to [`extract_build_archive`];
-//! the helper here only adds the path-escape guard.
+//! The archive is not executable, and the executor inside it is data until a
+//! release is activated. Plain `tar -xzf build.phoxal` extracts it identically
+//! to [`extract_build_archive`]; the helper here only adds the path-escape
+//! guard.
 
 use std::fs;
 use std::io::{self, Read};
@@ -30,7 +30,7 @@ use flate2::write::GzEncoder;
 use sha2::{Digest, Sha256};
 use tar::{Archive, EntryType, Header};
 
-/// The conventional extension of a built bundle. The default output for
+/// The conventional extension of a built release. The default output for
 /// `phoxal build --target <TRIPLE>` is `<project>/.phoxal/<triple>.build.phoxal`.
 pub const BUILD_ARCHIVE_EXTENSION: &str = "build.phoxal";
 
@@ -40,7 +40,7 @@ pub const BUILD_ARCHIVE_EXTENSION: &str = "build.phoxal";
 /// as "missing".
 const FIXED_MTIME: u64 = 1_577_836_800;
 
-/// Write the staged runtime layout at `layout_root` to `output` as a
+/// Write the staged deployment release at `layout_root` to `output` as a
 /// deterministic `build.phoxal`, returning the archive's hex SHA-256 digest.
 ///
 /// `output` must be a sibling of (or otherwise outside) `layout_root`: the
@@ -116,10 +116,10 @@ fn collect_into(root: &Path, dir: &Path, out: &mut Vec<Entry>) -> Result<()> {
     for entry in read {
         let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
         let path = entry.path();
-        // The staged layout has no `.phoxal` of its own by construction. An
-        // ordinary extracted layout may create local runtime state there; an
-        // installed runtime redirects all state outside its immutable release.
-        // Never fold state from a prior ordinary run into a bundle.
+        // A deployment release has no `.phoxal` of its own by construction: a
+        // project keeps its runtime state beside the release, and an installed
+        // release keeps it outside the immutable release directory entirely.
+        // Never fold state from a prior run into an archive.
         if dir == root && path.file_name() == Some(std::ffi::OsStr::new(".phoxal")) {
             continue;
         }
@@ -360,18 +360,20 @@ mod tests {
         fs::set_permissions(path, perms).unwrap();
     }
 
-    /// Stage a minimal layout: `robot.yaml`, an executable `bin/mission`, and a
-    /// non-executable asset. Returns the layout root.
+    /// Stage a minimal deployment release: an executable `phoxald`, and a
+    /// bundle holding an executable `bin/mission` and a non-executable asset.
     fn stage_layout(root: &Path) {
-        fs::create_dir_all(root.join("bin")).unwrap();
-        fs::create_dir_all(root.join("assets")).unwrap();
+        let bundle = root.join("bundle");
+        fs::create_dir_all(bundle.join("bin")).unwrap();
+        fs::create_dir_all(bundle.join("assets")).unwrap();
+        write_executable(&root.join("phoxald"), b"\x7fELF-ish-daemon");
         fs::write(
-            root.join("robot.yaml"),
-            b"schema: phoxal/robot/v0\nclock: real\n",
+            bundle.join("runtime.json"),
+            b"{\"schema\":\"phoxal/runtime-bundle/v0\"}\n",
         )
         .unwrap();
-        write_executable(&root.join("bin/mission"), b"\x7fELF-ish-binary");
-        fs::write(root.join("assets/fixture.bin"), b"asset").unwrap();
+        write_executable(&bundle.join("bin/mission"), b"\x7fELF-ish-binary");
+        fs::write(bundle.join("assets/fixture.bin"), b"asset").unwrap();
     }
 
     #[test]
@@ -386,9 +388,9 @@ mod tests {
         // Touch every file's mtime to a different time; determinism must ignore
         // it. Re-archive to a second path.
         let later = std::time::SystemTime::now();
-        filetime_touch(&layout.join("robot.yaml"), later);
-        filetime_touch(&layout.join("bin/mission"), later);
-        filetime_touch(&layout.join("assets/fixture.bin"), later);
+        filetime_touch(&layout.join("phoxald"), later);
+        filetime_touch(&layout.join("bundle/bin/mission"), later);
+        filetime_touch(&layout.join("bundle/assets/fixture.bin"), later);
 
         let out_b = dir.path().join("b.build.phoxal");
         let digest_b = write_build_archive(&layout, &out_b).unwrap();
@@ -438,9 +440,9 @@ mod tests {
 
         let mut names = BTreeSet::new();
         collect_names(&extracted, &extracted, &mut names);
-        assert!(names.contains("robot.yaml"));
-        assert!(names.contains("bin/mission"));
-        assert!(names.contains("assets/fixture.bin"));
+        assert!(names.contains("phoxald"));
+        assert!(names.contains("bundle/bin/mission"));
+        assert!(names.contains("bundle/assets/fixture.bin"));
         // The archive is pure runtime content: a top-level `.phoxal` (lock/socket
         // runtime state a prior layout run may have left behind) is never folded
         // into the bundle.
@@ -451,13 +453,22 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(extracted.join("bin/mission"))
+            let mode = fs::metadata(extracted.join("bundle/bin/mission"))
                 .unwrap()
                 .permissions()
                 .mode()
                 & 0o777;
             assert_eq!(mode, 0o755, "executable bit must be preserved");
-            let asset = fs::metadata(extracted.join("assets/fixture.bin"))
+            let executor = fs::metadata(extracted.join("phoxald"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                executor, 0o755,
+                "the release's executor must extract executable"
+            );
+            let asset = fs::metadata(extracted.join("bundle/assets/fixture.bin"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -566,14 +577,14 @@ mod tests {
         }
     }
 
-    /// The archive is the bundle: `robot.yaml`, `assets/`, and `bin/`, and
-    /// nothing else. The cargo-install bookkeeping that `cargo install --root`
-    /// leaves beside `bin/` embeds absolute host paths, so a bundle carrying it
-    /// would not be reproducible across machines - and nothing at runtime reads
-    /// it. This pins the exact file set rather than asserting an absence, so a
-    /// future addition has to be made deliberately.
+    /// The archive is the deployment release: the executor and the bundle it
+    /// runs - and nothing else. The cargo-install bookkeeping that
+    /// `cargo install --root` leaves behind embeds absolute host paths, so a
+    /// release carrying it would not be reproducible across machines, and
+    /// nothing at runtime reads it. This pins the exact file set rather than
+    /// asserting an absence, so a future addition has to be made deliberately.
     #[test]
-    fn the_archive_contains_the_exact_bundle_file_set_and_no_host_residue() {
+    fn the_archive_contains_the_exact_release_file_set_and_no_host_residue() {
         let dir = tempfile::tempdir().unwrap();
         let layout = dir.path().join("bundle");
         stage_layout(&layout);
@@ -604,9 +615,10 @@ mod tests {
         assert_eq!(
             files,
             BTreeSet::from([
-                "assets/fixture.bin".to_string(),
-                "bin/mission".to_string(),
-                "robot.yaml".to_string(),
+                "bundle/assets/fixture.bin".to_string(),
+                "bundle/bin/mission".to_string(),
+                "bundle/runtime.json".to_string(),
+                "phoxald".to_string(),
             ])
         );
     }

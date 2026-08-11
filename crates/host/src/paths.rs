@@ -2,6 +2,15 @@
 
 use std::path::{Path, PathBuf};
 
+/// The daemon executable's file name.
+///
+/// It is one name in three places that must agree: the installed pair beside
+/// the client, the executor a deployment release packages, and the published
+/// release archive's per-target member.
+pub const DAEMON_BINARY: &str = "phoxald";
+/// The interactive client's file name. It is never the daemon.
+pub const CLIENT_BINARY: &str = "phoxal";
+
 pub const ACTIVE_RUNTIME_ROOT: &str = "/var/phoxal";
 pub const INSTALL_ROOT: &str = "/var/lib/phoxal";
 pub const RELEASES_ROOT: &str = "/var/lib/phoxal/releases";
@@ -20,6 +29,37 @@ pub const SYSTEMD_UNIT: &str = "phoxal.service";
 pub const SYSTEMD_ACTIVE_ROOT: &str = "/run/systemd/system";
 pub const SYSTEMD_UNIT_ROOT: &str = "/etc/systemd/system";
 pub const SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/phoxal.service";
+
+/// The directory the running executable lives in.
+///
+/// # Errors
+///
+/// When the platform cannot report the running executable, or it has no parent
+/// directory.
+pub fn executable_directory() -> anyhow::Result<PathBuf> {
+    use anyhow::Context;
+
+    let current = std::env::current_exe().context("failed to locate the running executable")?;
+    let current = current.canonicalize().unwrap_or(current);
+    current
+        .parent()
+        .map(Path::to_path_buf)
+        .context("the running executable has no parent directory")
+}
+
+/// Resolve the `phoxald` beside the running executable.
+///
+/// `PATH` is the fallback for the one case where the running executable cannot
+/// be resolved at all; every other case answers with the sibling, present or
+/// not, so a missing sibling is reported as a broken installation rather than
+/// papered over by an unrelated daemon on `PATH`.
+#[must_use]
+pub fn sibling_daemon() -> PathBuf {
+    match executable_directory() {
+        Ok(directory) => directory.join(DAEMON_BINARY),
+        Err(_) => PathBuf::from(DAEMON_BINARY),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePaths {

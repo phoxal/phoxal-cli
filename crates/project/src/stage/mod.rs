@@ -1,12 +1,13 @@
 //! The unified runtime-layout stager.
 //!
-//! One stager materializes a source project into the finalized bundle at
-//! `.phoxal/bundle/`:
+//! One stager materializes a source project into the deployment release at
+//! `.phoxal/release/`: the executor and the finalized bundle it runs.
 //!
 //! ```text
-//! robot.yaml  # the one persisted robot definition
-//! assets/     # frozen robot and component definitions and their meshes
-//! bin/        # flat participant-executable store
+//! phoxald            # the executor this release is run by
+//! bundle/assets/     # frozen robot and component definitions and their meshes
+//! bundle/bin/        # flat participant-executable store
+//! bundle/runtime.json
 //! ```
 //!
 //! `cargo install --root <candidate>` targets the SAME candidate directory the
@@ -17,32 +18,58 @@
 //! publication removes them rather than fighting `--no-track` (which would
 //! disable Cargo's own concurrent-invocation protection for no real benefit).
 //!
-//! The live `.phoxal/bundle/` is never deleted before every install and
+//! The live `.phoxal/release/` is never deleted before every install and
 //! validation succeeds: staging always builds into a sibling candidate
 //! directory first, validates it, and only then atomically renames it over
-//! the previous complete layout. A build failure halfway through must never
+//! the previous complete release. A build failure halfway through must never
 //! leave a robot with no runtime.
 //!
-//! This is why [`begin_runtime_layout`]/[`publish_runtime_layout`] are two
-//! functions, not one: everything between them - `cargo install` for every
-//! official, building every source/override binary, the source check, and
-//! the loader's own execution-time validation - runs against
+//! This is why [`begin_runtime_layout`]/[`finalize_release`] are two functions,
+//! not one: everything between them - `cargo install` for every official,
+//! building every source/override binary, the source check, and the loader's
+//! own execution-time validation - runs against
 //! [`candidate::StagedCandidate::path`], a path nobody executes from yet. Only
-//! [`publish_runtime_layout`] ever touches the live path, and it is always
-//! the last call - see `run::prepare::refresh_staging` and
-//! `simulation::prepare_simulation`.
+//! [`finalize_release`] ever touches the live path, and it is always the last
+//! call - see `run::prepare::refresh_staging` and
+//! `simulation::prepare_simulation`. It adds the executor before it publishes,
+//! so a published release always has both halves and they always match.
 
 mod candidate;
 mod participants;
 mod publish;
 mod runtime;
 
-pub(crate) use candidate::{begin_runtime_layout, copy_tree_into};
+use std::path::Path;
+
+use anyhow::{Context, Result};
+
+use crate::check::participant_metadata::ExpectedTarget;
+use crate::deployment::ReleaseLayout;
+
+pub(crate) use candidate::{StagedCandidate, begin_runtime_layout, copy_tree_into};
 pub(crate) use participants::{
     MaterializeSettings, materialize_candidate_store, stage_named_binary,
 };
-pub(crate) use publish::publish_runtime_layout;
 pub(crate) use runtime::write_runtime_document;
+
+/// Complete a validated candidate into a deployment release and publish it.
+///
+/// The executor lands in the candidate first, so the atomic rename that
+/// publishes it switches the executor and the bundle together.
+pub(crate) fn finalize_release(
+    candidate: StagedCandidate,
+    executor_source: &Path,
+    expected: &ExpectedTarget,
+) -> Result<ReleaseLayout> {
+    crate::deployment::materialize(candidate.release_path(), executor_source, expected)
+        .context("failed to package the executor into the staged deployment release")?;
+    let root = publish::publish_runtime_layout(candidate)?;
+    Ok(ReleaseLayout {
+        executor: root.join(crate::deployment::EXECUTOR_FILE),
+        bundle: root.join(crate::deployment::BUNDLE_DIR),
+        root,
+    })
+}
 
 #[cfg(test)]
 pub(crate) use candidate::compile_test_bundle;

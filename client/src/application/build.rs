@@ -28,7 +28,7 @@ pub(crate) async fn build_command(
         ProjectOperation::Build,
     ))
     .context("failed to acquire the project lock for build")?;
-    // Publishing replaces `.phoxal/bundle/` in place, so it is refused while a
+    // Publishing replaces `.phoxal/release/` in place, so it is refused while a
     // daemon is executing out of it. The build lock does not answer this: it
     // only serializes this tool against itself.
     refuse_while_execution_is_live(&target.logical_root)?;
@@ -39,6 +39,7 @@ pub(crate) async fn build_command(
         phoxal_cli_project::build_bundle(phoxal_cli_project::BuildBundleRequest {
             target,
             backend: request.backend,
+            executor: crate::pair::PairExecutors::shared(),
             output: request.output,
             publish: true,
             offline,

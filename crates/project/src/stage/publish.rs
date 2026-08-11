@@ -1,4 +1,4 @@
-//! Atomic publication of a fully validated runtime-layout candidate.
+//! Atomic publication of a fully validated deployment-release candidate.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,36 +8,38 @@ use anyhow::{Context, Result};
 
 const PREVIOUS_LAYOUT_SUFFIX: &str = ".previous";
 
-/// The staged runtime layout directory under `project_root`. `run`, live
-/// simulation, and `build` all stage and execute this one root - it is a
-/// function of the project alone, not of what was resolved into it.
+/// The staged deployment release under `project_root`. `run`, live simulation,
+/// and `build` all stage and execute this one root - it is a function of the
+/// project alone, not of what was resolved into it.
 #[must_use]
 pub(crate) fn layout_path(project_root: &Path) -> PathBuf {
-    crate::paths::runtime::runtime_bundle_root(project_root)
+    crate::paths::runtime::runtime_release_root(project_root)
 }
 
-/// Atomically publish `candidate` as the live `.phoxal/bundle/`, replacing
-/// any previous layout. Call this ONLY after every install, source build,
-/// metadata read, and loader validation against `candidate.path()` has
-/// already succeeded - this is the exact promise the module docs make, and
-/// the only step allowed to touch the live path.
+/// Atomically publish `candidate` as the live `.phoxal/release/`, replacing any
+/// previous release. Call this ONLY after every install, source build, metadata
+/// read, loader validation, and the release step that adds the executor have
+/// already succeeded against the candidate - this is the exact promise the
+/// module docs make, and the only step allowed to touch the live path. The
+/// executor and the bundle therefore change together or not at all.
 pub(crate) fn publish_runtime_layout(candidate: StagedCandidate) -> Result<PathBuf> {
     let StagedCandidate {
         dir: candidate,
+        bundle: _,
         project_root,
     } = candidate;
     let target = layout_path(&project_root);
     let parent = target
         .parent()
-        .context("runtime bundle directory has no parent")?;
-    let previous = parent.join(format!(".bundle{PREVIOUS_LAYOUT_SUFFIX}"));
+        .context("deployment release directory has no parent")?;
+    let previous = parent.join(format!(".release{PREVIOUS_LAYOUT_SUFFIX}"));
     remove_if_present(&previous)?;
     let candidate = candidate.keep();
     let had_previous = fs::symlink_metadata(&target).is_ok();
     if had_previous {
         fs::rename(&target, &previous).with_context(|| {
             format!(
-                "failed to move previous runtime layout {} aside",
+                "failed to move the previous deployment release {} aside",
                 target.display()
             )
         })?;
@@ -50,7 +52,7 @@ pub(crate) fn publish_runtime_layout(candidate: StagedCandidate) -> Result<PathB
         let _ = remove_if_present(&candidate);
         return Err(error).with_context(|| {
             format!(
-                "failed to atomically publish runtime layout {}",
+                "failed to atomically publish the deployment release {}",
                 target.display()
             )
         });

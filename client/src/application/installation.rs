@@ -1,8 +1,14 @@
-//! Installing and rolling back a runtime release on a systemd host.
+//! Installing and rolling back a deployment release on a systemd host.
 //!
-//! Installation is the client's, never the daemon's: it
-//! validates an archive, swaps the active-release symlink atomically, and
-//! restarts the unit - all of which mutate a bundle a daemon may be executing.
+//! Installation is the client's, never the daemon's: it validates an archive,
+//! swaps the active-release symlink atomically, and restarts the unit - all of
+//! which mutate a release a daemon may be executing.
+//!
+//! A release is one directory holding the executor and the bundle it runs, and
+//! `/var/phoxal` selects exactly one of them. Activation and rollback are that
+//! one symlink swap, so the daemon and the bundle move together: there is no
+//! moment, and no failure path, at which one release's `phoxald` could be
+//! executing another release's bundle.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,12 +16,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
+use phoxal_cli_project::BUNDLE_DIR;
+
 use crate::cli::context::AppContext;
 use crate::digest::sha256_file;
 use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
 /// The Zenoh endpoint an installed `phoxald` binds. It is derived from the
-/// installed runtime layout, not asked for, so a client and the unit can never
+/// installed runtime paths, not asked for, so a client and the unit can never
 /// disagree about where the execution answers.
 fn installed_endpoint(roots: &InstallRoots) -> String {
     format!(
@@ -385,9 +393,9 @@ pub(crate) const SIMULATION_BUNDLE_REJECTED: &str = "PHOXAL-E-INSTALL-SIMULATION
 /// bundle and would come up waiting for a world clock only the client-owned
 /// Webots can produce - forever, on a `Restart=on-failure` unit. So the refusal
 /// is here, where the durable install is being made.
-fn reject_simulation_bundle(root: &Path) -> Result<()> {
-    let bundle = phoxal_bundle::RuntimeBundle::open_verified(root)
-        .context("failed to verify the runtime bundle before installation")?;
+fn reject_simulation_bundle(release_root: &Path) -> Result<()> {
+    let bundle = phoxal_bundle::RuntimeBundle::open_verified(release_root.join(BUNDLE_DIR))
+        .context("failed to verify the release's runtime bundle before installation")?;
     ensure_real_clock(bundle.robot().clock())
 }
 
@@ -572,16 +580,31 @@ fn systemctl<const N: usize>(args: [&str; N]) -> Result<()> {
 
 pub(crate) async fn install_command(app: &AppContext, archive: &Path) -> Result<()> {
     let release = install(archive, app.offline).await?;
-    app.ui
-        .info(format!("installed runtime release {}", release.display()));
+    app.ui.info(active_release_report("installed", &release));
     Ok(())
 }
 
 pub(crate) async fn rollback_command(app: &AppContext, release: Option<&str>) -> Result<()> {
     let release = rollback(release).await?;
-    app.ui
-        .info(format!("active runtime restored to {}", release.display()));
+    app.ui.info(active_release_report(
+        "active release restored to",
+        &release,
+    ));
     Ok(())
+}
+
+/// What an activation reports: the release, and both halves that came with it.
+///
+/// Naming the executor beside the bundle is the point of the report - an
+/// operator can see that the daemon changed with the robot, which is exactly
+/// the property a release exists to provide.
+fn active_release_report(verb: &str, release: &Path) -> String {
+    format!(
+        "{verb} deployment release {}: executor {} and bundle {}",
+        release.display(),
+        release.join(phoxal_cli_project::EXECUTOR_FILE).display(),
+        release.join(BUNDLE_DIR).display(),
+    )
 }
 
 #[cfg(test)]
@@ -596,6 +619,36 @@ mod tests {
             state: temp.path().join("var/lib/phoxal/state"),
             volatile: temp.path().join("run/phoxal"),
         }
+    }
+
+    /// Write a release whose two halves are both stamped with `tag`, so a test
+    /// can tell which release the active link resolves to - and, reading them
+    /// separately, prove they never come from different ones.
+    fn release_stamped(roots: &InstallRoots, name: &str, tag: &str) -> Result<PathBuf> {
+        let release = roots.releases.join(name);
+        std::fs::create_dir_all(release.join(BUNDLE_DIR))?;
+        std::fs::write(
+            release.join(phoxal_cli_project::EXECUTOR_FILE),
+            format!("phoxald of {tag}"),
+        )?;
+        std::fs::write(release.join(BUNDLE_DIR).join("runtime.json"), tag)?;
+        Ok(release)
+    }
+
+    /// What the active link resolves to right now, read as two independent
+    /// facts: which release the executor came from, and which release the
+    /// bundle came from.
+    fn active_halves(roots: &InstallRoots) -> Result<(String, String)> {
+        let active = active_release(&roots.active)?.context("nothing is active")?;
+        let executor = std::fs::read_to_string(active.join(phoxal_cli_project::EXECUTOR_FILE))?;
+        let bundle = std::fs::read_to_string(active.join(BUNDLE_DIR).join("runtime.json"))?;
+        Ok((
+            executor
+                .strip_prefix("phoxald of ")
+                .unwrap_or(&executor)
+                .to_string(),
+            bundle,
+        ))
     }
 
     #[test]
@@ -720,6 +773,150 @@ mod tests {
         assert!(error.contains(SIMULATION_BUNDLE_REJECTED), "{error}");
         assert!(error.contains("clock: simulated"), "{error}");
         assert!(error.contains("phoxal simulation webots run"), "{error}");
+    }
+
+    /// The invariant this whole design exists for: an executor from one release
+    /// can never be active while another release's bundle is. Every transition
+    /// an operator can reach - activation, a failed activation restoring the
+    /// previous release, an explicit rollback, and re-activating the newer one -
+    /// is walked here, reading the two halves separately each time.
+    #[tokio::test]
+    async fn the_executor_and_the_bundle_never_come_from_different_releases() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let roots = roots(&temp);
+        std::fs::create_dir_all(&roots.releases)?;
+        let older = release_stamped(&roots, "20260724T010000.000Z-11111111", "older")?;
+        let newer = release_stamped(&roots, "20260725T010000.000Z-22222222", "newer")?;
+        let service = ServiceControl::Fake {
+            operations: std::sync::Arc::new(Mutex::new(Vec::new())),
+            fail_readiness_once: std::sync::Arc::new(Mutex::new(false)),
+        };
+
+        atomic_symlink_switch(&roots.active, &older)?;
+        assert_eq!(
+            active_halves(&roots)?,
+            ("older".to_string(), "older".to_string())
+        );
+
+        // Activating the newer release moves both halves at once.
+        atomic_symlink_switch(&roots.active, &newer)?;
+        assert_eq!(
+            active_halves(&roots)?,
+            ("newer".to_string(), "newer".to_string())
+        );
+
+        // A failed activation restores the previous release whole, so the
+        // daemon goes back with the bundle rather than outliving it.
+        restore_after_failed_activation(Some(&older), &roots, &service).await?;
+        assert_eq!(
+            active_halves(&roots)?,
+            ("older".to_string(), "older".to_string())
+        );
+
+        // An explicit rollback selects a release, never a bundle.
+        atomic_symlink_switch(&roots.active, &newer)?;
+        let selected = select_rollback_release(None, &newer, &roots.releases)?;
+        atomic_symlink_switch(&roots.active, &selected)?;
+        assert_eq!(
+            active_halves(&roots)?,
+            ("older".to_string(), "older".to_string())
+        );
+
+        // And re-activating forward is the same single switch.
+        atomic_symlink_switch(&roots.active, &newer)?;
+        assert_eq!(
+            active_halves(&roots)?,
+            ("newer".to_string(), "newer".to_string())
+        );
+        Ok(())
+    }
+
+    /// A readiness failure restores the previous release complete: the executor
+    /// flips back together with the bundle, and the service is restarted on it.
+    #[tokio::test]
+    async fn a_release_that_fails_readiness_is_replaced_by_the_previous_one_whole() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let roots = roots(&temp);
+        std::fs::create_dir_all(&roots.releases)?;
+        std::fs::create_dir_all(&roots.state)?;
+        std::fs::create_dir_all(&roots.volatile)?;
+        let previous = release_stamped(&roots, "20260724T010000.000Z-11111111", "previous")?;
+        let failed = release_stamped(&roots, "20260725T010000.000Z-22222222", "failed")?;
+        atomic_symlink_switch(&roots.active, &failed)?;
+        let operations = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let service = ServiceControl::Fake {
+            operations: operations.clone(),
+            fail_readiness_once: std::sync::Arc::new(Mutex::new(false)),
+        };
+
+        restore_after_failed_activation(Some(&previous), &roots, &service).await?;
+        discard_failed_release(&failed, &roots.releases)?;
+
+        assert_eq!(
+            active_halves(&roots)?,
+            ("previous".to_string(), "previous".to_string())
+        );
+        assert!(!failed.exists(), "the failed release leaves nothing behind");
+        assert_eq!(*operations.lock().unwrap(), ["stop", "start", "ready"]);
+        Ok(())
+    }
+
+    /// An archive built before releases owned their executor is a bundle at its
+    /// own root. Installing it would leave the unit executing that bundle with
+    /// whatever daemon the host happened to have, so the installer refuses it by
+    /// name and nothing is activated.
+    #[tokio::test]
+    async fn an_archive_predating_executor_owning_releases_is_refused_at_the_installer()
+    -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let roots = roots(&temp);
+        let archive = temp.path().join("legacy.build.phoxal");
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive)?,
+            flate2::Compression::fast(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        for (name, bytes) in [
+            ("runtime.json", b"{}".as_slice()),
+            ("bin/brain", b"\x7fELF".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, bytes)?;
+        }
+        builder.into_inner()?.finish()?;
+
+        let operations = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let error = install_archive(
+            &archive,
+            &roots,
+            &ServiceControl::Fake {
+                operations: operations.clone(),
+                fail_readiness_once: std::sync::Arc::new(Mutex::new(false)),
+            },
+            true,
+        )
+        .await
+        .expect_err("a bundle-shaped archive is not a deployment release");
+        let error = format!("{error:#}");
+
+        assert!(
+            error.contains("predates executor-owning releases"),
+            "{error}"
+        );
+        assert!(error.contains("rebuild it with this CLI"), "{error}");
+        assert!(
+            operations.lock().unwrap().is_empty(),
+            "the service is never touched for an archive that cannot install"
+        );
+        assert!(active_release(&roots.active)?.is_none());
+        assert!(
+            std::fs::read_dir(&roots.releases)?.next().is_none(),
+            "nothing is left behind in the releases root"
+        );
+        Ok(())
     }
 
     #[test]

@@ -1,21 +1,23 @@
-//! Finalized-bundle candidate construction and validation.
+//! Deployment-release candidate construction and validation.
 //!
-//! The live `.phoxal/bundle/` is replaced only after every canonical input and
-//! every binary has passed validation, so staging always builds into an
-//! adjacent `.phoxal/.bundle-candidate-<unique>` directory first and publishes
-//! it with one atomic rename. A build that fails halfway through must never
-//! leave a robot with no runtime.
+//! The live `.phoxal/release/` is replaced only after every canonical input,
+//! every binary, and the release's own executor have passed validation, so
+//! staging always builds into an adjacent `.phoxal/.release-candidate-<unique>`
+//! directory first and publishes it with one atomic rename. A build that fails
+//! halfway through must never leave a robot with no runtime, and a published
+//! release always has both halves.
 //!
-//! The candidate is exactly the shape the framework's finalized-bundle loader
-//! reads. Authored documents are never staged: the compiled `runtime.json`
-//! absorbs them, and only compiled assets ride along.
+//! The candidate's `bundle/` is exactly the shape the framework's
+//! finalized-bundle loader reads. Authored documents are never staged: the
+//! compiled `runtime.json` absorbs them, and only compiled assets ride along.
 //!
 //! ```text
-//! runtime.json                            phoxal/runtime-bundle/v0
-//! assets/robot/meshes/...
-//! assets/components/<type>/meshes/...
-//! assets/router/config.json5              when the robot declares one
-//! bin/...
+//! phoxald                                 written last, by the release step
+//! bundle/runtime.json                     phoxal/runtime-bundle/v0
+//! bundle/assets/robot/meshes/...
+//! bundle/assets/components/<type>/meshes/...
+//! bundle/assets/router/config.json5       when the robot declares one
+//! bundle/bin/...
 //! ```
 
 use std::fs;
@@ -25,15 +27,25 @@ use crate::source::resolver::BundlePlan;
 use anyhow::{Context, Result, ensure};
 use phoxal_bundle::{ASSETS_DIR, BIN_DIR};
 
-/// An unpublished bundle candidate.
+/// An unpublished deployment-release candidate.
 pub(crate) struct StagedCandidate {
     pub(super) dir: tempfile::TempDir,
+    pub(super) bundle: PathBuf,
     pub(super) project_root: PathBuf,
 }
 
 impl StagedCandidate {
+    /// The bundle root being staged. Everything that materializes, checks, or
+    /// validates runtime content works against this.
     #[must_use]
     pub(crate) fn path(&self) -> &Path {
+        &self.bundle
+    }
+
+    /// The release root the bundle is staged inside. Only the release step,
+    /// which adds the executor, works against this.
+    #[must_use]
+    pub(crate) fn release_path(&self) -> &Path {
         self.dir.path()
     }
 }
@@ -42,20 +54,20 @@ pub(crate) fn begin_runtime_layout(
     project_root: &Path,
     resolved: &BundlePlan,
 ) -> Result<StagedCandidate> {
-    let live = crate::paths::runtime::runtime_bundle_root(project_root);
+    let live = crate::paths::runtime::runtime_release_root(project_root);
     let parent = live
         .parent()
-        .context("runtime bundle directory has no parent")?;
+        .context("deployment release directory has no parent")?;
     fs::create_dir_all(parent).with_context(|| {
         format!(
             "failed to create runtime layout directory {}",
             parent.display()
         )
     })?;
-    // The candidate is a sibling of the live bundle so publication is a rename
+    // The candidate is a sibling of the live release so publication is a rename
     // on one filesystem, never a copy.
     let candidate = tempfile::Builder::new()
-        .prefix(".bundle-candidate-")
+        .prefix(".release-candidate-")
         .tempdir_in(parent)
         .with_context(|| {
             format!(
@@ -64,10 +76,12 @@ pub(crate) fn begin_runtime_layout(
             )
         })?;
 
-    stage_candidate(candidate.path(), resolved)?;
+    let bundle = candidate.path().join(crate::deployment::BUNDLE_DIR);
+    stage_candidate(&bundle, resolved)?;
 
     Ok(StagedCandidate {
         dir: candidate,
+        bundle,
         project_root: project_root.to_path_buf(),
     })
 }

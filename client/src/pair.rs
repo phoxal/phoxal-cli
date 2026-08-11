@@ -10,11 +10,18 @@
 //! project builds - so no project-bound command gates on the two halves
 //! reporting the same product version. What remains here is resolution (how a
 //! machine finds its daemon), self-upgrade and bootstrap packaging (how the
-//! archive lands), and the `doctor` report.
+//! archive lands), the `doctor` report, and supplying the executor every
+//! deployment release carries.
 //!
 //! Resolution is deliberately *not* `PATH`-first. A `phoxal` run out of a build
 //! directory must not silently drive an older installed daemon, so the answer is
 //! the sibling next to `current_exe` whenever `current_exe` resolves at all.
+//!
+//! The pair is also the only source of a `phoxald` anywhere: a release built for
+//! this host packages the sibling, and a release built for another machine
+//! packages that machine's daemon out of this exact version's published pair
+//! archive. Both answers live here because both are facts about this product's
+//! packaging, which a robot project must never be able to reach.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,26 +29,15 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 /// The daemon executable's file name.
-pub(crate) const DAEMON_BINARY: &str = "phoxald";
+pub(crate) const DAEMON_BINARY: &str = phoxal_cli_host::paths::DAEMON_BINARY;
 
 /// The client executable's file name.
-pub(crate) const CLIENT_BINARY: &str = "phoxal";
+pub(crate) const CLIENT_BINARY: &str = phoxal_cli_host::paths::CLIENT_BINARY;
 
 /// This client's version. The daemon reports the same one when the pair is
 /// exact, because one workspace version governs both packages.
 pub(crate) fn client_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
-}
-
-/// The directory the installed pair lives in: whatever directory this client
-/// was executed from.
-pub(crate) fn install_directory() -> Result<PathBuf> {
-    let current = std::env::current_exe().context("failed to locate the running `phoxal`")?;
-    let current = current.canonicalize().unwrap_or(current);
-    current
-        .parent()
-        .map(Path::to_path_buf)
-        .context("the running `phoxal` has no parent directory")
 }
 
 /// Resolve `phoxald`.
@@ -51,10 +47,48 @@ pub(crate) fn install_directory() -> Result<PathBuf> {
 /// so that a missing sibling is reported as a broken pair rather than papered
 /// over by an unrelated daemon on `PATH`.
 pub(crate) fn resolve_daemon() -> PathBuf {
-    match install_directory() {
-        Ok(directory) => directory.join(DAEMON_BINARY),
-        Err(_) => PathBuf::from(DAEMON_BINARY),
+    phoxal_cli_host::paths::sibling_daemon()
+}
+
+/// The pair as the source of every release's executor.
+///
+/// A release for this host takes the sibling daemon; a release for any other
+/// target takes that target's daemon out of this version's published pair
+/// archive, which is the same asset `self upgrade` installs from.
+pub(crate) struct PairExecutors;
+
+impl PairExecutors {
+    /// A shared source, as the project use cases take one per request.
+    pub(crate) fn shared() -> phoxal_cli_project::SharedExecutorSource {
+        std::sync::Arc::new(Self)
     }
+}
+
+impl phoxal_cli_project::ExecutorSource for PairExecutors {
+    fn executor_for(
+        &self,
+        target: &str,
+        offline: bool,
+        ui: &dyn phoxal_cli_project::Reporter,
+    ) -> Result<PathBuf> {
+        if target == phoxal_cli_project::source::host_target_triple() {
+            return sibling_executor();
+        }
+        crate::bootstrap::published_executor(target, offline, ui)
+    }
+}
+
+/// The executor a release built for this host carries.
+fn sibling_executor() -> Result<PathBuf> {
+    let path = resolve_daemon();
+    anyhow::ensure!(
+        path.is_file(),
+        "a deployment release carries the `{DAEMON_BINARY}` that executes it, but there is none \
+         at {}. `{CLIENT_BINARY}` and `{DAEMON_BINARY}` ship and install as one archive, so \
+         reinstall the CLI with `{CLIENT_BINARY} self upgrade`",
+        path.display()
+    );
+    Ok(path)
 }
 
 /// What the sibling daemon turned out to be.
@@ -263,7 +297,8 @@ mod tests {
     /// answer for a client run out of a build directory.
     #[test]
     fn the_daemon_is_resolved_beside_this_executable() {
-        let directory = install_directory().expect("this test binary has a directory");
+        let directory = phoxal_cli_host::paths::executable_directory()
+            .expect("this test binary has a directory");
         assert_eq!(resolve_daemon(), directory.join(DAEMON_BINARY));
     }
 }

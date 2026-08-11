@@ -17,6 +17,7 @@
 mod build;
 mod bundle;
 mod check;
+mod deployment;
 pub mod host;
 mod load;
 mod paths;
@@ -37,6 +38,9 @@ mod validation;
 pub use build::container::ContainerEngine;
 pub use build::shell::shell_quote;
 pub use build::{BuildBackend, BuildBundleRequest, BuiltBundle, build_bundle};
+pub use deployment::{
+    BUNDLE_DIR, EXECUTOR_FILE, ExecutorSource, ReleaseLayout, SharedExecutorSource,
+};
 pub use paths::runtime::{
     ACTIVE_RUNTIME_ROOT, INSTALL_ROOT, INSTALLED_BINARY_ROOT, INSTALLED_CLIENT_BINARY,
     INSTALLED_DAEMON_BINARY, INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT, RELEASES_ROOT,

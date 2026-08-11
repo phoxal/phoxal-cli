@@ -9,8 +9,10 @@ struct Doctor;
 
 impl Doctor {
     pub async fn run(&self, app: &AppContext) -> Result<()> {
-        // The pair first: a host whose `phoxald` is missing or mismatched
-        // cannot execute anything this CLI builds, whatever else is right.
+        // The pair first: a deployment release carries the daemon that runs
+        // it, and a release built here takes that daemon from this
+        // installation - so a host whose `phoxald` is missing or mismatched
+        // cannot produce a runnable release, whatever else is right.
         let pair = crate::pair::status();
         if pair.is_exact() {
             app.ui.success(pair.summary());

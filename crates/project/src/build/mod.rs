@@ -36,6 +36,8 @@ pub enum BuildBackend {
 pub struct BuildBundleRequest {
     pub target: RuntimeTarget,
     pub backend: BuildBackend,
+    /// Where the release this build packages gets the `phoxald` for its target.
+    pub executor: crate::deployment::SharedExecutorSource,
     pub output: Option<PathBuf>,
     pub publish: bool,
     pub offline: bool,
@@ -46,5 +48,7 @@ pub struct BuildBundleRequest {
 pub struct BuiltBundle {
     pub archive: PathBuf,
     pub sha256: String,
-    pub staged_root: Option<PathBuf>,
+    /// The deployment release this archive was written from, when the build was
+    /// asked to publish one into the project.
+    pub release_root: Option<PathBuf>,
 }

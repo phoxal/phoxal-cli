@@ -52,7 +52,7 @@ impl EmbeddedRouter {
 /// Open the embedded router on `endpoint`.
 ///
 /// `config` is the optional authored Zenoh JSON5 file, resolved by staging into
-/// the runtime layout so a source run, a staged run, and an extracted bundle all
+/// the bundle so a source run, an installed run, and an extracted release all
 /// reach the same asset. Phoxal's transport policy and the listen settings are
 /// applied after it by `phoxal-bus`, so an authored file cannot put the router
 /// at odds with the participants that dial it.

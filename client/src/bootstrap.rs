@@ -6,6 +6,12 @@
 //! either lands both or leaves the installation exactly as it was. A successful
 //! upgrade that produced a mixed pair is not a degraded outcome to warn about -
 //! it is an outcome this module must make impossible.
+//!
+//! The published archive is also where a cross-target deployment release gets
+//! its executor: building for another machine means packaging that machine's
+//! `phoxald`, and this version's own release is the only place one exists. It is
+//! the same asset, addressed the same way, so nothing about the release channel
+//! is restated anywhere else.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -453,6 +459,120 @@ impl ReleaseAsset {
             archive_url,
         }
     }
+}
+
+/// The `phoxald` for `target`, out of this version's published pair archive.
+///
+/// Fetched once per version and target into the user cache directory: a
+/// cross-target build packages the same bytes every time, and a container build
+/// stages from a throwaway snapshot that must still reuse them. The archive is
+/// verified against its published checksum before anything is cached, so a
+/// truncated or tampered download never becomes an executor.
+///
+/// # Errors
+///
+/// When the executor is not cached and cannot be fetched and verified.
+pub(crate) fn published_executor(
+    target: &str,
+    offline: bool,
+    ui: &dyn phoxal_cli_project::Reporter,
+) -> Result<PathBuf> {
+    let version = Version::parse(env!("CARGO_PKG_VERSION")).context("invalid CARGO_PKG_VERSION")?;
+    let asset = ReleaseAsset::new(&version, target);
+    let cached = executor_cache_root()?
+        .join(version.to_string())
+        .join(target)
+        .join(crate::pair::DAEMON_BINARY);
+    if cached.is_file() {
+        return Ok(cached);
+    }
+    anyhow::ensure!(
+        !offline,
+        "a deployment release for {target} must carry that target's `{}`, and the published pair \
+         {} is not cached at {}. Run once without --offline, or build for this host",
+        crate::pair::DAEMON_BINARY,
+        asset.archive_name,
+        cached.display()
+    );
+    ui.info(format!(
+        "fetching the {target} {} from {}",
+        crate::pair::DAEMON_BINARY,
+        asset.archive_url
+    ));
+    let client = build_client(true)?;
+    let temp = tempfile::tempdir().context("failed to create a download directory")?;
+    let archive_path = temp.path().join(&asset.archive_name);
+    if download_asset(&client, &asset.archive_url, &archive_path)? == AssetDownload::Absent {
+        bail!(
+            "release archive {} was not found; a cross-target deployment release needs the \
+             published pair for {target} at this exact version",
+            asset.archive_url
+        );
+    }
+    let checksum_path = temp.path().join(format!("{}.sha256", asset.archive_name));
+    if download_asset(
+        &client,
+        &format!("{}.sha256", asset.archive_url),
+        &checksum_path,
+    )? == AssetDownload::Absent
+    {
+        bail!(
+            "release archive {} publishes no checksum",
+            asset.archive_url
+        );
+    }
+    verify_published_archive(&archive_path, &checksum_path, &asset.archive_name)?;
+    let staged = extract_pair(&archive_path, &asset, temp.path())?;
+    cache_executor(&staged.daemon, &cached)?;
+    Ok(cached)
+}
+
+/// Prove a downloaded archive is the published one, from its sibling
+/// `sha256sum`-format checksum asset.
+fn verify_published_archive(archive: &Path, checksum: &Path, name: &str) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let bytes =
+        fs::read(archive).with_context(|| format!("failed to read {}", archive.display()))?;
+    let published = fs::read_to_string(checksum)
+        .with_context(|| format!("failed to read the checksum published for {name}"))?;
+    let published = published
+        .split_whitespace()
+        .next()
+        .with_context(|| format!("the checksum published for {name} is empty"))?;
+    let digest = hex::encode(Sha256::digest(&bytes));
+    anyhow::ensure!(
+        digest == published,
+        "the published pair {name} has sha256 {digest} but its checksum asset records {published}"
+    );
+    Ok(())
+}
+
+/// Publish one cached executor, whole or not at all.
+fn cache_executor(staged: &Path, cached: &Path) -> Result<()> {
+    let parent = cached
+        .parent()
+        .context("the executor cache path has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let candidate = parent.join(format!(
+        ".{}.incoming-{}",
+        crate::pair::DAEMON_BINARY,
+        std::process::id()
+    ));
+    fs::copy(staged, &candidate)
+        .with_context(|| format!("failed to stage {}", candidate.display()))?;
+    make_executable(&candidate)?;
+    fs::rename(&candidate, cached)
+        .with_context(|| format!("failed to publish {}", cached.display()))
+}
+
+/// Where fetched executors are kept: product state under the user cache
+/// directory, never inside a project.
+fn executor_cache_root() -> Result<PathBuf> {
+    Ok(dirs::cache_dir()
+        .context("failed to locate a user cache directory for downloaded executors")?
+        .join("phoxal")
+        .join("executor"))
 }
 
 pub(crate) async fn upgrade(
