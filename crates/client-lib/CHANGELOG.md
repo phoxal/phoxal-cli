@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.37.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.37.2) - 2026-08-11
+
+
+### Added
+
+- Phoxal-client owns the external robot boundary and deployment drops the product-version gate ([#314](https://github.com/phoxal/phoxal-cli/pull/314))
+
+
 ## [0.37.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.37.1) - 2026-08-11
 
 

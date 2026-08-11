@@ -4,6 +4,15 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.37.2](https://github.com/phoxal/phoxal-cli/releases/tag/v0.37.2) - 2026-08-11
+
+
+### Added
+
+- Make the robot project the framework authority for build validation ([#312](https://github.com/phoxal/phoxal-cli/pull/312))
+- Deployment releases own the executor and the bundle ([#313](https://github.com/phoxal/phoxal-cli/pull/313))
+
+
 ## [0.37.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.37.1) - 2026-08-11
 
 
