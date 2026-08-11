@@ -548,6 +548,62 @@ mod tests {
         )
     }
 
+    /// The upgrade channel is an append-only contract: every installed client
+    /// resolves FUTURE release assets by these spellings, so the release
+    /// workflow may add assets but can never rename the ones pinned here
+    /// without stranding the installed fleet. This test welds the client's
+    /// expectations to the workflow that produces the assets.
+    #[test]
+    fn the_release_workflow_publishes_the_asset_names_this_client_downloads() {
+        let workflow_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../.github/workflows/release.yml");
+        let workflow = std::fs::read_to_string(&workflow_path)
+            .expect("the release workflow ships in this repository");
+
+        // The archive spelling the client constructs in `ReleaseAsset::new`.
+        // The archive MEMBERS are pinned by the sibling test
+        // `the_release_workflow_packages_both_binaries_under_the_names_upgrade_expects`.
+        assert!(
+            workflow
+                .contains("phoxal-${{ needs.plan.outputs.version }}-${{ matrix.target }}.tar.gz"),
+            "the workflow must package phoxal-<version>-<target>.tar.gz"
+        );
+        // Every target this client can resolve must be built by the workflow.
+        for target in [
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+        ] {
+            assert!(
+                workflow.contains(target),
+                "the workflow must build release assets for {target}"
+            );
+        }
+
+        // And the client-side spelling stays what the workflow emits.
+        let sample = ReleaseAsset::new(
+            &Version::parse("9.9.9").expect("version"),
+            "aarch64-unknown-linux-gnu",
+        );
+        assert_eq!(
+            sample.archive_name,
+            "phoxal-9.9.9-aarch64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(
+            sample.client_binary_name,
+            "phoxal-aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            sample.daemon_binary_name,
+            "phoxald-aarch64-unknown-linux-gnu"
+        );
+        assert!(
+            sample
+                .archive_url
+                .ends_with("/v9.9.9/phoxal-9.9.9-aarch64-unknown-linux-gnu.tar.gz")
+        );
+    }
+
     /// An upgrade only proceeds from an archive that carries the whole pair.
     #[test]
     fn a_release_archive_must_carry_both_binaries() {
