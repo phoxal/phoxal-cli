@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::ProcessKey;
+use crate::model::process::ProcessKey;
 use phoxal_bundle::RuntimeBundle;
 use phoxal_model::identity::ComponentInstanceId;
 use phoxal_runtime_contract::identity::ParticipantId;

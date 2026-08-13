@@ -2,7 +2,7 @@ use crate::cli::output::diagnostics::{DiagnosticLevel, DiagnosticSource, RouteRe
 use phoxal_cli_ui::Theme;
 
 #[derive(Debug, Clone, Copy)]
-pub struct Ui {
+pub(crate) struct Ui {
     interactive: bool,
     /// Prefix every line with a wall-clock timestamp. Set for the private
     /// headless supervisor, whose stderr is the supervisor log file - a line
@@ -82,7 +82,7 @@ impl Ui {
     /// Construct with explicit, already-known flags - the preferred
     /// constructor everywhere an `AppContext`/`OutputContext` is in scope
     /// (i.e. everywhere downstream of `commands::dispatch`).
-    pub fn new(interactive: bool, timestamps: bool) -> Self {
+    pub(crate) fn new(interactive: bool, timestamps: bool) -> Self {
         Self {
             interactive,
             timestamps,
@@ -94,7 +94,7 @@ impl Ui {
     /// pre-dispatch error path, and tests/library callers that do not care
     /// which mode they get.
     #[must_use]
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         use std::io::IsTerminal;
         Self::new(std::io::stderr().is_terminal(), false)
     }
@@ -122,7 +122,7 @@ impl Ui {
         eprintln!("{label} {message}");
     }
 
-    pub fn info(&self, message: impl AsRef<str>) {
+    pub(crate) fn info(&self, message: impl AsRef<str>) {
         let message = message.as_ref();
         if !matches!(
             try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, message),
@@ -146,7 +146,7 @@ impl Ui {
         self.emit(&theme.bold(&theme.steel("info")), message);
     }
 
-    pub fn success(&self, message: impl AsRef<str>) {
+    pub(crate) fn success(&self, message: impl AsRef<str>) {
         let message = message.as_ref();
         if !matches!(
             try_route(DiagnosticSource::Cli, DiagnosticLevel::Info, message),
@@ -158,7 +158,7 @@ impl Ui {
         self.emit(&theme.bold(&theme.success("ok")), message);
     }
 
-    pub fn warn(&self, message: impl AsRef<str>) {
+    pub(crate) fn warn(&self, message: impl AsRef<str>) {
         let message = message.as_ref();
         if !matches!(
             try_route(DiagnosticSource::Cli, DiagnosticLevel::Warn, message),
@@ -170,7 +170,7 @@ impl Ui {
         self.emit(&theme.bold(&theme.warn("warn")), message);
     }
 
-    pub fn error(&self, message: impl AsRef<str>) {
+    pub(crate) fn error(&self, message: impl AsRef<str>) {
         let message = message.as_ref();
         if !matches!(
             try_route(DiagnosticSource::Cli, DiagnosticLevel::Error, message),

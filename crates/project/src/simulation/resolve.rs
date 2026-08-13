@@ -312,7 +312,7 @@ mod tests {
     /// binary whose linker section declares exactly the record
     /// `#[phoxal::brain]` embeds. Its Cargo package and bin target are
     /// deliberately NOT named `brain`, so the canonical identity can never be
-    /// inferred from either ().
+    /// inferred from either.
     fn write_brain_fixture(dir: &Path) -> (PathBuf, String) {
         let crate_dir = dir.join("robot-root");
         let bin_target = "testbot-robot".to_string();

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use phoxal_runtime_contract::metadata::ParticipantKind;
 
 /// The canonical participant identity, staged `bin/` name, and authored
-/// reserved name of the one mandatory root brain ().
+/// reserved name of the one mandatory root brain.
 pub const BRAIN_ID: &str = "brain";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -190,9 +190,9 @@ pub(crate) async fn drive(
 #[derive(Clone)]
 struct EffectPorts {
     supervisor: crate::attach::SupervisorCommands,
-    input: crate::attach::ports::InputCommands,
-    logs: crate::attach::ports::LogReader,
-    runtimes: crate::attach::ports::RuntimeReader,
+    input: crate::attach::ports::input::InputCommands,
+    logs: crate::attach::ports::logs::LogReader,
+    runtimes: crate::attach::ports::runtimes::RuntimeReader,
 }
 
 fn spawn_effect(

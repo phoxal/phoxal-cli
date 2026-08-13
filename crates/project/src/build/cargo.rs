@@ -131,9 +131,9 @@ pub(crate) fn build_selected_source_artifacts(
         };
         let package = workspace.package_for(&crate_dir)?;
         // The root brain's Cargo bin target is project-specific and comes from
-        // the locked metadata, never from its canonical `brain` identity
-        // (); every other participant's target name IS its
-        // identity, so this is the same lookup for them.
+        // the locked metadata, never from its canonical `brain` identity.
+        // Every other participant's target name is its identity, so this is
+        // the same lookup for them.
         let binary = package.binary_for(participant.bin_target.as_deref(), &participant.name)?;
         let group_key = SourceBuildGroupKey {
             workspace_root: workspace.workspace_root.clone(),
@@ -231,7 +231,7 @@ pub(crate) fn build_selected_source_artifacts(
 /// manifest for the container path (host builds read `cargo metadata`).
 ///
 /// `required` is a bin target the caller ALREADY knows from Cargo metadata -
-/// today only the root brain's (). It is an exact demand: if
+/// today only the root brain's target. It is an exact demand: if
 /// that target is not among the package's bins, the manifest and the locked
 /// metadata disagree, so this fails rather than silently staging whichever
 /// single binary happens to exist. `preferred` is the softer,
@@ -713,7 +713,7 @@ pub(super) fn locate_prebuilt_binary(
     // The container always compiles with an explicit `--target <triple>`, so
     // its output is always under `target/<triple>/<profile>` - including when the
     // triple equals the CLI host triple (a Linux host building its own arch in
-    // a container). Never collapse to the implicit `target/debug` here ().
+    // a container). Never collapse to the implicit `target/debug` here.
     let path = profile_binary_path(target_dir, target, profile, binary_name);
     if !path.is_file() {
         bail!(
@@ -743,7 +743,7 @@ fn profile_binary_path(
 
 /// Fail with an actionable error when the cross target's standard library is not
 /// installed, naming the exact `rustup target add` command. The CLI never
-/// installs toolchains (); this only turns an opaque later cargo failure
+/// installs toolchains; this only turns an opaque later cargo failure
 /// into a precise instruction. If `rustup` is not on PATH the check is skipped -
 /// a non-rustup toolchain may still have the target - and cargo reports any real
 /// gap itself.
@@ -917,8 +917,7 @@ mod prebuilt_tests {
 
     /// The container path looks the brain's prebuilt binary up by its
     /// Cargo-metadata-derived bin target, and keys the result under the
-    /// canonical `brain` identity - never the other way round
-    /// ().
+    /// canonical `brain` identity - never the other way round.
     #[test]
     fn prebuilt_lookup_uses_the_brains_metadata_bin_target_not_its_identity() -> Result<()> {
         let dir = tempfile::tempdir()?;

@@ -1,4 +1,4 @@
-//! The container builder engine seam ().
+//! The container builder engine seam.
 //!
 //! `phoxal build --builder container` compiles the workspace user/driver crates
 //! inside a pinned official Docker `rust` image, then hands the built binaries

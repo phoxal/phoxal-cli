@@ -8,7 +8,7 @@ use std::time::Instant;
 use tokio::process::Child;
 use tokio::time::timeout;
 
-pub async fn stop_child(child: &mut Child, budget: Duration) -> Result<()> {
+pub(crate) async fn stop_child(child: &mut Child, budget: Duration) -> Result<()> {
     let pid = child.id();
     if let Some(pid) = pid {
         let terminate_result = send_process_group_terminate(pid);

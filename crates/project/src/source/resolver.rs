@@ -29,7 +29,7 @@ pub struct ResolveOptions {
     pub official_target_triple: Option<String>,
     /// The component-driver instances resolution may resolve driver binaries
     /// for. `run`'s driver policy threads through here so an excluded driver is
-    /// never resolved - not even to select its target artifact ().
+    /// never resolved - not even to select its target artifact.
     /// Everything except driver-filtered supervisor staging resolves `All`.
     pub drivers: super::intent::DriverSelection,
     /// Whether simulator-only artifacts belong to this resolution.
@@ -70,8 +70,8 @@ pub struct BundlePlan {
     /// to.
     pub train: crate::source::train::LockedTrain,
     pub target: String,
-    /// The one mandatory root brain, discovered from the root Cargo package
-    /// (). Never optional and never registry-resolved: every
+    /// The one mandatory root brain, discovered from the root Cargo package.
+    /// It is never optional or registry-resolved: every
     /// supported source project has exactly one.
     pub brain: ResolvedBrain,
     pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
@@ -80,7 +80,7 @@ pub struct BundlePlan {
     /// Workspace runtime crates present under `services/` but not declared in
     /// robot.yaml (and not official-identity overrides). They are
     /// not built or launched; graph validation and the staging summary
-    /// surface them as drift diagnostics ().
+    /// surface them as drift diagnostics.
     pub undeclared_runtimes: Vec<UndeclaredRuntime>,
     pub components: Vec<ResolvedComponent>,
     pub path_overrides: Vec<ResolvedPathOverride>,
@@ -117,7 +117,7 @@ impl CompiledBundle {
 
 /// One resolved official platform runtime (a service or a simulator). The
 /// public identity is the provider-qualified `package` id
-/// (`phoxal/service-drive`); there is no separate `artifact_id` (docs #21).
+/// (`phoxal/service-drive`); there is no separate artifact identifier.
 ///
 /// The official catalog is CLI-internal, so location
 /// and integrity are Cargo's job: `package` at exactly `train` from the
@@ -145,7 +145,7 @@ impl ResolvedPlatformRuntime {
 }
 
 /// The robot project's root Cargo package, resolved as its one mandatory
-/// brain source ().
+/// brain source.
 ///
 /// The canonical runtime identity is always `brain`; the Cargo package name
 /// and binary target stay separate, project-specific facts so staging can
@@ -172,7 +172,7 @@ pub struct ResolvedUserRuntime {
 }
 
 /// One workspace runtime crate that is present but not declared in robot.yaml
-/// (): legal, not built, surfaced as a drift diagnostic.
+/// It is legal, not built, and surfaced as a drift diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndeclaredRuntime {
     /// The crate's logical name (its directory name).
@@ -266,7 +266,7 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 
 /// Unwrap the versioned authored `robot.yaml` document to its exact body.
 ///
-/// The schema tag selects the variant (), so the CLI keeps one
+/// The schema tag selects the variant, so the CLI keeps one
 /// projection point rather than destructuring the versioned enum at every
 /// call site.
 #[must_use]

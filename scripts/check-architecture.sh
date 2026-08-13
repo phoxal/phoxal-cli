@@ -21,6 +21,32 @@ fail_if_found() {
   esac
 }
 
+MANGLED_COMMENT_PATTERN='^[[:space:]]*//.*[^=[:space:]][[:space:]]\(\)'
+STALE_TRACKER_COMMENT_PATTERN='(^[[:space:]]*///?[[:space:]]*\.[[:space:]]*$)|(^[[:space:]]*//.*(([Oo]rganization|[Ff]ramework|[Dd]ocs|[Ii]ssue|[Pp][Rr]|[Tt]racker)[[:space:]]*#[0-9]+|[Ff]inding[[:space:]]+[A-Z][[:alnum:]_-]*|[Rr]ound[-[:space:]]?[0-9]+|WS[0-9]+|[Pp]roduct decision|[Bb]locker[[:space:]]+[0-9]+|[Mm]edium[[:space:]]+[0-9]+|[Pp]hase[[:space:]]+[0-9]+|[Pp]art[[:space:]]+[0-9]+))'
+
+verify_comment_policy_patterns() {
+  local rejected
+  local allowed
+
+  rejected=$'// stale narration ().\n/// Finding C: history\n/// docs #21\n// tracker #42\n'
+  allowed=$'// `Config = ()`\n// `Config  = ()`\n// backticked `()`\n// resolve()\n// Instant::now()\n'
+
+  if ! printf '%s' "${rejected}" | rg -q "${MANGLED_COMMENT_PATTERN}"; then
+    echo "architecture policy self-check failed: mangled-comment pattern missed a fixture" >&2
+    exit 1
+  fi
+  if printf '%s' "${allowed}" | rg -q "${MANGLED_COMMENT_PATTERN}"; then
+    echo "architecture policy self-check failed: mangled-comment pattern rejected valid Rust notation" >&2
+    exit 1
+  fi
+  if ! printf '%s' "${rejected}" | rg -q "${STALE_TRACKER_COMMENT_PATTERN}"; then
+    echo "architecture policy self-check failed: stale-tracker pattern missed a fixture" >&2
+    exit 1
+  fi
+}
+
+verify_comment_policy_patterns
+
 fail_if_found "phoxald must not depend on authored-source or catalog crates" \
   'phoxal-(manifest|cli-catalog)|cargo_metadata' supervisor/Cargo.toml supervisor/src
 fail_if_found "the retired launch environment ABI must not return" \
@@ -33,7 +59,10 @@ fail_if_found "attachments must not reconstruct authored source" \
 fail_if_found "raw Zenoh is owned below the typed bus contract" \
   '(^|[^[:alnum:]_])zenoh::' client supervisor crates
 fail_if_found "tracker history belongs in GitHub, not Rust source" \
-  '(organization|framework)?#[0-9]{3,}|round[- ]?[0-9]+|WS[0-9]+|[Ff]inding [A-Z]?[0-9]+|Product decision|blocker [0-9]+|medium [0-9]+|Phase [0-9]+|Part [0-9]+|^\s*///?\.\s*$' \
+  "${STALE_TRACKER_COMMENT_PATTERN}" \
+  client supervisor crates --glob '*.rs'
+fail_if_found "comment-only mangled empty-parenthetical narration must not return" \
+  "${MANGLED_COMMENT_PATTERN}" \
   client supervisor crates --glob '*.rs'
 fail_if_found "the two application packages stay bin-only" \
   '^\[lib\]' client/Cargo.toml supervisor/Cargo.toml

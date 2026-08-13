@@ -10,12 +10,9 @@ use std::io::IsTerminal;
 
 use phoxal_cli_ui::Theme;
 
-pub mod diagnostics;
+pub(crate) mod diagnostics;
 pub(crate) mod plain;
 pub(crate) mod progress;
-
-pub use diagnostics::SessionAwareWriter;
-pub use plain::Ui;
 
 #[must_use]
 pub fn tracing_ansi_enabled() -> bool {

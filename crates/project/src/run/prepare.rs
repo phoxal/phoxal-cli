@@ -271,7 +271,7 @@ pub(crate) fn refresh_staging_resolved(
     // `phoxal build` skips this host-native pass (`check_source == false`): a
     // cross or container target's Linux-only crates need not compile on the
     // build host, and the loader's target-aware validation over the staged
-    // (cross-built) binaries is the authoritative check for a bundle ().
+    // (cross-built) binaries is the authoritative check for a bundle.
     if check_source {
         crate::progress::run_phase(
             ui,
@@ -302,7 +302,7 @@ pub(crate) fn refresh_staging_resolved(
     crate::stage::write_runtime_document(candidate.path(), &resolved)?;
     crate::progress::ensure_active(ui)?;
 
-    // Declaration drift () is warned from THIS shared path, so run,
+    // Declaration drift is warned from this shared path, so run,
     // start and build all surface it exactly once.
     report_undeclared_runtimes(&resolved.undeclared_runtimes, ui);
 

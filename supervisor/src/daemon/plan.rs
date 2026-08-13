@@ -2,9 +2,8 @@
 
 use std::time::Duration;
 
-use crate::model::{
-    ParticipantKind, ParticipantSpec, RestartPolicy, RuntimeFailurePolicy, StartupRequirement,
-};
+use crate::model::launch::{ParticipantSpec, RestartPolicy};
+use crate::model::participant::ParticipantKind;
 use phoxal_bundle::RuntimeBundle;
 use phoxal_runtime_contract::identity::ExecutionId;
 use phoxal_runtime_contract::metadata::ParticipantKind as RuntimeKind;
@@ -55,8 +54,6 @@ pub(crate) fn participant_specs(
                 executable: bundle.root().join(artifact.path().as_str()),
                 args,
                 shutdown_grace: Duration::from_millis(DEFAULT_SHUTDOWN_GRACE_MS),
-                startup_requirement: StartupRequirement::Required,
-                runtime_failure: RuntimeFailurePolicy::StopProject,
                 restart_policy: RestartPolicy::default(),
             })
         })

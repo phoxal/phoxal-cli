@@ -2,7 +2,11 @@
 
 use std::time::SystemTime;
 
-use crate::model as core;
+use crate::model::lifecycle::ProjectLifecycle;
+use crate::model::process::{
+    ProcessFailure as CoreProcessFailure, ProcessFailureKind as CoreProcessFailureKind,
+    ProcessState as CoreProcessState,
+};
 use phoxal_api::supervisor::snapshot::{
     DaemonFailure, DesiredState, ExitStatus, Lifecycle, Process, ProcessFailure,
     ProcessFailureKind, ProcessState, Snapshot, StartupStep, WallTime,
@@ -55,39 +59,36 @@ pub(crate) fn project(
     }
 }
 
-const fn lifecycle(value: core::ProjectLifecycle) -> Lifecycle {
+const fn lifecycle(value: ProjectLifecycle) -> Lifecycle {
     match value {
-        core::ProjectLifecycle::Starting => Lifecycle::Starting,
-        core::ProjectLifecycle::Ready => Lifecycle::Ready,
-        core::ProjectLifecycle::Degraded => Lifecycle::Degraded,
-        core::ProjectLifecycle::Failed => Lifecycle::Failed,
-        core::ProjectLifecycle::Stopping => Lifecycle::Stopping,
-        core::ProjectLifecycle::Stopped => Lifecycle::Stopped,
+        ProjectLifecycle::Starting => Lifecycle::Starting,
+        ProjectLifecycle::Ready => Lifecycle::Ready,
+        ProjectLifecycle::Failed => Lifecycle::Failed,
+        ProjectLifecycle::Stopping => Lifecycle::Stopping,
+        ProjectLifecycle::Stopped => Lifecycle::Stopped,
     }
 }
 
-const fn state(value: core::ProcessState) -> ProcessState {
+const fn state(value: CoreProcessState) -> ProcessState {
     match value {
-        core::ProcessState::Starting => ProcessState::Starting,
-        core::ProcessState::Ready => ProcessState::Ready,
-        core::ProcessState::Degraded => ProcessState::Degraded,
-        core::ProcessState::Failed => ProcessState::Failed,
-        core::ProcessState::Restarting => ProcessState::Restarting,
-        core::ProcessState::Stopped => ProcessState::Stopped,
+        CoreProcessState::Starting => ProcessState::Starting,
+        CoreProcessState::Ready => ProcessState::Ready,
+        CoreProcessState::Failed => ProcessState::Failed,
+        CoreProcessState::Restarting => ProcessState::Restarting,
     }
 }
 
-const fn failure_kind(value: core::ProcessFailureKind) -> ProcessFailureKind {
+const fn failure_kind(value: CoreProcessFailureKind) -> ProcessFailureKind {
     match value {
-        core::ProcessFailureKind::Spawn => ProcessFailureKind::Spawn,
-        core::ProcessFailureKind::Exit => ProcessFailureKind::Exit,
-        core::ProcessFailureKind::ReadinessTimeout => ProcessFailureKind::ReadinessTimeout,
-        core::ProcessFailureKind::ReadinessConflict => ProcessFailureKind::ReadinessConflict,
-        core::ProcessFailureKind::Cleanup => ProcessFailureKind::Cleanup,
+        CoreProcessFailureKind::Spawn => ProcessFailureKind::Spawn,
+        CoreProcessFailureKind::Exit => ProcessFailureKind::Exit,
+        CoreProcessFailureKind::ReadinessTimeout => ProcessFailureKind::ReadinessTimeout,
+        CoreProcessFailureKind::ReadinessConflict => ProcessFailureKind::ReadinessConflict,
+        CoreProcessFailureKind::Cleanup => ProcessFailureKind::Cleanup,
     }
 }
 
-fn process_failure(value: &core::ProcessFailure) -> ProcessFailure {
+fn process_failure(value: &CoreProcessFailure) -> ProcessFailure {
     let exit = value.exit.as_ref().and_then(|exit| {
         exit.code
             .map(|code| ExitStatus::Code { code })

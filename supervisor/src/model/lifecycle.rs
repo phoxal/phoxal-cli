@@ -1,27 +1,9 @@
-//! Supervisor lifecycle, readiness, and failure-policy values.
+//! Supervisor-owned execution lifecycle.
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StartupRequirement {
-    Required,
-    Optional,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeFailurePolicy {
-    KeepProjectDegraded,
-    StopProject,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectLifecycle {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectLifecycle {
     Starting,
     Ready,
-    Degraded,
     Failed,
     Stopping,
     Stopped,

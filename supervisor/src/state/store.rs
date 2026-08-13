@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use super::board::Board;
-use crate::model::{
-    BoundedString, ExitDescription, ParticipantKind, ProcessDescriptor, ProcessEntry,
-    ProcessFailure, ProcessFailureKind, ProcessKey, ProcessState, ProjectLifecycle,
-    StartupRequirement,
+use crate::model::lifecycle::ProjectLifecycle;
+use crate::model::process::{
+    BoundedString, ExitDescription, ProcessEntry, ProcessFailure, ProcessFailureKind, ProcessKey,
+    ProcessState, ProcessStatus,
 };
 use phoxal_runtime_contract::identity::ParticipantId;
 use phoxal_runtime_contract::identity::ProducerId;
@@ -22,7 +22,7 @@ const STDERR_TAIL_MAX_BYTES: usize = 32 * 1024;
 /// projections, retained observations, logs, telemetry, and UI channels live
 /// outside the daemon entirely.
 #[derive(Clone, Default)]
-pub struct SupervisorState {
+pub(crate) struct SupervisorState {
     inner: Arc<Mutex<StoreData>>,
     on_change: Arc<OnceLock<ChangeCallback>>,
 }
@@ -51,7 +51,7 @@ impl std::fmt::Debug for SupervisorState {
 
 impl SupervisorState {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -62,7 +62,7 @@ impl SupervisorState {
     /// Consume a participant's liveliness token as startup proof, and as the
     /// one place the supervisor learns which producer this incarnation
     /// actually publishes under.
-    pub fn record_instance_presence(
+    pub(crate) fn record_instance_presence(
         &self,
         participant: ParticipantId,
         producer: ProducerId,
@@ -136,26 +136,12 @@ impl SupervisorState {
         failure
     }
 
-    pub fn upsert_process(
-        &self,
-        key: ProcessKey,
-        kind: ParticipantKind,
-        state: ProcessState,
-        startup_requirement: StartupRequirement,
-    ) {
+    pub(crate) fn upsert_process(&self, key: ProcessKey, state: ProcessState) {
         self.modify(|board| {
-            let artifact = key.to_string();
             board.processes.insert(
-                key.clone(),
+                key,
                 ProcessEntry {
-                    descriptor: ProcessDescriptor {
-                        key,
-                        kind,
-                        artifact,
-                        owner: "phoxal-cli".to_string(),
-                        startup_requirement,
-                    },
-                    status: crate::model::ProcessStatus {
+                    status: ProcessStatus {
                         actual: state,
                         ..Default::default()
                     },
@@ -164,12 +150,7 @@ impl SupervisorState {
         });
     }
 
-    pub(crate) fn register_planned(
-        &self,
-        key: &ProcessKey,
-        kind: ParticipantKind,
-        startup_requirement: StartupRequirement,
-    ) {
+    pub(crate) fn register_planned(&self, key: &ProcessKey) {
         if self
             .inner
             .lock()
@@ -180,30 +161,22 @@ impl SupervisorState {
         {
             return;
         }
-        self.upsert_process(
-            key.clone(),
-            kind,
-            ProcessState::Starting,
-            startup_requirement,
-        );
+        self.upsert_process(key.clone(), ProcessState::Starting);
     }
 
-    pub fn set_state(&self, key: impl Into<ProcessKey>, state: ProcessState) {
+    pub(crate) fn set_state(&self, key: impl Into<ProcessKey>, state: ProcessState) {
         let key = key.into();
         self.modify(|board| {
             if let Some(entry) = board.processes.get_mut(&key) {
                 entry.status.actual = state;
-                if matches!(
-                    state,
-                    ProcessState::Starting | ProcessState::Restarting | ProcessState::Stopped
-                ) {
+                if matches!(state, ProcessState::Starting | ProcessState::Restarting) {
                     entry.status.pid = None;
                 }
             }
         });
     }
 
-    pub fn record_failure(
+    pub(crate) fn record_failure(
         &self,
         key: impl Into<ProcessKey>,
         kind: ProcessFailureKind,
@@ -228,7 +201,7 @@ impl SupervisorState {
         });
     }
 
-    pub fn record_restart(&self, key: impl Into<ProcessKey>) {
+    pub(crate) fn record_restart(&self, key: impl Into<ProcessKey>) {
         let key = key.into();
         self.modify(|board| {
             if let Some(entry) = board.processes.get_mut(&key) {
@@ -238,7 +211,7 @@ impl SupervisorState {
         });
     }
 
-    pub fn set_pid(&self, key: impl Into<ProcessKey>, pid: Option<u32>) {
+    pub(crate) fn set_pid(&self, key: impl Into<ProcessKey>, pid: Option<u32>) {
         let key = key.into();
         self.modify(|board| {
             if let Some(entry) = board.processes.get_mut(&key) {
@@ -273,7 +246,7 @@ impl SupervisorState {
     }
 
     /// Fence all readiness evidence before a new process incarnation starts.
-    pub fn prepare_incarnation(&self, key: &ProcessKey) {
+    pub(crate) fn prepare_incarnation(&self, key: &ProcessKey) {
         self.modify_data(|data| {
             data.exact_instances.producers.remove(key.participant());
             if let Some(entry) = data.board.processes.get_mut(key) {
@@ -282,7 +255,7 @@ impl SupervisorState {
         });
     }
 
-    pub fn set_lifecycle(&self, lifecycle: ProjectLifecycle) {
+    pub(crate) fn set_lifecycle(&self, lifecycle: ProjectLifecycle) {
         self.modify(|board| board.lifecycle = lifecycle);
     }
 
@@ -300,7 +273,7 @@ impl SupervisorState {
     /// first one is the actual cause, and every call site can call `fail`
     /// unconditionally without racing a `lifecycle != Failed` guard against
     /// this method's own writes.
-    pub fn fail(&self, reason: &str) {
+    pub(crate) fn fail(&self, reason: &str) {
         let reason = BoundedString::with_max_bytes(reason, DETAIL_MAX_BYTES)
             .as_str()
             .to_string();
@@ -313,7 +286,7 @@ impl SupervisorState {
     }
 
     #[must_use]
-    pub fn process_state(&self, key: &ProcessKey) -> Option<ProcessState> {
+    pub(crate) fn process_state(&self, key: &ProcessKey) -> Option<ProcessState> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -324,7 +297,7 @@ impl SupervisorState {
     }
 
     #[must_use]
-    pub fn snapshot(&self) -> Board {
+    pub(crate) fn snapshot(&self) -> Board {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -364,8 +337,6 @@ fn stderr_tail(data: &StoreData, key: &ProcessKey) -> Option<BoundedString> {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::ParticipantKind;
-
     use super::*;
 
     fn producer(seed: u8) -> ProducerId {
@@ -383,12 +354,7 @@ mod tests {
     fn exact_producer_readiness_rejects_stale_holder() {
         let state = SupervisorState::new();
         let key = key("mission");
-        state.upsert_process(
-            key.clone(),
-            ParticipantKind::Service,
-            ProcessState::Starting,
-            StartupRequirement::Required,
-        );
+        state.upsert_process(key.clone(), ProcessState::Starting);
         let instance = ParticipantId::new("mission").expect("fixture participant");
         // A starting process has no producer at all: nothing mints one, so the
         // snapshot reports "no session yet" rather than an intention.
@@ -417,12 +383,7 @@ mod tests {
         let participant = ParticipantId::new("mission").expect("fixture participant");
         let old_producer = producer(22);
         let new_producer = producer(23);
-        state.upsert_process(
-            key.clone(),
-            ParticipantKind::Service,
-            ProcessState::Starting,
-            StartupRequirement::Required,
-        );
+        state.upsert_process(key.clone(), ProcessState::Starting);
         state.record_instance_presence(participant.clone(), old_producer, true);
 
         state.prepare_incarnation(&key);
@@ -447,12 +408,7 @@ mod tests {
         state.publish_with(move |_| {
             observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
-        state.upsert_process(
-            key("router"),
-            ParticipantKind::Service,
-            ProcessState::Starting,
-            StartupRequirement::Required,
-        );
+        state.upsert_process(key("router"), ProcessState::Starting);
         state.set_lifecycle(ProjectLifecycle::Ready);
         assert_eq!(publications.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
@@ -461,12 +417,7 @@ mod tests {
     fn failures_are_bounded_and_published() {
         let state = SupervisorState::new();
         let key = key("worker");
-        state.upsert_process(
-            key.clone(),
-            ParticipantKind::Service,
-            ProcessState::Starting,
-            StartupRequirement::Required,
-        );
+        state.upsert_process(key.clone(), ProcessState::Starting);
         state.record_instance_presence(
             ParticipantId::new("worker").expect("fixture participant"),
             producer(91),

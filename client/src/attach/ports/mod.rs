@@ -1,11 +1,6 @@
 //! The typed ports the terminal application drives one session through.
 
-mod events;
+pub(crate) mod events;
 pub(crate) mod input;
-mod logs;
-mod runtimes;
-
-pub(crate) use events::AttachmentEvents;
-pub(crate) use input::InputCommands;
-pub(crate) use logs::LogReader;
-pub(crate) use runtimes::RuntimeReader;
+pub(crate) mod logs;
+pub(crate) mod runtimes;

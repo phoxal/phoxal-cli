@@ -24,7 +24,7 @@ use semver::Version;
 use serde::Serialize;
 
 use crate::cli::context::AppContext;
-use crate::cli::output::Ui;
+use crate::cli::output::plain::Ui;
 
 const LATEST_RELEASE_URL: &str = "https://github.com/phoxal/phoxal-cli/releases/latest";
 const DOWNLOAD_BASE_URL: &str = "https://github.com/phoxal/phoxal-cli/releases/download";

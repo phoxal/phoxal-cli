@@ -2,9 +2,9 @@
 
 use super::participant::RunningParticipant;
 use super::spec::SupervisorOptions;
-use crate::model::{
-    ParticipantSpec, ProcessKey, ProcessState, ProjectLifecycle, StartupRequirement,
-};
+use crate::model::launch::ParticipantSpec;
+use crate::model::lifecycle::ProjectLifecycle;
+use crate::model::process::{ProcessFailureKind, ProcessKey, ProcessState};
 use crate::state::store::SupervisorState;
 use anyhow::Result;
 use anyhow::bail;
@@ -36,7 +36,10 @@ impl WaitBudget {
 }
 
 /// Build the participant startup barrier for a physical run.
-pub fn stages_for_run(specs: Vec<ParticipantSpec>, timeout: WaitBudget) -> Vec<SupervisionStage> {
+pub(crate) fn stages_for_run(
+    specs: Vec<ParticipantSpec>,
+    timeout: WaitBudget,
+) -> Vec<SupervisionStage> {
     vec![SupervisionStage::new(
         SupervisionStageKind::Graph,
         specs,
@@ -47,11 +50,9 @@ pub fn stages_for_run(specs: Vec<ParticipantSpec>, timeout: WaitBudget) -> Vec<S
 /// How supervision reports stage progress to whoever owns the startup
 /// sequence.
 ///
-/// The store is not that owner: the startup sequence a client renders is the
-/// daemon's own (bundle, router, participants), and
-/// this loop only ever advances its last step. Keeping it
-/// behind this handle is what lets the process machinery stay ignorant of the
-/// wire contract.
+/// The daemon owns the rendered bundle, router, and participant steps. This
+/// process layer advances only the participant step through this handle, which
+/// keeps it independent of the wire contract.
 pub(crate) trait StageProgress: Send + Sync {
     /// A stage began, named by its human-readable label.
     fn started(&self, label: &str);
@@ -101,44 +102,29 @@ impl SupervisionStageKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct SupervisionStage {
-    pub(crate) kind: SupervisionStageKind,
-    pub specs: Vec<ParticipantSpec>,
+pub(crate) struct SupervisionStage {
+    kind: SupervisionStageKind,
+    specs: Vec<ParticipantSpec>,
     /// Board ids that must be observed `Ready` before the next stage spawns:
     /// every spawned spec's own id that is a bus participant (see
     /// [`Self::new`]). There are no wait-only ids - the embedded router is the
     /// supervisor's own state, not a board row to wait on.
-    pub ready_ids: Vec<ProcessKey>,
-    /// Spawned processes whose terminal failure aborts this stage.
-    pub failure_ids: Vec<ProcessKey>,
-    pub optional_ids: Vec<ProcessKey>,
-    pub timeout: WaitBudget,
+    ready_ids: Vec<ProcessKey>,
+    timeout: WaitBudget,
 }
 
 impl SupervisionStage {
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         kind: SupervisionStageKind,
         specs: Vec<ParticipantSpec>,
         timeout: WaitBudget,
     ) -> Self {
         let ready_ids = specs.iter().map(|spec| spec.key.clone()).collect();
-        let failure_ids = specs
-            .iter()
-            .filter(|spec| spec.startup_requirement == StartupRequirement::Required)
-            .map(|spec| spec.key.clone())
-            .collect();
-        let optional_ids = specs
-            .iter()
-            .filter(|spec| spec.startup_requirement == StartupRequirement::Optional)
-            .map(|spec| spec.key.clone())
-            .collect();
         Self {
             kind,
             specs,
             ready_ids,
-            failure_ids,
-            optional_ids,
             timeout,
         }
     }
@@ -152,7 +138,7 @@ pub(crate) async fn spawn_participants_in_stage(
 ) {
     for spec in specs {
         if !spec.spawn {
-            board.register_planned(&spec.key, spec.kind, spec.startup_requirement);
+            board.register_planned(&spec.key);
             continue;
         }
         let key = spec.key.clone();
@@ -160,13 +146,13 @@ pub(crate) async fn spawn_participants_in_stage(
         // observer starts. Keep this authoritative, idempotent registration at
         // the stage boundary for direct stage tests and defensive consistency;
         // unsolicited Liveliness and logs still cannot create board entries.
-        board.register_planned(&key, spec.kind, spec.startup_requirement);
+        board.register_planned(&key);
         match RunningParticipant::spawn_in_stage(spec, board, stage).await {
             Ok(participant) => running.push(participant),
             Err(error) => {
                 board.record_failure(
                     &key,
-                    crate::model::ProcessFailureKind::Spawn,
+                    ProcessFailureKind::Spawn,
                     None,
                     format!("spawn failed: {error:#}"),
                 );
@@ -180,15 +166,13 @@ pub(crate) async fn spawn_participants_in_stage(
 pub(crate) struct PendingStage {
     pub(crate) label: String,
     pub(crate) ready_ids: Vec<ProcessKey>,
-    pub(crate) failure_ids: Vec<ProcessKey>,
-    pub(crate) optional_ids: Vec<ProcessKey>,
     /// `None` means an unbounded wait, so there is
     /// no `Instant` to ever compare against.
     pub(crate) deadline: Option<Instant>,
 }
 
-/// Spawn one stage's participants (if it has any work at all - Product
-/// decision 3) and return the readiness barrier when it has work to await.
+/// Spawn one stage's participants and return its readiness barrier when it has
+/// work to await.
 pub(crate) async fn spawn_stage(
     running: &mut Vec<RunningParticipant>,
     board: &SupervisorState,
@@ -199,8 +183,6 @@ pub(crate) async fn spawn_stage(
         kind,
         specs,
         ready_ids,
-        failure_ids,
-        optional_ids,
         timeout: stage_timeout,
     } = stage;
     let label = kind.label().to_string();
@@ -215,8 +197,6 @@ pub(crate) async fn spawn_stage(
     Some(PendingStage {
         label,
         ready_ids,
-        failure_ids,
-        optional_ids,
         deadline: stage_timeout.deadline_from(Instant::now()),
     })
 }
@@ -241,8 +221,6 @@ pub(crate) async fn spawn_until_pending(
 pub(crate) async fn await_stage_ready(
     board: &SupervisorState,
     ready_ids: &[ProcessKey],
-    failure_ids: &[ProcessKey],
-    optional_ids: &[ProcessKey],
     budget: WaitBudget,
     poll_interval: Duration,
 ) -> Result<()> {
@@ -255,7 +233,7 @@ pub(crate) async fn await_stage_ready(
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        let failed = failure_ids
+        let failed = ready_ids
             .iter()
             .filter(|key| board.process_state(key) == Some(ProcessState::Failed))
             .map(ToString::to_string)
@@ -271,29 +249,23 @@ pub(crate) async fn await_stage_ready(
             .filter(|key| {
                 let state = board.process_state(key);
                 state != Some(ProcessState::Ready)
-                    && !(optional_ids.contains(key) && state == Some(ProcessState::Failed))
             })
             .cloned()
             .collect::<Vec<_>>();
         if missing.is_empty() {
             return Ok(());
         }
-        // `deadline` is `None` for an unbounded wait, so
-        // there is nothing to ever compare `Instant::now()` against, so a
-        // missing participant simply keeps waiting for as long as the
-        // operator leaves the session open.
+        // An unbounded wait has no deadline; a missing participant remains
+        // pending until the operator ends the session.
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            let waited = crate::model::format_duration(started.elapsed());
+            let waited = format_duration(started.elapsed());
             for key in &missing {
                 board.record_failure(
                     key,
-                    crate::model::ProcessFailureKind::ReadinessTimeout,
+                    ProcessFailureKind::ReadinessTimeout,
                     None,
                     format!("stage readiness timed out after {waited}: never observed ready"),
                 );
-            }
-            if missing.iter().all(|key| optional_ids.contains(key)) {
-                return Ok(());
             }
             bail!(
                 "stage readiness timed out after {waited}: participant(s) never observed ready: {}",
@@ -307,33 +279,37 @@ pub(crate) async fn await_stage_ready(
     }
 }
 
-/// Publish the state owner's derived Ready/Degraded startup outcome exactly
-/// when no phase remains to spawn or await.
+/// Publish the state owner's Ready startup outcome when no phase remains to
+/// spawn or await.
 pub(crate) async fn maybe_publish_startup_outcome(
     board: &SupervisorState,
     options: &SupervisorOptions,
     pending_stage: &Option<PendingStage>,
 ) {
     if options.publishes_running_on_startup_complete && pending_stage.is_none() {
-        let snapshot = board.snapshot();
-        let degraded = snapshot.processes.values().any(|entry| {
-            matches!(
-                entry.status.actual,
-                ProcessState::Failed | ProcessState::Degraded
-            )
-        });
-        board.set_lifecycle(if degraded {
-            ProjectLifecycle::Degraded
-        } else {
-            ProjectLifecycle::Ready
-        });
+        board.set_lifecycle(ProjectLifecycle::Ready);
     }
+}
+
+#[must_use]
+pub(crate) fn format_duration(value: Duration) -> String {
+    if value < Duration::from_secs(1) {
+        return format!("{}ms", value.as_millis());
+    }
+    if value < Duration::from_secs(60) {
+        return format!("{:.1}s", value.as_secs_f64());
+    }
+    let seconds = value.as_secs();
+    if seconds < 60 * 60 {
+        return format!("{}m {:02}s", seconds / 60, seconds % 60);
+    }
+    format!("{}h {:02}m", seconds / (60 * 60), (seconds / 60) % 60)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ParticipantKind, RuntimeFailurePolicy, StartupRequirement};
+    use crate::model::participant::ParticipantKind;
     use std::path::PathBuf;
 
     fn spec(id: &str, kind: ParticipantKind) -> ParticipantSpec {
@@ -346,8 +322,6 @@ mod tests {
             executable: PathBuf::from(id),
             args: Vec::new(),
             shutdown_grace: Duration::from_secs(1),
-            startup_requirement: StartupRequirement::Required,
-            runtime_failure: RuntimeFailurePolicy::StopProject,
             restart_policy: Default::default(),
         }
     }
@@ -372,5 +346,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["brain", "service", "webots"]
         );
+    }
+
+    #[tokio::test]
+    async fn every_ready_id_failure_aborts_the_startup_barrier() {
+        let board = SupervisorState::new();
+        let failed = spec("drive", ParticipantKind::Driver).key;
+        board.register_planned(&failed);
+        board.record_failure(&failed, ProcessFailureKind::Spawn, None, "spawn failed");
+
+        let error = await_stage_ready(
+            &board,
+            &[failed],
+            WaitBudget::Unbounded,
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("a failed ready participant aborts startup");
+        assert!(error.to_string().contains("drive"), "{error:#}");
+    }
+
+    #[test]
+    fn formats_elapsed_time_at_useful_precision() {
+        assert_eq!(format_duration(Duration::from_millis(250)), "250ms");
+        assert_eq!(format_duration(Duration::from_millis(1500)), "1.5s");
+        assert_eq!(format_duration(Duration::from_secs(65)), "1m 05s");
+        assert_eq!(format_duration(Duration::from_secs(3_720)), "1h 02m");
     }
 }

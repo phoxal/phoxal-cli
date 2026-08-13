@@ -1,6 +1,6 @@
 //! Captured child-output routing and reader task cleanup.
 
-use crate::model::ProcessKey;
+use crate::model::process::ProcessKey;
 use crate::state::store::SupervisorState;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;

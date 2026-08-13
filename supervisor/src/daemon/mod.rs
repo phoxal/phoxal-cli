@@ -37,7 +37,7 @@ const READINESS_BUDGET: Duration = Duration::from_secs(120);
 const COMMAND_QUEUE_DEPTH: usize = 16;
 const SUPERVISOR_LABEL: &str = "phoxald";
 
-pub async fn run(requested_root: &Path) -> Result<()> {
+pub(crate) async fn run(requested_root: &Path) -> Result<()> {
     let canonical = requested_root.canonicalize().with_context(|| {
         format!(
             "failed to canonicalize bundle root {}",
@@ -154,9 +154,7 @@ async fn execute(
     };
     let specs = plan::participant_specs(&runtime, execution, origin, &endpoint)?;
     for spec in &specs {
-        state
-            .board()
-            .register_planned(&spec.key, spec.kind, spec.startup_requirement);
+        state.board().register_planned(&spec.key);
     }
     let readiness = observe_participants(&bus, state, &shutdown).await?;
 

@@ -106,21 +106,9 @@ impl AttachmentPort {
         let mut snapshots = self.snapshots();
         loop {
             if let Some(snapshot) = snapshots.borrow_and_update().clone() {
-                match snapshot.lifecycle {
-                    phoxal_api::supervisor::snapshot::Lifecycle::Ready
-                    | phoxal_api::supervisor::snapshot::Lifecycle::Degraded => return Ok(snapshot),
-                    phoxal_api::supervisor::snapshot::Lifecycle::Failed => {
-                        let detail = snapshot.failure.as_ref().map_or_else(
-                            || "no reason was reported".to_string(),
-                            |failure| format!("{:?}: {}", failure.reason, failure.detail.as_str()),
-                        );
-                        return Err(AttachError::ReadinessFailed(detail));
-                    }
-                    phoxal_api::supervisor::snapshot::Lifecycle::Stopping
-                    | phoxal_api::supervisor::snapshot::Lifecycle::Stopped => {
-                        return Err(AttachError::StoppedBeforeReady);
-                    }
-                    phoxal_api::supervisor::snapshot::Lifecycle::Starting => {}
+                match classify_readiness(&snapshot)? {
+                    Readiness::Ready => return Ok(snapshot),
+                    Readiness::Pending => {}
                 }
             }
             tokio::select! {
@@ -222,6 +210,31 @@ impl AttachmentPort {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Readiness {
+    Ready,
+    Pending,
+}
+
+fn classify_readiness(snapshot: &Snapshot) -> Result<Readiness, AttachError> {
+    match snapshot.lifecycle {
+        phoxal_api::supervisor::snapshot::Lifecycle::Ready
+        | phoxal_api::supervisor::snapshot::Lifecycle::Degraded => Ok(Readiness::Ready),
+        phoxal_api::supervisor::snapshot::Lifecycle::Failed => {
+            let detail = snapshot.failure.as_ref().map_or_else(
+                || "no reason was reported".to_string(),
+                |failure| format!("{:?}: {}", failure.reason, failure.detail.as_str()),
+            );
+            Err(AttachError::ReadinessFailed(detail))
+        }
+        phoxal_api::supervisor::snapshot::Lifecycle::Stopping
+        | phoxal_api::supervisor::snapshot::Lifecycle::Stopped => {
+            Err(AttachError::StoppedBeforeReady)
+        }
+        phoxal_api::supervisor::snapshot::Lifecycle::Starting => Ok(Readiness::Pending),
+    }
+}
+
 /// Unique owner of one attached transport and every task derived from it.
 pub struct Attachment {
     endpoint: String,
@@ -265,10 +278,7 @@ impl Attachment {
         // exact trains it reports are carried into the refusal; only the
         // decision is the line.
         let robot = framework(&bus).await?;
-        let client = FrameworkVersion::CURRENT;
-        if !robot.is_compatible_with(client) {
-            return Err(AttachError::IncompatibleFramework { robot, client });
-        }
+        ensure_compatible_framework(robot, FrameworkVersion::CURRENT)?;
 
         let stream =
             StreamReceiver::new(&bus, &supervisor::topic::client().snapshot().topic()).await?;
@@ -391,21 +401,210 @@ async fn framework(bus: &BusHandle) -> Result<FrameworkVersion, AttachError> {
     Ok(framework)
 }
 
+fn ensure_compatible_framework(
+    robot: FrameworkVersion,
+    client: FrameworkVersion,
+) -> Result<(), AttachError> {
+    if robot.is_compatible_with(client) {
+        Ok(())
+    } else {
+        Err(AttachError::IncompatibleFramework { robot, client })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotPumpDecision {
+    Continue,
+    Stop,
+}
+
+fn pump_snapshot_step(
+    sender: &watch::Sender<Option<Snapshot>>,
+    revision: &mut u64,
+    snapshot: Option<Snapshot>,
+) -> SnapshotPumpDecision {
+    let Some(snapshot) = snapshot else {
+        return SnapshotPumpDecision::Stop;
+    };
+    if snapshot.revision <= *revision {
+        return SnapshotPumpDecision::Continue;
+    }
+    let installed_revision = snapshot.revision;
+    if sender.send(Some(snapshot)).is_err() {
+        return SnapshotPumpDecision::Stop;
+    }
+    *revision = installed_revision;
+    SnapshotPumpDecision::Continue
+}
+
 async fn pump_snapshots(
     stream: StreamReceiver<supervisor::endpoint::snapshot::TopicEndpoint>,
     sender: watch::Sender<Option<Snapshot>>,
     mut revision: u64,
 ) {
     loop {
-        let Ok(observed) = stream.recv().await else {
+        let snapshot = stream.recv().await.ok().map(|observed| {
+            let SnapshotDocument::V0(snapshot) = observed.body;
+            snapshot
+        });
+        if pump_snapshot_step(&sender, &mut revision, snapshot) == SnapshotPumpDecision::Stop {
             return;
-        };
-        let SnapshotDocument::V0(snapshot) = observed.body;
-        if snapshot.revision > revision {
-            revision = snapshot.revision;
-            if sender.send(Some(snapshot)).is_err() {
-                return;
-            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phoxal_api::supervisor::snapshot::{DaemonFailure, DaemonFailureReason, Lifecycle};
+
+    fn snapshot(revision: u64, lifecycle: Lifecycle) -> Snapshot {
+        Snapshot {
+            revision,
+            lifecycle,
+            startup: Vec::new(),
+            processes: Vec::new(),
+            failure: None,
+        }
+    }
+
+    #[test]
+    fn framework_selection_accepts_both_directions_within_one_line() {
+        for (older, newer) in [
+            (
+                FrameworkVersion::new(0, 59, 1),
+                FrameworkVersion::new(0, 59, 9),
+            ),
+            (
+                FrameworkVersion::new(1, 2, 1),
+                FrameworkVersion::new(1, 9, 9),
+            ),
+        ] {
+            assert!(ensure_compatible_framework(older, newer).is_ok());
+            assert!(ensure_compatible_framework(newer, older).is_ok());
+        }
+    }
+
+    #[test]
+    fn framework_selection_preserves_exact_incompatible_versions() {
+        let robot = FrameworkVersion::new(0, 59, 7);
+        let client = FrameworkVersion::new(0, 60, 3);
+
+        let error = ensure_compatible_framework(robot, client).expect_err("lines differ");
+        assert!(matches!(
+            error,
+            AttachError::IncompatibleFramework {
+                robot: actual_robot,
+                client: actual_client,
+            } if actual_robot == robot && actual_client == client
+        ));
+    }
+
+    #[test]
+    fn unreadable_frozen_bootstrap_reply_remains_a_framework_mismatch() {
+        let error = AttachError::UnreadableConnectReply {
+            detail: "phoxal/supervisor-connect/v1".to_string(),
+        };
+
+        assert!(error.is_framework_mismatch());
+    }
+
+    #[test]
+    fn ready_and_degraded_snapshots_succeed() {
+        for lifecycle in [Lifecycle::Ready, Lifecycle::Degraded] {
+            assert_eq!(
+                classify_readiness(&snapshot(1, lifecycle)).expect("ready lifecycle"),
+                Readiness::Ready
+            );
+        }
+    }
+
+    #[test]
+    fn failed_readiness_preserves_its_reason_and_detail() {
+        let mut failed = snapshot(1, Lifecycle::Failed);
+        failed.failure = Some(DaemonFailure::new(
+            DaemonFailureReason::LaunchFailed,
+            "participant launch plan was rejected",
+        ));
+
+        let error = classify_readiness(&failed).expect_err("failed lifecycle");
+        assert!(matches!(
+            error,
+            AttachError::ReadinessFailed(detail)
+                if detail == "LaunchFailed: participant launch plan was rejected"
+        ));
+    }
+
+    #[test]
+    fn stopping_and_stopped_snapshots_fail_before_readiness() {
+        for lifecycle in [Lifecycle::Stopping, Lifecycle::Stopped] {
+            assert!(matches!(
+                classify_readiness(&snapshot(1, lifecycle)),
+                Err(AttachError::StoppedBeforeReady)
+            ));
+        }
+    }
+
+    #[test]
+    fn starting_snapshot_remains_pending() {
+        assert_eq!(
+            classify_readiness(&snapshot(1, Lifecycle::Starting)).expect("starting lifecycle"),
+            Readiness::Pending
+        );
+    }
+
+    #[test]
+    fn snapshot_pump_installs_only_strictly_newer_revisions() {
+        let (sender, receiver) = watch::channel(Some(snapshot(7, Lifecycle::Starting)));
+        let mut revision = 7;
+
+        assert_eq!(
+            pump_snapshot_step(&sender, &mut revision, Some(snapshot(8, Lifecycle::Ready)),),
+            SnapshotPumpDecision::Continue
+        );
+        assert_eq!(revision, 8);
+        assert_eq!(
+            receiver.borrow().as_ref().map(|snapshot| snapshot.revision),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn snapshot_pump_ignores_duplicate_and_out_of_order_revisions() {
+        let (sender, receiver) = watch::channel(Some(snapshot(7, Lifecycle::Ready)));
+        let mut revision = 7;
+
+        for observed in [7, 6] {
+            assert_eq!(
+                pump_snapshot_step(
+                    &sender,
+                    &mut revision,
+                    Some(snapshot(observed, Lifecycle::Starting)),
+                ),
+                SnapshotPumpDecision::Continue
+            );
+        }
+        assert_eq!(revision, 7);
+        assert_eq!(
+            receiver.borrow().as_ref().map(|snapshot| snapshot.revision),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn snapshot_pump_stops_for_a_closed_source_or_watch_receiver() {
+        let (sender, receiver) = watch::channel(Some(snapshot(7, Lifecycle::Starting)));
+        let mut revision = 7;
+
+        assert_eq!(
+            pump_snapshot_step(&sender, &mut revision, None),
+            SnapshotPumpDecision::Stop
+        );
+        drop(receiver);
+        assert_eq!(
+            pump_snapshot_step(&sender, &mut revision, Some(snapshot(8, Lifecycle::Ready)),),
+            SnapshotPumpDecision::Stop
+        );
+        assert_eq!(revision, 7);
     }
 }

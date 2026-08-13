@@ -32,7 +32,7 @@ use super::{Control, serve};
 use crate::daemon::projection::ExecutionFacts;
 use crate::daemon::roster::Roster;
 use crate::daemon::state::ExecutionState;
-use crate::model::{ParticipantKind, ProcessState, StartupRequirement};
+use crate::model::process::{ProcessKey, ProcessState};
 use crate::state::store::SupervisorState;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -68,13 +68,8 @@ async fn a_real_attachment_observes_state_queries_diagnostics_and_stops() {
     let roster = Roster::from_bundle(&bundle);
     let board = SupervisorState::new();
     let state = ExecutionState::new(board.clone(), ExecutionFacts { roster });
-    let key: crate::model::ProcessKey = ParticipantId::new("brain").expect("participant").into();
-    board.upsert_process(
-        key.clone(),
-        ParticipantKind::Brain,
-        ProcessState::Starting,
-        StartupRequirement::Required,
-    );
+    let key: ProcessKey = ParticipantId::new("brain").expect("participant").into();
+    board.upsert_process(key.clone(), ProcessState::Starting);
     let stop = CancellationToken::new();
     let (actions, _action_rx) = mpsc::channel(4);
     let served = tokio::spawn(serve(
