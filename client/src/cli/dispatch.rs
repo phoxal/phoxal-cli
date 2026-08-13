@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 
 use super::args::{Cli, RootCommand};
 use super::context::AppContext;
-use super::output::Ui;
+use super::output::plain::Ui;
 
 impl RootCommand {
     /// Whether this invocation mounts the terminal application.

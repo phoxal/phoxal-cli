@@ -30,7 +30,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::joypad::manual::ManualDrive;
-use ports::{AttachmentEvents, InputCommands, LogReader, RuntimeReader};
+use ports::{
+    events::AttachmentEvents, input::InputCommands, logs::LogReader, runtimes::RuntimeReader,
+};
 use state::Stores;
 
 /// This client's diagnostic label in bus metadata. It is never identity: the

@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::cli::output::OutputContext;
-use crate::cli::output::Ui;
+use crate::cli::output::plain::Ui;
 use anyhow::Result;
 use phoxal_cli_project::source::Project;
 

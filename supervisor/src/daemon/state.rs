@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn a_store_change_republishes_without_the_process_machinery_knowing_this_type() {
-        use crate::model::{ParticipantKind, ProcessState, StartupRequirement};
+        use crate::model::process::ProcessState;
 
         let state = state();
         let before = state.snapshot().revision;
@@ -332,12 +332,9 @@ mod tests {
             .expect("the roster row")
             .key
             .clone();
-        state.board().upsert_process(
-            core.clone(),
-            ParticipantKind::Brain,
-            ProcessState::Ready,
-            StartupRequirement::Required,
-        );
+        state
+            .board()
+            .upsert_process(core.clone(), ProcessState::Ready);
 
         let snapshot = state.snapshot();
         assert!(snapshot.revision > before);

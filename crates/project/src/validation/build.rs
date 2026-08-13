@@ -68,7 +68,7 @@ pub(crate) fn expected_kind_for_source_participant(kind: SourceParticipantKind) 
 }
 
 /// The root brain's `Config` is fixed to `()` by `#[phoxal::brain]`, so its
-/// embedded schema is exactly the unit schema ().
+/// embedded schema is exactly the unit schema.
 ///
 /// This is the check-engine half of that gate. Runtime-bundle verification
 /// enforces the identical rule over a staged `bin/brain`, which covers
@@ -146,5 +146,80 @@ impl TryFrom<RawParticipantReport> for graph_check::ParticipantApis {
             config_schema: raw.config_schema,
             scope: graph_check::ParticipantScope::Graph,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::check::source::SourceParticipant;
+    use crate::validation::{
+        CheckGraphContext, RawArtifact, RawParticipantReport, run_check_with_context,
+    };
+    use anyhow::{Result, bail};
+    use std::path::PathBuf;
+
+    /// A brain report carrying `schema` as its embedded config schema, so the
+    /// check engine can be driven against a root binary that is not a valid brain.
+    fn raw_brain(schema: Option<serde_json::Value>) -> RawParticipantReport {
+        RawParticipantReport {
+            artifact: RawArtifact {
+                kind: "brain".to_string(),
+                id: "brain".to_string(),
+            },
+            config_schema: schema,
+        }
+    }
+
+    fn fixture_brain_source() -> SourceParticipant {
+        SourceParticipant::brain(PathBuf::from("/tmp/robot"), "testbot-robot")
+    }
+
+    /// The check-engine half of the unit-config gate.
+    ///
+    /// `phoxal validate` and the Webots simulation path never open a staged
+    /// layout, so runtime-bundle verification's identical rule cannot protect
+    /// them. A root binary whose id and kind are a perfectly good `brain` but
+    /// which embeds a real config surface must still fail here, before any
+    /// supervisor startup, and the ordinary unit schema must still pass.
+    #[test]
+    fn a_brain_declaring_a_config_surface_fails_the_check_engine() -> Result<()> {
+        let sources = vec![fixture_brain_source()];
+        let check = |schema: Option<serde_json::Value>| {
+            run_check_with_context(
+                &[],
+                &sources,
+                CheckGraphContext { robot: None },
+                |_| bail!("no platform artifact reports are fetched here"),
+                |_| Ok(raw_brain(schema.clone())),
+            )
+        };
+
+        let error = check(Some(serde_json::json!({
+            "type": "object",
+            "properties": {"speed": {"type": "integer"}},
+        })))
+        .expect_err("a brain embedding a real config surface must be rejected")
+        .to_string();
+        assert!(error.contains("brain"), "{error}");
+        assert!(error.contains("takes no config at all"), "{error}");
+
+        // A missing schema is equally not the unit schema.
+        let error = check(None)
+            .expect_err("a brain with no embedded config schema must be rejected")
+            .to_string();
+        assert!(error.contains("takes no config at all"), "{error}");
+
+        // The real `#[phoxal::brain]` record passes and enters the graph.
+        let outcome = check(Some(serde_json::json!({"type": "null"})))?;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(
+            outcome
+                .checked_participants
+                .iter()
+                .map(|participant| participant.participant_id.as_str())
+                .collect::<Vec<_>>(),
+            ["brain"]
+        );
+        Ok(())
     }
 }

@@ -89,7 +89,7 @@ pub struct WorkspaceComponentCrate {
 }
 
 /// The root Cargo package, validated as the project's one mandatory brain
-/// source ().
+/// source.
 ///
 /// Cargo metadata is the sole authority here: the target count and the bin
 /// target name come from the already-loaded `cargo metadata --locked` graph,
@@ -539,7 +539,7 @@ mod tests {
     }
 
     /// Cargo metadata, never `[[bin]]` parsing or directory naming, decides
-    /// the root brain's target shape ().
+    /// the root brain's target shape.
     fn root_package(targets: Vec<Target>) -> Package {
         Package {
             id: "root".to_string(),

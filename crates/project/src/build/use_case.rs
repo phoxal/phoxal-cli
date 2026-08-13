@@ -270,7 +270,7 @@ impl Worker {
     /// staging, validation, and archive with the container-built binaries. The
     /// command adapter already holds the Build lock, so the snapshot, the
     /// compile, and the staging that reads that same frozen snapshot all happen
-    /// under one lock (, finding B).
+    /// under one lock.
     fn build_container(
         &self,
         project_root: &Path,
@@ -282,7 +282,7 @@ impl Worker {
         // `resolved`; it must remain alive until staging consumes that value.
 
         // Stage manifests, assets, AND binaries from the SAME frozen snapshot the
-        // container compiled, never the live tree (, finding B): the container
+        // container compiled, never the live tree: the container
         // wrote the target binaries into the project's Cargo target directory,
         // mounted at `<snapshot>/target`, and staging reads
         // robot.yaml and assets from `<snapshot>` too, so a bundle can never pair
@@ -955,7 +955,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 /// How a `git ls-files` entry materializes on disk, deciding how the snapshot
-/// treats it (, finding B).
+/// treats it.
 enum SnapshotEntry {
     /// A regular file - copied byte for byte.
     File,
@@ -1001,7 +1001,7 @@ fn classify_snapshot_entry(source: &Path) -> Result<SnapshotEntry> {
 /// project to be a git working tree.
 ///
 /// Symlinks are preserved as symlinks (never dereferenced), so the container
-/// compiles against a faithful copy of the tree (, finding B). A submodule
+/// compiles against a faithful copy of the tree. A submodule
 /// is rejected with a precise error: v0 does not include submodule working trees
 /// in the snapshot, so a build that would silently drop submodule sources fails
 /// loudly instead.

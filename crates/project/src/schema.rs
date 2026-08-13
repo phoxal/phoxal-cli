@@ -2,7 +2,7 @@
 //!
 //! Every typed Phoxal document self-describes with a `schema:` tag
 //! (`schema: phoxal/robot/v0`, ...), and those tags are the whole
-//! compatibility contract (). Before the strict typed parser runs, the CLI
+//! compatibility contract. Before the strict typed parser runs, the CLI
 //! probes the declared revision and answers the one question the parser cannot:
 //! *which side is out of date*.
 //!

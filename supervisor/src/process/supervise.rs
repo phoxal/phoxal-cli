@@ -8,34 +8,34 @@ use super::stages::{
     StageReporter, SupervisionStage, WaitBudget, await_stage_ready, maybe_publish_startup_outcome,
     spawn_until_pending,
 };
-use crate::model::{ProjectLifecycle, RuntimeFailurePolicy};
+use crate::model::lifecycle::ProjectLifecycle;
+use crate::model::process::{BoundedString, ProcessKey};
 use crate::state::store::SupervisorState;
 use anyhow::Result;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use std::time::Instant;
 use tokio::time::MissedTickBehavior;
 
-pub async fn supervise_until_shutdown(
+const MAX_TEARDOWN_FAILURES: usize = 40;
+
+pub(crate) async fn supervise_until_shutdown(
     stages: Vec<SupervisionStage>,
     board: SupervisorState,
     progress: StageReporter,
     mut options: SupervisorOptions,
 ) -> Result<()> {
-    let failed_required = board
+    let failed_processes = board
         .snapshot()
         .processes
         .into_iter()
-        .filter(|(_, entry)| {
-            entry.descriptor.startup_requirement == crate::model::StartupRequirement::Required
-                && entry.status.actual == crate::model::ProcessState::Failed
-        })
+        .filter(|(_, entry)| entry.status.actual == crate::model::process::ProcessState::Failed)
         .map(|(key, _)| key.to_string())
         .collect::<Vec<_>>();
-    if !failed_required.is_empty() {
+    if !failed_processes.is_empty() {
         let reason = format!(
-            "required process(es) failed before startup: {}",
-            failed_required.join(", ")
+            "process(es) failed before startup: {}",
+            failed_processes.join(", ")
         );
         board.fail(&reason);
         progress.failed(&reason);
@@ -46,12 +46,8 @@ pub async fn supervise_until_shutdown(
     let mut stage_queue: VecDeque<SupervisionStage> = stages.into();
     let token = options.token.clone();
 
-    // Spawn every leading stage that has nothing to wait for back-to-back,
-    // then park on the first stage that actually gates the next one. A
-    // zero-wait stage is uncommon today, since every real stage waits on its
-    // participants' Liveliness - but the Infrastructure stage empties as its
-    // tools are removed, so this keeps that case from stalling the whole
-    // startup on an empty `select!` branch.
+    // Skip empty stages and wait on the first stage with participant readiness
+    // work, so an empty stage never leaves the select loop without a branch.
     let mut pending_stage =
         spawn_until_pending(&mut running, &board, &progress, &mut stage_queue).await;
     maybe_publish_startup_outcome(&board, &options, &pending_stage).await;
@@ -74,16 +70,11 @@ pub async fn supervise_until_shutdown(
                     break 'supervision;
                 }
             }
-            // Recreated fresh every loop pass (the same pattern as
-            // `recv_action` above): the ONLY state that must survive a
-            // cancelled poll is the stage's own deadline, which lives in
-            // `pending_stage` outside this future, not inside it - so
-            // recreating the await is safe and never resets the timeout.
+            // The deadline lives in `pending_stage`, so recreating this
+            // cancellation-safe wait does not reset a stage timeout.
             result = await_stage_ready(
                 &board,
                 pending_stage.as_ref().map_or(&[][..], |stage| stage.ready_ids.as_slice()),
-                pending_stage.as_ref().map_or(&[][..], |stage| stage.failure_ids.as_slice()),
-                pending_stage.as_ref().map_or(&[][..], |stage| stage.optional_ids.as_slice()),
                 pending_stage.as_ref().map_or(WaitBudget::Unbounded, |stage| match stage.deadline {
                     Some(deadline) => WaitBudget::Bounded(deadline.saturating_duration_since(Instant::now())),
                     None => WaitBudget::Unbounded,
@@ -128,23 +119,16 @@ pub async fn supervise_until_shutdown(
                         break 'supervision;
                     }
                     if participant.failed
-                        && matches!(board.snapshot().lifecycle, ProjectLifecycle::Ready | ProjectLifecycle::Degraded)
+                        && board.snapshot().lifecycle == ProjectLifecycle::Ready
                     {
-                        match participant.spec.runtime_failure {
-                            RuntimeFailurePolicy::KeepProjectDegraded => {
-                                board.set_lifecycle(ProjectLifecycle::Degraded);
-                            }
-                            RuntimeFailurePolicy::StopProject => {
-                                let reason = format!(
-                                    "process {} exhausted its restart policy; StopProject",
-                                    participant.spec.key
-                                );
-                                board.fail(&reason);
-                                supervisor_error = Some(anyhow::anyhow!(reason));
-                                token.cancel();
-                                break 'supervision;
-                            }
-                        }
+                        let reason = format!(
+                            "process {} exhausted its restart policy",
+                            participant.spec.key
+                        );
+                        board.fail(&reason);
+                        supervisor_error = Some(anyhow::anyhow!(reason));
+                        token.cancel();
+                        break 'supervision;
                     }
                 }
             }
@@ -197,15 +181,56 @@ pub(crate) async fn handle_action(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TeardownFailureKind {
+    ChildStop,
+    WorkerJoin,
+}
+
+impl TeardownFailureKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ChildStop => "child stop",
+            Self::WorkerJoin => "worker join",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TeardownFailure {
+    participant: ProcessKey,
+    kind: TeardownFailureKind,
+    detail: BoundedString,
+}
+
+impl TeardownFailure {
+    fn new(participant: ProcessKey, kind: TeardownFailureKind, detail: impl AsRef<str>) -> Self {
+        Self {
+            participant,
+            kind,
+            detail: BoundedString::new(detail),
+        }
+    }
+
+    fn render(&self) -> String {
+        format!(
+            "{} {}: {}",
+            self.participant,
+            self.kind.label(),
+            self.detail.as_str()
+        )
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct TeardownReport {
-    failures: Vec<String>,
+    failures: Vec<TeardownFailure>,
 }
 
 impl TeardownReport {
-    fn push(&mut self, failure: impl Into<String>) {
-        if self.failures.len() < crate::model::MAX_TEARDOWN_FAILURES {
-            self.failures.push(failure.into());
+    fn push(&mut self, failure: TeardownFailure) {
+        if self.failures.len() < MAX_TEARDOWN_FAILURES {
+            self.failures.push(failure);
         }
     }
 
@@ -214,7 +239,21 @@ impl TeardownReport {
     }
 
     fn summary(&self) -> String {
-        format!("supervisor teardown failed: {}", self.failures.join("; "))
+        let mut failures = self.failures.clone();
+        failures.sort_by(|left, right| {
+            left.participant
+                .cmp(&right.participant)
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| left.detail.as_str().cmp(right.detail.as_str()))
+        });
+        format!(
+            "supervisor teardown failed: {}",
+            failures
+                .iter()
+                .map(TeardownFailure::render)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
     }
 
     fn into_result(self) -> Result<()> {
@@ -222,6 +261,47 @@ impl TeardownReport {
             Ok(())
         } else {
             anyhow::bail!(self.summary())
+        }
+    }
+}
+
+fn record_worker_result(
+    report: &mut TeardownReport,
+    workers: &mut HashMap<tokio::task::Id, ProcessKey>,
+    result: std::result::Result<
+        (tokio::task::Id, std::result::Result<(), TeardownFailure>),
+        tokio::task::JoinError,
+    >,
+) {
+    match result {
+        Ok((task_id, result)) => {
+            let Some(participant) = workers.remove(&task_id) else {
+                tracing::error!(?task_id, "completed teardown worker was not registered");
+                return;
+            };
+            if let Err(failure) = result {
+                debug_assert_eq!(failure.participant, participant);
+                report.push(failure);
+            }
+        }
+        Err(error) => {
+            let task_id = error.id();
+            let Some(participant) = workers.remove(&task_id) else {
+                tracing::error!(?task_id, "failed teardown worker was not registered");
+                return;
+            };
+            let detail = if error.is_panic() {
+                format!("teardown worker panicked: {error}")
+            } else if error.is_cancelled() {
+                format!("teardown worker was cancelled: {error}")
+            } else {
+                format!("teardown worker failed: {error}")
+            };
+            report.push(TeardownFailure::new(
+                participant,
+                TeardownFailureKind::WorkerJoin,
+                detail,
+            ));
         }
     }
 }
@@ -240,6 +320,7 @@ pub(crate) async fn shutdown_all(
     stages.dedup();
     for stage in stages.into_iter().rev() {
         let mut joins = tokio::task::JoinSet::new();
+        let mut workers = HashMap::new();
         for participant in running
             .iter_mut()
             .filter(|participant| participant.shutdown_stage == stage)
@@ -249,36 +330,38 @@ pub(crate) async fn shutdown_all(
             let stderr = participant.stderr_task.take();
             let spec = participant.spec.clone();
             let board = board.clone();
-            joins.spawn(async move {
+            let key = spec.key.clone();
+            let task = joins.spawn(async move {
                 if let Some(child) = child.as_mut() {
                     tracing::debug!(process = %spec.key, "stopping supervised process");
                     let failure = if let Err(error) = stop_child(child, spec.shutdown_grace).await {
                         board.record_failure(
                             &spec.key,
-                            crate::model::ProcessFailureKind::Cleanup,
+                            crate::model::process::ProcessFailureKind::Cleanup,
                             None,
                             format!("failed to stop: {error:#}"),
                         );
-                        Some(format!("{}: {error:#}", spec.key))
+                        Some(TeardownFailure::new(
+                            spec.key.clone(),
+                            TeardownFailureKind::ChildStop,
+                            format!("{error:#}"),
+                        ))
                     } else {
                         None
                     };
                     board.set_pid(&spec.key, None);
                     join_reader(stdout).await;
                     join_reader(stderr).await;
-                    return failure;
+                    return failure.map_or(Ok(()), Err);
                 }
                 join_reader(stdout).await;
                 join_reader(stderr).await;
-                None
+                Ok(())
             });
+            workers.insert(task.id(), key);
         }
-        while let Some(result) = joins.join_next().await {
-            match result {
-                Ok(Some(failure)) => report.push(failure),
-                Ok(None) => {}
-                Err(error) => report.push(format!("shutdown worker failed: {error}")),
-            }
+        while let Some(result) = joins.join_next_with_id().await {
+            record_worker_result(&mut report, &mut workers, result);
         }
     }
     report
@@ -286,9 +369,15 @@ pub(crate) async fn shutdown_all(
 
 #[cfg(test)]
 mod tests {
-    use crate::model::ProjectLifecycle;
+    use crate::model::lifecycle::ProjectLifecycle;
+    use crate::model::process::ProcessKey;
+    use phoxal_runtime_contract::identity::ParticipantId;
 
     use super::*;
+
+    fn key(id: &str) -> ProcessKey {
+        ParticipantId::new(id).expect("fixture participant").into()
+    }
 
     #[tokio::test]
     async fn cancellation_publishes_orderly_terminal_state() {
@@ -307,5 +396,105 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state.snapshot().lifecycle, ProjectLifecycle::Stopped);
+    }
+
+    #[test]
+    fn clean_teardown_report_succeeds() {
+        let report = TeardownReport::default();
+        assert!(report.is_clean());
+        report.into_result().expect("a clean report succeeds");
+    }
+
+    #[test]
+    fn stop_failure_keeps_its_typed_participant_association() {
+        let participant = key("drive");
+        let mut report = TeardownReport::default();
+        report.push(TeardownFailure::new(
+            participant.clone(),
+            TeardownFailureKind::ChildStop,
+            "termination timed out",
+        ));
+
+        assert_eq!(report.failures.len(), 1);
+        let failure = &report.failures[0];
+        assert_eq!(failure.participant, participant);
+        assert_eq!(failure.kind, TeardownFailureKind::ChildStop);
+        assert_eq!(failure.detail.as_str(), "termination timed out");
+    }
+
+    #[tokio::test]
+    async fn worker_join_failure_keeps_its_participant_association() {
+        let participant = key("vision");
+        let mut joins = tokio::task::JoinSet::new();
+        let task = joins.spawn(std::future::pending::<Result<(), TeardownFailure>>());
+        let mut workers = HashMap::from([(task.id(), participant.clone())]);
+        task.abort();
+        let result = joins
+            .join_next_with_id()
+            .await
+            .expect("the worker completed");
+        let mut report = TeardownReport::default();
+        record_worker_result(&mut report, &mut workers, result);
+
+        assert!(workers.is_empty());
+        assert_eq!(report.failures.len(), 1);
+        let failure = &report.failures[0];
+        assert_eq!(failure.participant, participant);
+        assert_eq!(failure.kind, TeardownFailureKind::WorkerJoin);
+        assert!(
+            failure
+                .detail
+                .as_str()
+                .starts_with("teardown worker was cancelled:"),
+            "{}",
+            failure.detail.as_str()
+        );
+    }
+
+    #[test]
+    fn teardown_failure_count_is_bounded() {
+        let mut report = TeardownReport::default();
+        for number in 0..=MAX_TEARDOWN_FAILURES {
+            report.push(TeardownFailure::new(
+                key(&format!("worker{number}")),
+                TeardownFailureKind::ChildStop,
+                "stop failed",
+            ));
+        }
+
+        assert_eq!(report.failures.len(), MAX_TEARDOWN_FAILURES);
+    }
+
+    #[test]
+    fn teardown_failure_detail_is_bounded() {
+        let mut report = TeardownReport::default();
+        report.push(TeardownFailure::new(
+            key("drive"),
+            TeardownFailureKind::ChildStop,
+            "x".repeat(BoundedString::FAILURE_MAX_BYTES + 1),
+        ));
+
+        assert!(report.failures[0].detail.as_str().len() <= BoundedString::FAILURE_MAX_BYTES);
+        assert!(report.failures[0].detail.as_str().ends_with('…'));
+    }
+
+    #[test]
+    fn teardown_summary_is_deterministic() {
+        let mut report = TeardownReport::default();
+        report.push(TeardownFailure::new(
+            key("zeta"),
+            TeardownFailureKind::WorkerJoin,
+            "z failure",
+        ));
+        report.push(TeardownFailure::new(
+            key("alpha"),
+            TeardownFailureKind::ChildStop,
+            "a failure",
+        ));
+
+        assert_eq!(
+            report.summary(),
+            "supervisor teardown failed: alpha child stop: a failure; zeta worker join: z failure"
+        );
     }
 }

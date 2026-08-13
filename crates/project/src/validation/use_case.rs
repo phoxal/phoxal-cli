@@ -59,7 +59,7 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         },
     )?;
 
-    // Declaration-only invariants first (), matching resolution's
+    // Declaration-only invariants first, matching resolution's
     // ordering: a dual-name or official-identity declaration must fail
     // before any Cargo workspace reasoning, source-check or otherwise.
     crate::resolve::project::validate_runtime_declarations(&robot)
@@ -156,7 +156,7 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
 }
 
 /// What `validate` is about to compile, in prose. The root brain is always
-/// built (); declared service crates are built only when the
+/// built; declared service crates are built only when the
 /// robot declares any, so the brain-only case must read naturally rather than
 /// announcing "0 declared service crates".
 fn compile_notice(declared_services: usize) -> String {
@@ -224,7 +224,7 @@ fn workspace_runtime_report(robot: &Robot, project: &LockedProject) -> Workspace
 /// The brain carries no config at all (`#[phoxal::brain]` fixes `Config = ()`),
 /// but it is built and inspected here anyway so `phoxal validate` proves the
 /// root package really is a brain - the right id, kind, and unit config schema -
-/// before anything else depends on it ().
+/// before anything else depends on it.
 ///
 /// The config-bearing half is a `services/<id>` crate whose `<id>` is a declared key in
 /// `robot.services`. An official identity can never be a declared key
@@ -366,7 +366,7 @@ services:
     }
 
     /// The brain-only project is the common case for a fresh robot, so its
-    /// notice must not mention zero service crates ().
+    /// notice must not mention zero service crates.
     #[test]
     fn the_compile_notice_reads_naturally_for_every_declared_service_count() {
         assert!(compile_notice(0).starts_with("compiling the root brain to validate"));

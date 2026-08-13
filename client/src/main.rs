@@ -48,7 +48,9 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cli::args::Cli;
 use crate::cli::context::AppContext;
-use crate::cli::output::{SessionAwareWriter, Ui, tracing_ansi_enabled};
+use crate::cli::output::diagnostics::SessionAwareWriter;
+use crate::cli::output::plain::Ui;
+use crate::cli::output::tracing_ansi_enabled;
 
 #[tokio::main()]
 async fn main() -> ExitCode {

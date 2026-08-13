@@ -3,28 +3,27 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::model::{ParticipantKind, ProcessKey, RuntimeFailurePolicy, StartupRequirement};
+use super::participant::ParticipantKind;
+use super::process::ProcessKey;
 
-pub const RESTART_DELAY: Duration = Duration::from_secs(2);
-pub const START_LIMIT_INTERVAL: Duration = Duration::from_secs(60);
-pub const START_LIMIT_BURST: usize = 5;
+const RESTART_DELAY: Duration = Duration::from_secs(2);
+const START_LIMIT_INTERVAL: Duration = Duration::from_secs(60);
+const START_LIMIT_BURST: usize = 5;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ParticipantSpec {
-    pub spawn: bool,
-    pub key: ProcessKey,
-    pub kind: ParticipantKind,
-    pub executable: PathBuf,
-    pub args: Vec<String>,
-    pub shutdown_grace: Duration,
-    pub startup_requirement: StartupRequirement,
-    pub runtime_failure: RuntimeFailurePolicy,
-    pub restart_policy: RestartPolicy,
+pub(crate) struct ParticipantSpec {
+    pub(crate) spawn: bool,
+    pub(crate) key: ProcessKey,
+    pub(crate) kind: ParticipantKind,
+    pub(crate) executable: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) shutdown_grace: Duration,
+    pub(crate) restart_policy: RestartPolicy,
 }
 
 impl ParticipantSpec {
     #[must_use]
-    pub fn command_line(&self) -> String {
+    pub(crate) fn command_line(&self) -> String {
         std::iter::once(self.executable.display().to_string())
             .chain(self.args.iter().cloned())
             .collect::<Vec<_>>()
@@ -33,10 +32,10 @@ impl ParticipantSpec {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RestartPolicy {
-    pub restart_delay: Duration,
-    pub start_limit_interval: Duration,
-    pub start_limit_burst: usize,
+pub(crate) struct RestartPolicy {
+    pub(crate) restart_delay: Duration,
+    pub(crate) start_limit_interval: Duration,
+    pub(crate) start_limit_burst: usize,
 }
 
 impl Default for RestartPolicy {

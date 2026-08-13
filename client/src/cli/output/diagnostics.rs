@@ -165,7 +165,7 @@ pub(crate) fn phase_finished(id: impl Into<PhaseId>, outcome: PhaseOutcome, elap
 /// (if any) is currently listening is decided per-write by `current_sender`,
 /// not by rebuilding the subscriber.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SessionAwareWriter;
+pub(crate) struct SessionAwareWriter;
 
 impl<'a> MakeWriter<'a> for SessionAwareWriter {
     type Writer = SessionWriter;
@@ -176,7 +176,7 @@ impl<'a> MakeWriter<'a> for SessionAwareWriter {
 }
 
 #[derive(Debug)]
-pub struct SessionWriter;
+pub(crate) struct SessionWriter;
 
 impl Write for SessionWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {

@@ -1,3 +1,3 @@
 //! Systemd notification authority owned by the foreground supervisor.
 
-pub mod notify;
+pub(crate) mod notify;

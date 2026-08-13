@@ -4,18 +4,15 @@ use std::fmt;
 use std::time::SystemTime;
 
 use phoxal_runtime_contract::identity::ParticipantId;
-use serde::{Deserialize, Serialize};
 
-use super::{ParticipantKind, StartupRequirement};
 use phoxal_runtime_contract::identity::ProducerId;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ProcessKey(ParticipantId);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ProcessKey(ParticipantId);
 
 impl ProcessKey {
     #[must_use]
-    pub const fn participant(&self) -> &ParticipantId {
+    pub(crate) const fn participant(&self) -> &ParticipantId {
         &self.0
     }
 }
@@ -38,20 +35,16 @@ impl fmt::Display for ProcessKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcessState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessState {
     Starting,
     Ready,
-    Degraded,
     Restarting,
     Failed,
-    Stopped,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcessFailureKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessFailureKind {
     Spawn,
     Exit,
     ReadinessTimeout,
@@ -59,26 +52,25 @@ pub enum ProcessFailureKind {
     Cleanup,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExitDescription {
-    pub code: Option<i32>,
-    pub signal: Option<i32>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExitDescription {
+    pub(crate) code: Option<i32>,
+    pub(crate) signal: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BoundedString(String);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundedString(String);
 
 impl BoundedString {
-    pub const MAX_BYTES: usize = 32 * 1024;
-    pub const FAILURE_MAX_BYTES: usize = 4 * 1024;
+    pub(crate) const FAILURE_MAX_BYTES: usize = 4 * 1024;
 
     #[must_use]
-    pub fn new(value: impl AsRef<str>) -> Self {
+    pub(crate) fn new(value: impl AsRef<str>) -> Self {
         Self::with_max_bytes(value, Self::FAILURE_MAX_BYTES)
     }
 
     #[must_use]
-    pub fn with_max_bytes(value: impl AsRef<str>, maximum: usize) -> Self {
+    pub(crate) fn with_max_bytes(value: impl AsRef<str>, maximum: usize) -> Self {
         let value = value.as_ref();
         if value.len() <= maximum {
             return Self(value.to_string());
@@ -96,53 +88,27 @@ impl BoundedString {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-impl<'de> Deserialize<'de> for BoundedString {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        if value.len() > Self::MAX_BYTES {
-            return Err(serde::de::Error::custom(format!(
-                "bounded supervisor string is {} bytes; limit is {}",
-                value.len(),
-                Self::MAX_BYTES
-            )));
-        }
-        Ok(Self(value))
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessFailure {
+    pub(crate) kind: ProcessFailureKind,
+    pub(crate) occurred_at: SystemTime,
+    pub(crate) exit: Option<ExitDescription>,
+    pub(crate) detail: BoundedString,
+    pub(crate) stderr_tail: Option<BoundedString>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessFailure {
-    pub kind: ProcessFailureKind,
-    pub occurred_at: SystemTime,
-    pub exit: Option<ExitDescription>,
-    pub detail: BoundedString,
-    pub stderr_tail: Option<BoundedString>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessDescriptor {
-    pub key: ProcessKey,
-    pub kind: ParticipantKind,
-    pub artifact: String,
-    pub owner: String,
-    pub startup_requirement: StartupRequirement,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessStatus {
-    pub actual: ProcessState,
-    pub pid: Option<u32>,
-    pub producer: Option<ProducerId>,
-    pub restart_count_total: u64,
-    pub last_failure: Option<ProcessFailure>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessStatus {
+    pub(crate) actual: ProcessState,
+    pub(crate) pid: Option<u32>,
+    pub(crate) producer: Option<ProducerId>,
+    pub(crate) restart_count_total: u64,
+    pub(crate) last_failure: Option<ProcessFailure>,
 }
 
 impl Default for ProcessStatus {
@@ -157,8 +123,7 @@ impl Default for ProcessStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessEntry {
-    pub descriptor: ProcessDescriptor,
-    pub status: ProcessStatus,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessEntry {
+    pub(crate) status: ProcessStatus,
 }

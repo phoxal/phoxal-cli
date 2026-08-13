@@ -190,7 +190,7 @@ pub fn host_architecture() -> object::Architecture {
 
 /// The object container format binaries for THIS host use: Mach-O on Apple
 /// hosts and ELF on Linux. Host layout validation checks it
-/// explicitly (): deferring format to the OS exec would let a
+/// explicitly: deferring format to the OS exec would let a
 /// same-CPU foreign-OS bundle (an aarch64 Linux bundle on an Apple Silicon
 /// host) validate and then crash at spawn with an exec-format error.
 #[must_use]
@@ -288,7 +288,7 @@ pub fn expected_target_for_triple(triple: &str) -> Result<ExpectedTarget> {
 /// `run`/`start`: a staged/extracted layout only ever runs on the host it was
 /// prepared for, so its selected binaries must match the host signature -
 /// format included, so a same-CPU foreign-OS bundle fails at inspection with a
-/// precise diagnostic instead of an exec-format crash ().
+/// precise diagnostic instead of an exec-format crash.
 #[must_use]
 pub fn expected_target_for_host() -> ExpectedTarget {
     let endianness = if cfg!(target_endian = "big") {
@@ -311,7 +311,7 @@ pub fn expected_target_for_host() -> ExpectedTarget {
 /// expectation (an exotic host this mapping does not know) is a precise error,
 /// not a skipped gate: no supported CLI/framework release target can produce a
 /// complete layout for such a host, so validating nothing would only defer the
-/// failure to spawn time ().
+/// failure until spawn time.
 pub fn ensure_target(object_bytes: &[u8], describe: &str, expected: &ExpectedTarget) -> Result<()> {
     if expected.architecture == object::Architecture::Unknown {
         anyhow::bail!(
@@ -488,7 +488,7 @@ mod tests {
     fn host_target_binary_passes_and_a_foreign_arch_binary_is_rejected() -> Result<()> {
         let host = expected_target_for_host();
         // Pick a concrete arch that is NOT the host's, so the assertion holds
-        // on any runner. The host path validates format too (), so the
+        // on any runner. The host path validates format too, so the
         // synthetic host object must use the host's own container format and
         // section naming.
         let foreign = if host.architecture == object::Architecture::X86_64 {
@@ -528,7 +528,7 @@ mod tests {
         Ok(())
     }
 
-    /// Finding C: a same-CPU wrong-OS binary (a Mach-O x86_64 offered for
+    /// A same-CPU wrong-OS binary (a Mach-O x86_64 offered for
     /// `x86_64-unknown-linux-gnu`) is rejected on the container format, not
     /// waved through by a CPU-only check.
     #[test]
@@ -551,7 +551,7 @@ mod tests {
         Ok(())
     }
 
-    /// Finding C: a triple the validator cannot authoritatively map is rejected
+    /// A triple the validator cannot authoritatively map is rejected
     /// outright with a "cannot validate target" error rather than silently
     /// passing every binary (the old CPU-only gate disabled itself on Unknown).
     #[test]

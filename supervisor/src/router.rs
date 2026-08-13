@@ -19,12 +19,12 @@ use std::sync::Arc;
 /// What to do when the fabric disappears under a running session. It receives
 /// the rendered reason rather than a shared state handle, so the caller decides
 /// what losing the router means to it.
-pub type RouterLost = Arc<dyn Fn(String) + Send + Sync>;
+pub(crate) type RouterLost = Arc<dyn Fn(String) + Send + Sync>;
 
 /// The running embedded router. Holding it keeps the fabric up; dropping or
 /// [`EmbeddedRouter::close`]ing it takes every link down with it.
 #[derive(Debug)]
-pub struct EmbeddedRouter {
+pub(crate) struct EmbeddedRouter {
     router: phoxal_bus::Router,
     /// Watches this router from the outside. Closed before the router is, so
     /// an ordinary shutdown is never reported as a loss.
@@ -38,7 +38,7 @@ impl EmbeddedRouter {
     ///
     /// The watch goes first, so a deliberate stop is not reported as the fabric
     /// failing.
-    pub async fn close(self) -> Result<()> {
+    pub(crate) async fn close(self) -> Result<()> {
         if let Err(error) = self.watch.close().await {
             tracing::debug!("failed to close the router watch: {error}");
         }
@@ -65,7 +65,7 @@ impl EmbeddedRouter {
 /// receives the rendered reason rather than a shared state handle so the
 /// caller decides what losing the router means to it: for `phoxald` it is a
 /// typed `RouterLost` failure that terminates the execution.
-pub async fn start_embedded_router(
+pub(crate) async fn start_embedded_router(
     execution: phoxal_runtime_contract::identity::ExecutionId,
     endpoint: String,
     config: Option<&Path>,

@@ -23,7 +23,7 @@ impl DriverPolicy {
     /// subset against `available` - the full set of driven component-instance
     /// ids from the robot model. This must validate against every driven
     /// instance, not the constructed plan: the plan already has excluded drivers
-    /// removed (), so an unknown id would otherwise be reported against an
+    /// removed, so an unknown id would otherwise be reported against an
     /// empty or narrowed list.
     pub(crate) fn from_options(options: &RunOptions, available: &BTreeSet<String>) -> Result<Self> {
         let subset = options
@@ -111,7 +111,7 @@ pub(crate) fn report_excluded_drivers(
 }
 
 /// Surface workspace runtime crates that are present but not declared in
-/// robot.yaml (): legal drift, not built or launched. One advisory line
+/// robot.yaml: legal drift, not built or launched. One advisory line
 /// naming each crate and the map that would declare it, so authors notice a
 /// service they forgot to declare. No output when there is no drift.
 pub(crate) fn report_undeclared_runtimes(
@@ -138,7 +138,7 @@ pub(crate) fn report_undeclared_runtimes(
 
 /// The full set of driven component-instance ids from a compiled robot model.
 /// A `--driver` subset is validated against this - not the constructed plan,
-/// which already drops the drivers the policy excludes ().
+/// which already drops the drivers the policy excludes.
 pub(crate) fn driven_instances(
     robot: &phoxal_manifest::source::robot::v0::Manifest,
 ) -> BTreeSet<String> {

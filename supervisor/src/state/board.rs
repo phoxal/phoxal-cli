@@ -10,7 +10,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::{ProcessEntry, ProcessKey, ProjectLifecycle};
+use crate::model::lifecycle::ProjectLifecycle;
+use crate::model::process::{ProcessEntry, ProcessKey};
 
 /// Everything the process machinery authoritatively knows.
 #[derive(Clone, Debug, PartialEq)]

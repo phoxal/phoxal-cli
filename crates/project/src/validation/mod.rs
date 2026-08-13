@@ -103,6 +103,3 @@ pub(crate) use build::{
 };
 mod errors;
 pub(crate) use errors::ensure_check_outcome_ok;
-
-#[cfg(test)]
-mod tests;

@@ -19,9 +19,7 @@ use phoxal_cli_observation::{JoypadDevicesSample, ManualDriveUnsupported};
 use phoxal_client::robot as api;
 
 use manual::ManualDrive;
-
-pub(crate) use registry::RegistryChange;
-use registry::{PadHandle, Registry};
+use registry::{PadHandle, Registry, RegistryChange};
 
 /// How many stop commands a revoked authority queues. Manual stop is the one
 /// message that must not be lost to a single dropped publish, so it repeats.
@@ -43,7 +41,10 @@ impl Joypad {
     /// `drive` is absent when the robot's model cannot support manual input;
     /// `unsupported` then carries the typed reason. The pads are still
     /// enumerated and shown, but no command is ever derived.
-    pub fn open(drive: Option<ManualDrive>, unsupported: Option<ManualDriveUnsupported>) -> Self {
+    pub(crate) fn open(
+        drive: Option<ManualDrive>,
+        unsupported: Option<ManualDriveUnsupported>,
+    ) -> Self {
         let (backend, backend_unavailable) = match Gilrs::new() {
             Ok(backend) => (Some(backend), None),
             Err(error) => {
@@ -64,12 +65,12 @@ impl Joypad {
         joypad
     }
 
-    pub fn sample(&self) -> JoypadDevicesSample {
+    pub(crate) fn sample(&self) -> JoypadDevicesSample {
         self.registry.sample()
     }
 
     /// Drain pending backend events. Returns what changed for the caller.
-    pub fn poll(&mut self) -> RegistryChange {
+    pub(crate) fn poll(&mut self) -> RegistryChange {
         let mut outcome = RegistryChange::default();
         let Some(backend) = self.backend.as_mut() else {
             return outcome;
@@ -95,7 +96,7 @@ impl Joypad {
     /// Re-enumerate every connected pad, reconciling against what was already
     /// known so a still-connected pad keeps its id and a pad that vanished is
     /// marked disconnected rather than forgotten.
-    pub fn rescan(&mut self) -> bool {
+    pub(crate) fn rescan(&mut self) -> bool {
         let Some(backend) = self.backend.as_ref() else {
             return false;
         };
@@ -112,7 +113,7 @@ impl Joypad {
         missing_zero || reconciliation_zero
     }
 
-    pub fn select(&mut self, id: &str) -> bool {
+    pub(crate) fn select(&mut self, id: &str) -> bool {
         if self.backend.is_none() {
             tracing::warn!(
                 device_id = id,
@@ -128,7 +129,7 @@ impl Joypad {
         self.registry.select(id)
     }
 
-    pub fn set_enabled(&mut self, enabled: bool) -> bool {
+    pub(crate) fn set_enabled(&mut self, enabled: bool) -> bool {
         self.registry.set_enabled(enabled)
     }
 
@@ -139,7 +140,7 @@ impl Joypad {
     /// A selection that turns out to be disconnected is dropped here rather
     /// than silently producing nothing, so the returned change tells the caller
     /// to stop the robot and re-observe.
-    pub fn command(&mut self) -> (Option<api::motion::ManualCommand>, RegistryChange) {
+    pub(crate) fn command(&mut self) -> (Option<api::motion::ManualCommand>, RegistryChange) {
         if !self.registry.enabled {
             return (None, RegistryChange::default());
         }
