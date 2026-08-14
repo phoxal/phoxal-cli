@@ -4,9 +4,9 @@
 //! buildable source project or an already-built deployment release (an
 //! installed release, or an extracted `build.phoxal`). Both end at one
 //! execution artifact: a verified deployment release - one bundle and the
-//! `phoxald` that runs it. The two entry points differ only in the staging step
+//! exact-train `phoxal-supervisor` that runs it. The two entry points differ only in the staging step
 //! before it: a source root resolves, checks, stages, and packages the
-//! executor; a release has nothing to build and is executed as it stands.
+//! supervisor; a release has nothing to build and is executed as it stands.
 
 use super::{DriverPolicy, RunOptions};
 use super::{PrepareRunRequest, PreparedExecution};
@@ -180,13 +180,13 @@ pub(crate) fn refresh_staging(
 }
 
 /// Materialize one resolved source graph, validate the whole compiled layout
-/// through the loader, package the executor, and publish only a complete
+/// through the loader, package the supervisor, and publish only a complete
 /// candidate.
 ///
 /// `run`, `start`, and every local/container build backend converge here after
 /// resolution. All materialization, source validation, flat `bin/` completion,
 /// and loader validation happens against an unpublished candidate exactly once;
-/// only then is it completed with its executor and published as
+/// only then is it completed with its supervisor and published as
 /// `.phoxal/release/`. A failure anywhere therefore leaves the previous live
 /// release untouched, and a published release always has both halves.
 pub(crate) fn refresh_staging_resolved(
@@ -202,22 +202,29 @@ pub(crate) fn refresh_staging_resolved(
         options,
         build,
     } = input;
-    // The executor this release will carry was resolved before anything was
-    // compiled: a release that cannot be executed is not worth building, and
-    // the refusal arrives in seconds rather than after a full build.
-    let executor = build.executor().to_path_buf();
-    let expected_executor = build.expected_executor_target()?;
-    // Stage into an UNPUBLISHED candidate. Every install, source build,
-    // metadata read, and loader validation below runs against
-    // `candidate.path()`; only the final `finalize_release` call at the bottom
-    // of this function ever touches the live `.phoxal/release/`.
-    // Driver exclusion is applied HERE, at finalization, before any binary is
-    // resolved or inspected: the excluded `driver:` blocks are stripped out of
-    // the finalized document, so nothing downstream can see them.
+    let expected_target = build.expected_target()?;
+    let materialize_settings = build.materialize_settings(&project_root, options.offline)?;
+
+    // Resolve and materialize the framework supervisor before participant
+    // compilation begins. A release that cannot obtain its exact-train
+    // supervisor is refused early rather than after an otherwise successful
+    // bundle build. It remains outside `bundle/bin` throughout.
+    let supervisor = crate::build::materialise::materialize_supervisor(
+        resolved.train.version(),
+        build.target(),
+        options.offline,
+        build.officials_source(),
+        materialize_settings.target_dir.clone(),
+        ui,
+    )?;
+    crate::progress::ensure_active(ui)?;
+
+    // Stage into an UNPUBLISHED candidate. Every participant install, source
+    // build, metadata read, and loader validation below runs against
+    // `candidate.path()`; only final publication touches the live release.
     let candidate = crate::stage::begin_runtime_layout(&project_root, &resolved)
         .context("failed to stage the finalized bundle")?;
     crate::progress::ensure_active(ui)?;
-    let materialize_settings = build.materialize_settings(&project_root, options.offline)?;
 
     let source_participants = source_participants_from_resolved(&project_root, &resolved)?;
     // Driver selection is resolution-visible: an excluded source driver must
@@ -313,14 +320,14 @@ pub(crate) fn refresh_staging_resolved(
     // staged binaries were cross-compiled (or container-built) for it, not
     // for this host.
     // Every install, build, check, and validation above succeeded against the
-    // candidate alone - complete it with its executor and publish it as the
+    // candidate alone - complete it with its supervisor and publish it as the
     // live release now, and only now.
     let release = crate::progress::run_phase(
         ui,
         crate::progress_phase::PhaseId::new("publish"),
         "Publishing deployment release",
         || {
-            crate::stage::finalize_release(candidate, &executor, &expected_executor)
+            crate::stage::finalize_release(candidate, supervisor.path(), &expected_target)
                 .context("failed to publish the staged deployment release")
         },
     )?;
@@ -339,13 +346,12 @@ pub(crate) fn refresh_staging_resolved(
 pub(crate) fn prepare_source_run(
     project_start: &Path,
     options: RunOptions,
-    executor: PathBuf,
     ui: &dyn crate::Reporter,
 ) -> Result<crate::deployment::ReleaseLayout> {
     let staged = refresh_staging(
         project_start,
         &options,
-        &StagingBuild::host_runtime(executor),
+        &StagingBuild::host_runtime(),
         true,
         ui,
     )?;
@@ -364,7 +370,7 @@ pub(crate) fn prepare_source_run(
 
 /// Prepare a run from an already-built deployment release at `release_root` -
 /// an installed release, or an extracted `build.phoxal`. There is nothing to
-/// build, resolve, or materialize: the executor and every participant
+/// build, resolve, or materialize: the supervisor and every participant
 /// executable are already in the release, so this needs no Cargo, toolchain, or
 /// network. The installed `/var/phoxal` identity maps persistent state to
 /// `/var/lib/phoxal/state` and sockets to `/run/phoxal`, so nothing is ever
@@ -409,19 +415,7 @@ pub fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecution> {
         crate::paths::runtime::pin_installed_release(&request.target.logical_root)?;
     let release = match classify_run_root(&execution_root)? {
         RunRootKind::Source => {
-            // A locally run release is executed by this host, so it packages
-            // the daemon this client's own installation provides.
-            let executor = request.executor.executor_for(
-                &crate::source::host_target_triple(),
-                request.offline,
-                request.reporter.as_ref(),
-            )?;
-            prepare_source_run(
-                &execution_root,
-                options,
-                executor,
-                request.reporter.as_ref(),
-            )?
+            prepare_source_run(&execution_root, options, request.reporter.as_ref())?
         }
         RunRootKind::Release => {
             prepare_release_run(&execution_root, options, request.reporter.as_ref())?
@@ -455,14 +449,14 @@ fn classify_run_root(root: &Path) -> Result<RunRootKind> {
         return Ok(RunRootKind::Source);
     }
     // A bare bundle directory is deliberately not runnable: an execution is a
-    // release, so the daemon that runs a bundle is the one packaged with it.
+    // release, so the supervisor that runs a bundle is the one packaged with it.
     crate::deployment::refuse_bundle_shaped_release(root)?;
     anyhow::bail!(
         "{} is neither a buildable source project (no robot.yaml/root Cargo package) nor a \
          deployment release (no `{}` beside `{}/`); run from a robot project or extract a \
          build.phoxal first",
         root.display(),
-        crate::deployment::EXECUTOR_FILE,
+        crate::deployment::SUPERVISOR_FILE,
         crate::deployment::BUNDLE_DIR,
     );
 }

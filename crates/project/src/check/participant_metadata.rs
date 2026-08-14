@@ -19,8 +19,8 @@
 //! compatibility identity for anything the project builds.
 //!
 //! This is authority and diagnostics, not cross-line build support. The
-//! toolchain still stages and launches through one CLI and one sibling
-//! `phoxald`, and those speak their own linked train, so the lines a project
+//! toolchain still stages and launches through one CLI and the framework-owned
+//! `phoxal-supervisor`, and those speak their own linked train, so the lines a project
 //! can actually be *run* on remain the CLI's native one. What changes is that
 //! a mismatch is now stated against the project's own selection, in terms an
 //! operator can act on in the project.
@@ -139,7 +139,7 @@ pub fn extract_participant_metadata(binary_path: &Path) -> Result<ParticipantMet
 /// Comparing every selected binary against this one target is also the
 /// project-side proof that the finalized participant graph shares a single
 /// compatibility line: agreeing with the project's line is transitive, so a
-/// bundle that passes cannot be mixed. `phoxald` re-derives the same rule over
+/// bundle that passes cannot be mixed. `phoxal-supervisor` re-derives the same rule over
 /// a bundle it opens; this check is what makes the disagreement arrive while
 /// the operator is still building, naming the binary that carries it.
 pub fn ensure_built_for_project(

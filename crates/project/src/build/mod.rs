@@ -36,8 +36,6 @@ pub enum BuildBackend {
 pub struct BuildBundleRequest {
     pub target: RuntimeTarget,
     pub backend: BuildBackend,
-    /// Where the release this build packages gets the `phoxald` for its target.
-    pub executor: crate::deployment::SharedExecutorSource,
     pub output: Option<PathBuf>,
     pub publish: bool,
     pub offline: bool,

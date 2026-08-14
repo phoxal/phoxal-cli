@@ -4,8 +4,6 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::RuntimeTarget;
-
 use crate::Reporter;
 
 pub use use_case::validate;
@@ -18,7 +16,12 @@ pub struct ValidateRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationSource {
-    Project(RuntimeTarget),
+    /// An authored-project discovery start, with no runtime rendezvous.
+    ///
+    /// Source validation does not launch or contact a supervisor, so carrying
+    /// a [`crate::RuntimeTarget`] here would incorrectly make a source-only
+    /// command validate a socket path it will never use.
+    Project(PathBuf),
     Archive(ArchiveValidation),
 }
 

@@ -18,20 +18,13 @@ git_tag_enable = false
 git_release_enable = false
 git_tag_name = "v{{ version }}"
 
-# Every workspace package shares one version group, so one release of this
-# repository ships `phoxal` and `phoxald` built from the same source at the
-# same version. That is a packaging fact about a release, not a requirement
-# that any two installed binaries carry equal versions: what a robot and a
-# client have to agree on is the framework compatibility line, which the
-# attachment bootstrap checks.
+# Every workspace package shares one version group. Only the `phoxal` binary
+# ships from this repository; `phoxal-supervisor` belongs to the selected
+# framework train and is materialized into each robot deployment release.
 [[package]]
-name = "phoxal-cli-client"
+name = "phoxal-cli"
 version_group = "phoxal-cli"
 changelog_path = "CHANGELOG.md"
-
-[[package]]
-name = "phoxal-cli-supervisor"
-version_group = "phoxal-cli"
 
 [[package]]
 name = "phoxal-cli-catalog"

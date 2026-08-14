@@ -1648,6 +1648,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f70749695b063ecbf6b62949ccccde2e733ec3ecbbd71d467dca4e5c6c97cca0"
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3217,24 +3223,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-api"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cfed11fd4f8c659c9da09913c4777cb338284aa10fc2fa747cd3046af52de66"
-dependencies = [
- "phoxal-bus",
- "phoxal-macros",
- "phoxal-runtime-contract",
- "serde",
- "serde_bytes",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "phoxal-bundle"
-version = "0.59.0"
+version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eefa886eb2f4db7deedd6eab2f931a30e99863532ddaf0331cb66fc60f78df3b"
+checksum = "4ec910826fcffad8b5234dac6658fa2477141bd2a533f7ace6cb3f3d7c08c58a"
 dependencies = [
  "jsonschema",
  "phoxal-macros",
@@ -3248,9 +3240,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bus"
-version = "0.59.0"
+version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db9952f8fbde0f88153270007155327bd6d3bcb56e932bef175437e74499318d"
+checksum = "fab5bfc1903bc1fa7a6718c5f367f0d1bd3d6759080d874ddb381ae88e072b8b"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -3266,17 +3258,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-cli-catalog"
-version = "0.37.3"
-
-[[package]]
-name = "phoxal-cli-client"
+name = "phoxal-cli"
 version = "0.37.3"
 dependencies = [
  "anyhow",
  "clap",
  "console",
- "dirs",
  "flate2",
  "gilrs",
  "hex",
@@ -3306,12 +3293,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "phoxal-cli-catalog"
+version = "0.37.3"
+
+[[package]]
 name = "phoxal-cli-host"
 version = "0.37.3"
 dependencies = [
  "anyhow",
- "libc",
- "tempfile",
+ "phoxal-runtime-contract",
 ]
 
 [[package]]
@@ -3355,29 +3345,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-cli-supervisor"
-version = "0.37.3"
-dependencies = [
- "anyhow",
- "libc",
- "phoxal-api",
- "phoxal-bundle",
- "phoxal-bus",
- "phoxal-cli-host",
- "phoxal-client",
- "phoxal-model",
- "phoxal-runtime-contract",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "phoxal-cli-ui"
 version = "0.37.3"
 dependencies = [
@@ -3395,18 +3362,19 @@ dependencies = [
 name = "phoxal-client"
 version = "0.37.3"
 dependencies = [
- "phoxal-api",
  "phoxal-bus",
+ "phoxal-protocol",
  "phoxal-runtime-contract",
  "thiserror 2.0.20",
  "tokio",
+ "trybuild",
 ]
 
 [[package]]
 name = "phoxal-macros"
-version = "0.59.0"
+version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48cedde1a939929096687aeb4fab97dcd9e6b31182cd94e57d266ece9ad4da94"
+checksum = "c58e3e2197ed6fdb03543809a47af68e2fb0c6311ac157411bd285c6bd3d8e09"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3417,9 +3385,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-manifest"
-version = "0.59.0"
+version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3277a779f2cf8d672b15b1f616499e1b32e5900458454d6c38d37fc4f9bd228f"
+checksum = "9641532e2d66ea6a2fc578d1e392115b08e26e1ca774f04426bc269ea3220634"
 dependencies = [
  "phoxal-model",
  "phoxal-runtime-contract",
@@ -3434,9 +3402,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-model"
-version = "0.59.0"
+version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c00d2707be811d3d127f9a6054bad1d76ef341c5a898ddbeb00b5acd9cbbe554"
+checksum = "900a32d34b819f104f81f4421d4a9e5876d43417159b862417c9a4dc277e1247"
 dependencies = [
  "phoxal-macros",
  "phoxal-runtime-contract",
@@ -3447,10 +3415,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-runtime-contract"
-version = "0.59.0"
+name = "phoxal-protocol"
+version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7937c14044e46e1b6f9daadc83d1e76f1d877d3088fca6ad3895293c2b56352"
+checksum = "e7ad9b7b1472f66c00789cee56318949767ccf7e578f59bd1bb5241cbdbf5bcb"
+dependencies = [
+ "phoxal-bus",
+ "phoxal-macros",
+ "phoxal-runtime-contract",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "phoxal-runtime-contract"
+version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f4feb34e90ddd56689c4b3610a0b0e87f3e41072a335c1b29892d8fc0abef0b"
 dependencies = [
  "const_format",
  "getrandom 0.3.4",
@@ -4808,6 +4790,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "target-triple"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3a6bfce3d99adfa72d24750a61f782f3036a81e7f86d8841ee1326deaebd171"
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4818,6 +4806,15 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
 ]
 
 [[package]]
@@ -5231,6 +5228,21 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "trybuild"
+version = "1.0.120"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e605bf6b39357663d8ba4e984f8be8da8df6bb32e81031d6889024ea8fd68e4"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-triple",
+ "termcolor",
+ "toml 1.1.4+spec-1.1.0",
+]
 
 [[package]]
 name = "tuirealm"
@@ -6230,7 +6242,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "serde_yaml",
- "toml 0.9.12+spec-1.1.0",
  "tracing",
  "uhlc",
  "validated_struct",

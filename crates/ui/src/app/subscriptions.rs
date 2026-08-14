@@ -135,8 +135,8 @@ fn is_terminal_supervisor(input: &SessionInput) -> bool {
         SessionInput::Client(AttachmentEvent::SupervisorChanged(supervisor))
             if matches!(
                 supervisor.lifecycle,
-                phoxal_client::supervisor::snapshot::Lifecycle::Stopped
-                    | phoxal_client::supervisor::snapshot::Lifecycle::Failed
+                phoxal_client::supervisor::execution::Lifecycle::Stopped
+                    | phoxal_client::supervisor::execution::Lifecycle::Failed
             )
     )
 }
@@ -223,7 +223,7 @@ mod tests {
         AttachmentEpoch, AttachmentEvent, LogWindow, QueryToken, StoreChanged, StoreRevision,
         SupervisorObservation,
     };
-    use phoxal_client::supervisor::snapshot::Lifecycle;
+    use phoxal_client::supervisor::execution::Lifecycle;
     use phoxal_runtime_contract::clock::Clock;
     use phoxal_runtime_contract::identity::ExecutionId;
     use phoxal_runtime_contract::identity::RobotId;

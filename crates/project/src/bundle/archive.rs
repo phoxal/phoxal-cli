@@ -1,7 +1,7 @@
 //! Deterministic `build.phoxal` archiving of a staged deployment release.
 //!
 //! `build.phoxal` is a gzipped tar of a staged deployment release - the
-//! `phoxald` that executes it and the `bundle/` that executor runs - written so
+//! `phoxal-supervisor` that executes it and the `bundle/` it runs - written so
 //! that identical staged contents always produce
 //! byte-identical archives. That is what lets a rebuild or a relink of
 //! unchanged content re-produce the same digest, so a release is
@@ -14,7 +14,7 @@
 //! otherwise). Paths are stored relative with `/` separators and no `.`/`..`
 //! components, so extraction can never escape its destination.
 //!
-//! The archive is not executable, and the executor inside it is data until a
+//! The archive is not executable, and the supervisor inside it is data until a
 //! release is activated. Plain `tar -xzf build.phoxal` extracts it identically
 //! to [`extract_build_archive`]; the helper here only adds the path-escape
 //! guard.
@@ -360,13 +360,16 @@ mod tests {
         fs::set_permissions(path, perms).unwrap();
     }
 
-    /// Stage a minimal deployment release: an executable `phoxald`, and a
+    /// Stage a minimal deployment release: an executable `phoxal-supervisor`, and a
     /// bundle holding an executable `bin/mission` and a non-executable asset.
     fn stage_layout(root: &Path) {
         let bundle = root.join("bundle");
         fs::create_dir_all(bundle.join("bin")).unwrap();
         fs::create_dir_all(bundle.join("assets")).unwrap();
-        write_executable(&root.join("phoxald"), b"\x7fELF-ish-daemon");
+        write_executable(
+            &root.join(crate::deployment::SUPERVISOR_FILE),
+            b"\x7fELF-ish-supervisor",
+        );
         fs::write(
             bundle.join("runtime.json"),
             b"{\"schema\":\"phoxal/runtime-bundle/v0\"}\n",
@@ -388,7 +391,7 @@ mod tests {
         // Touch every file's mtime to a different time; determinism must ignore
         // it. Re-archive to a second path.
         let later = std::time::SystemTime::now();
-        filetime_touch(&layout.join("phoxald"), later);
+        filetime_touch(&layout.join(crate::deployment::SUPERVISOR_FILE), later);
         filetime_touch(&layout.join("bundle/bin/mission"), later);
         filetime_touch(&layout.join("bundle/assets/fixture.bin"), later);
 
@@ -440,7 +443,7 @@ mod tests {
 
         let mut names = BTreeSet::new();
         collect_names(&extracted, &extracted, &mut names);
-        assert!(names.contains("phoxald"));
+        assert!(names.contains(crate::deployment::SUPERVISOR_FILE));
         assert!(names.contains("bundle/bin/mission"));
         assert!(names.contains("bundle/assets/fixture.bin"));
         // The archive is pure runtime content: a top-level `.phoxal` (lock/socket
@@ -459,14 +462,14 @@ mod tests {
                 .mode()
                 & 0o777;
             assert_eq!(mode, 0o755, "executable bit must be preserved");
-            let executor = fs::metadata(extracted.join("phoxald"))
+            let supervisor = fs::metadata(extracted.join(crate::deployment::SUPERVISOR_FILE))
                 .unwrap()
                 .permissions()
                 .mode()
                 & 0o777;
             assert_eq!(
-                executor, 0o755,
-                "the release's executor must extract executable"
+                supervisor, 0o755,
+                "the release's supervisor must extract executable"
             );
             let asset = fs::metadata(extracted.join("bundle/assets/fixture.bin"))
                 .unwrap()
@@ -577,7 +580,7 @@ mod tests {
         }
     }
 
-    /// The archive is the deployment release: the executor and the bundle it
+    /// The archive is the deployment release: the supervisor and the bundle it
     /// runs - and nothing else. The cargo-install bookkeeping that
     /// `cargo install --root` leaves behind embeds absolute host paths, so a
     /// release carrying it would not be reproducible across machines, and
@@ -618,7 +621,7 @@ mod tests {
                 "bundle/assets/fixture.bin".to_string(),
                 "bundle/bin/mission".to_string(),
                 "bundle/runtime.json".to_string(),
-                "phoxald".to_string(),
+                crate::deployment::SUPERVISOR_FILE.to_string(),
             ])
         );
     }

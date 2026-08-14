@@ -3,13 +3,13 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use phoxal_client::supervisor::snapshot::Process;
+use phoxal_client::supervisor::execution::Process;
 use phoxal_runtime_contract::identity::ParticipantId;
 use phoxal_runtime_contract::metadata::ParticipantKind;
 
 /// A snapshot row plus the local timing a client keeps for it.
 ///
-/// The row itself is the daemon's authoritative value and is carried whole
+/// The row itself is the supervisor's authoritative value and is carried whole
 /// rather than destructured: adding a field to the contract must not mean
 /// editing a projection here. The timings are client-local wall-clock facts
 /// (when this client first saw the row start, become ready, or end) and belong
@@ -30,7 +30,7 @@ impl ProcessObservation {
     }
 
     /// Whether the process has an open bus session, which is exactly whether
-    /// the daemon learned a producer from its liveliness token.
+    /// the supervisor learned a producer from its liveliness token.
     #[must_use]
     pub const fn present(&self) -> bool {
         self.row.producer.is_some()

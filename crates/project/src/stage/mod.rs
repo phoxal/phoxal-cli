@@ -1,22 +1,26 @@
 //! The unified runtime-layout stager.
 //!
 //! One stager materializes a source project into the deployment release at
-//! `.phoxal/release/`: the executor and the finalized bundle it runs.
+//! `.phoxal/release/`: the supervisor and the finalized bundle it runs.
 //!
 //! ```text
-//! phoxald            # the executor this release is run by
+//! phoxal-supervisor  # the framework supervisor this release is run by
 //! bundle/assets/     # frozen robot and component definitions and their meshes
 //! bundle/bin/        # flat participant-executable store
 //! bundle/runtime.json
 //! ```
 //!
-//! `cargo install --root <candidate>` targets the SAME candidate directory the
-//! finalized document and assets are staged into, so its `bin/` entries land
-//! directly at their final path with no separate harvest-then-link step. It
-//! also leaves `.crates.toml`/`.crates2.json` bookkeeping dotfiles in the
-//! candidate root; those are host-specific state, never bundle content, so
-//! publication removes them rather than fighting `--no-track` (which would
-//! disable Cargo's own concurrent-invocation protection for no real benefit).
+//! Participant `cargo install --root <candidate>` calls target the SAME
+//! candidate directory the finalized document and assets are staged into, so
+//! their `bin/` entries land directly at their final path with no separate
+//! harvest-then-link step. The supervisor shares the neutral Cargo
+//! materialization machinery but uses its own release-profile,
+//! release-destination batch and is copied beside `bundle/` only at
+//! finalization. Participant installs also leave `.crates.toml`/`.crates2.json`
+//! bookkeeping dotfiles in the candidate root; those are host-specific state,
+//! never bundle content, so publication removes them rather than fighting
+//! `--no-track` (which would disable Cargo's own concurrent-invocation
+//! protection for no real benefit).
 //!
 //! The live `.phoxal/release/` is never deleted before every install and
 //! validation succeeds: staging always builds into a sibling candidate
@@ -31,7 +35,7 @@
 //! [`candidate::StagedCandidate::path`], a path nobody executes from yet. Only
 //! [`finalize_release`] ever touches the live path, and it is always the last
 //! call - see `run::prepare::refresh_staging` and
-//! `simulation::prepare_simulation`. It adds the executor before it publishes,
+//! `simulation::prepare_simulation`. It adds the supervisor before it publishes,
 //! so a published release always has both halves and they always match.
 
 mod candidate;
@@ -54,18 +58,18 @@ pub(crate) use runtime::write_runtime_document;
 
 /// Complete a validated candidate into a deployment release and publish it.
 ///
-/// The executor lands in the candidate first, so the atomic rename that
-/// publishes it switches the executor and the bundle together.
+/// The supervisor lands in the candidate first, so the atomic rename that
+/// publishes it switches the supervisor and the bundle together.
 pub(crate) fn finalize_release(
     candidate: StagedCandidate,
-    executor_source: &Path,
+    supervisor_source: &Path,
     expected: &ExpectedTarget,
 ) -> Result<ReleaseLayout> {
-    crate::deployment::materialize(candidate.release_path(), executor_source, expected)
-        .context("failed to package the executor into the staged deployment release")?;
+    crate::deployment::materialize(candidate.release_path(), supervisor_source, expected)
+        .context("failed to package the supervisor into the staged deployment release")?;
     let root = publish::publish_runtime_layout(candidate)?;
     Ok(ReleaseLayout {
-        executor: root.join(crate::deployment::EXECUTOR_FILE),
+        supervisor: root.join(crate::deployment::SUPERVISOR_FILE),
         bundle: root.join(crate::deployment::BUNDLE_DIR),
         root,
     })

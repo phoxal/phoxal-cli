@@ -1,0 +1,62 @@
+[package]
+name = "phoxal-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["phoxal-internal"]
+
+# The project/build/deploy tool and the disposable attached client.
+# It is bin-only: the shipped executable is `phoxal`, and
+# nothing links this package as a library, so its unit tests live in
+# `#[cfg(test)]` modules inside the binary crate.
+[[bin]]
+name = "phoxal"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+console = { workspace = true }
+flate2 = { workspace = true }
+gilrs = { workspace = true }
+hex = { workspace = true }
+libc = { workspace = true }
+reqwest = { workspace = true }
+self_replace = { workspace = true }
+semver = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# Everything remote goes through the client boundary; the wire crates below
+# are reached only for authored-source, bundle, and local identity work.
+phoxal-client = { workspace = true }
+
+phoxal-bundle = { workspace = true }
+phoxal-manifest = { workspace = true }
+phoxal-model = { workspace = true }
+phoxal-runtime-contract = { workspace = true }
+
+phoxal-cli-catalog = { workspace = true }
+phoxal-cli-host = { workspace = true }
+phoxal-cli-observation = { workspace = true }
+phoxal-cli-project = { workspace = true }
+phoxal-cli-ui = { workspace = true }
+
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

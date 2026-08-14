@@ -7,7 +7,7 @@ use phoxal_cli_observation::{
     AttachmentEvent, LogAnchor, LogFilters, LogQuery, LogRead, LogRow, ProcessTable, QueryToken,
     RuntimeQuery, RuntimeRead, RuntimeRow, StoreChanged, StoreRevision, WindowDirection,
 };
-use phoxal_client::supervisor::snapshot::Lifecycle;
+use phoxal_client::supervisor::execution::Lifecycle;
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
 use crate::components::input::InputModel;
@@ -788,8 +788,8 @@ mod tests {
         JoypadDevicesSample, LogSeverity, LogSource, LogWindow, ObservationWindow,
         ProcessObservation, SupervisorObservation,
     };
-    use phoxal_client::supervisor::snapshot::{
-        DaemonFailure, DaemonFailureReason, DesiredState, Detail, Process, ProcessState,
+    use phoxal_client::supervisor::execution::{
+        DesiredState, Detail, Process, ProcessState, SupervisorFailure, SupervisorFailureReason,
     };
     use phoxal_runtime_contract::clock::Clock;
     use phoxal_runtime_contract::identity::ExecutionId;
@@ -1056,7 +1056,7 @@ mod tests {
         )))
     }
 
-    /// `q` detaches and leaves the daemon running; Ctrl+C takes two presses to
+    /// `q` detaches and leaves the supervisor running; Ctrl+C takes two presses to
     /// stop, and the session keeps rendering until the supervisor's own
     /// terminal snapshot arrives.
     #[test]
@@ -1517,8 +1517,8 @@ mod tests {
             project: "/tmp/robot".to_string(),
             lifecycle,
             startup: Vec::new(),
-            failure: failure.map(|detail| DaemonFailure {
-                reason: DaemonFailureReason::LaunchFailed,
+            failure: failure.map(|detail| SupervisorFailure {
+                reason: SupervisorFailureReason::LaunchFailed,
                 detail: Detail::new(detail),
             }),
         }

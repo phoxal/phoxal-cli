@@ -1,4 +1,4 @@
-//! `cargo install` materialization of official runtimes.
+//! `cargo install` materialization of exact registry packages.
 //!
 //! Cargo owns download, integrity, and compilation of every official service
 //! and every component driver package, against the static registry
@@ -23,6 +23,13 @@
 //! avoids this caveat entirely for the always-present official set by
 //! running these same commands *inside* the target-native container instead
 //! of cross-compiling them from the host - see `commands::build::container`.
+//!
+//! The Cargo invocation and argument construction here are neutral across
+//! registry packages. On the host, that shared machinery does not make the
+//! supervisor a participant: its `Release`/`ReleaseRoot` specification runs as
+//! a separate batch from `BundleBin` participants whenever profile or
+//! destination differs. The completed supervisor is copied beside `bundle/`
+//! only during release finalization.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,20 +37,40 @@ use std::process::Command;
 
 use anyhow::{Context, Result, ensure};
 
-use phoxal_cli_catalog::{REGISTRY_NAME, cargo_package_name, registry_config_arg};
+use phoxal_cli_catalog::{REGISTRY_NAME, registry_config_arg};
 
-/// One official package to materialize: its catalog identity
-/// (`phoxal/service-drive`), the exact framework train it is pinned to, and
+/// The framework-owned execution supervisor package and binary.
+pub(crate) const SUPERVISOR_PACKAGE: &str = "phoxal-supervisor";
+
+/// One Cargo package to materialize: its published package/binary name, the
+/// exact framework train it is pinned to, and
 /// the target triple to build for (`None` builds for the host running the
 /// command - inside a container, that IS the target, so no cross flag is
 /// needed there either).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializeSpec {
-    pub catalog_package: String,
+    pub cargo_package: String,
     pub train: String,
     pub target: Option<String>,
     pub profile: MaterializeProfile,
     pub target_dir: Option<PathBuf>,
+    pub destination: MaterializationDestination,
+}
+
+/// The owner boundary a registry package materializes into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializationDestination {
+    /// A participant binary referenced by the frozen runtime document.
+    BundleBin,
+    /// The framework supervisor beside `bundle/`, never inside it.
+    ReleaseRoot,
+}
+
+impl MaterializationDestination {
+    #[must_use]
+    pub const fn enters_runtime_document(self) -> bool {
+        matches!(self, Self::BundleBin)
+    }
 }
 
 /// Cargo's two install profiles. Interactive staging uses debug builds so
@@ -58,13 +85,14 @@ pub enum MaterializeProfile {
 
 impl MaterializeSpec {
     #[must_use]
-    pub fn new(catalog_package: impl Into<String>, train: impl Into<String>) -> Self {
+    pub fn new(cargo_package: impl Into<String>, train: impl Into<String>) -> Self {
         Self {
-            catalog_package: catalog_package.into(),
+            cargo_package: cargo_package.into(),
             train: train.into(),
             target: None,
             profile: MaterializeProfile::Release,
             target_dir: None,
+            destination: MaterializationDestination::BundleBin,
         }
     }
 
@@ -92,21 +120,44 @@ impl MaterializeSpec {
         self
     }
 
-    /// The Cargo package name this catalog identity is published under, which
-    /// is also the exact binary name every official package's `[[bin]]`
-    /// target carries - the catalog id's kind prefix and `official_binary_name`'s
-    /// kind prefix are the identical string, so the two projections always
-    /// agree.
+    /// The package's explicit Cargo identity, also required to be its binary
+    /// target name so `cargo install --root` has one deterministic harvest path.
     #[must_use]
-    pub fn cargo_package_name(&self) -> String {
-        cargo_package_name(&self.catalog_package)
+    pub fn cargo_package_name(&self) -> &str {
+        &self.cargo_package
     }
 }
 
+/// The non-participant framework supervisor specification.
+///
+/// It is deliberately constructed outside the participant catalog and always
+/// uses Cargo's release profile, even when an interactive run builds its
+/// participant binaries in debug mode. It shares the neutral Cargo
+/// materializer, but its release profile and release-root destination keep it
+/// in a separate host batch from participant bundle entries.
+#[must_use]
+pub(crate) fn supervisor_spec(
+    train: impl Into<String>,
+    target: Option<String>,
+    target_dir: Option<PathBuf>,
+) -> MaterializeSpec {
+    let mut spec = MaterializeSpec::new(SUPERVISOR_PACKAGE, train)
+        .with_target(target)
+        .with_profile(MaterializeProfile::Release);
+    spec.destination = MaterializationDestination::ReleaseRoot;
+    if let Some(target_dir) = target_dir {
+        spec = spec.with_target_dir(target_dir);
+    }
+    spec
+}
+
 /// Install a compatible exact-version registry group with one Cargo process.
-/// The caller groups by target/profile/target-directory; this function rejects
-/// an accidental mixed group rather than silently changing a package's build
-/// semantics. It verifies every final `bin/` entry before returning.
+/// The caller groups by target/profile/target-directory and invokes this
+/// neutral mechanism separately for distinct destinations. In particular, the
+/// host supervisor's `ReleaseRoot` batch is not folded into a participant
+/// `BundleBin` batch. This function rejects an accidental mixed build setting
+/// rather than silently changing a package's build semantics, and verifies
+/// every final `bin/` entry before returning.
 pub fn cargo_install_batch(
     root: &Path,
     specs: &[MaterializeSpec],
@@ -128,7 +179,7 @@ pub fn cargo_install_batch(
     );
     let mut packages = BTreeMap::new();
     for spec in specs {
-        let package = spec.cargo_package_name();
+        let package = spec.cargo_package_name().to_string();
         if let Some(previous) = packages.insert(package.clone(), spec.train.clone()) {
             ensure!(
                 previous == spec.train,
@@ -236,6 +287,104 @@ fn harvest_binary(root: &Path, package: &str) -> Result<PathBuf> {
     Ok(binary)
 }
 
+/// One exact-train supervisor materialized outside the participant bundle.
+pub(crate) struct MaterializedSupervisor {
+    path: PathBuf,
+    _install_root: Option<tempfile::TempDir>,
+}
+
+impl MaterializedSupervisor {
+    #[must_use]
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Materialize the non-catalog framework supervisor, consuming a target-native
+/// container batch when supplied and otherwise running the shared Cargo
+/// materializer as its own release-profile, release-destination batch in a
+/// dedicated temporary install root. Container absence is a hard error, never
+/// a host fallback.
+pub(crate) fn materialize_supervisor(
+    train: &str,
+    target: Option<&str>,
+    offline: bool,
+    officials_source: Option<&Path>,
+    target_dir: Option<PathBuf>,
+    reporter: &dyn crate::Reporter,
+) -> Result<MaterializedSupervisor> {
+    if let Some(source_root) = officials_source {
+        let path = source_root.join("bin").join(SUPERVISOR_PACKAGE);
+        ensure!(
+            path.is_file(),
+            "the target-native registry batch did not materialize {SUPERVISOR_PACKAGE}@{train} \
+             (expected {}); this is a hard error, not a fallback to a host build",
+            path.display()
+        );
+        return Ok(MaterializedSupervisor {
+            path,
+            _install_root: None,
+        });
+    }
+
+    let install_root = tempfile::Builder::new()
+        .prefix("phoxal-supervisor-install-")
+        .tempdir()
+        .context("failed to create the supervisor materialization root")?;
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")));
+    let offline_diagnostic = offline.then(|| {
+        offline_supervisor_diagnostic(train, cargo_home.as_deref(), target_dir.as_deref())
+    });
+    let spec = supervisor_spec(train, target.map(str::to_string), target_dir);
+    ensure!(
+        !spec.destination.enters_runtime_document(),
+        "the framework supervisor must materialize at the release root, never as a runtime participant"
+    );
+    let mut installed = cargo_install_batch(
+        install_root.path(),
+        std::slice::from_ref(&spec),
+        offline,
+        reporter,
+    )
+    .with_context(|| {
+        if let Some(diagnostic) = &offline_diagnostic {
+            diagnostic.clone()
+        } else {
+            format!("could not materialize {SUPERVISOR_PACKAGE}@{train}")
+        }
+    })?;
+    let path = installed
+        .pop()
+        .context("the supervisor registry batch returned no binary")?;
+    Ok(MaterializedSupervisor {
+        path,
+        _install_root: Some(install_root),
+    })
+}
+
+fn offline_supervisor_diagnostic(
+    train: &str,
+    cargo_home: Option<&Path>,
+    target_dir: Option<&Path>,
+) -> String {
+    let registry = cargo_home.map(|home| home.join("registry")).map_or_else(
+        || "<unresolved CARGO_HOME>/registry".to_string(),
+        |path| path.display().to_string(),
+    );
+    let build = target_dir.map_or_else(
+        || "<Cargo target directory>".to_string(),
+        |path| path.display().to_string(),
+    );
+    format!(
+        "could not materialize {SUPERVISOR_PACKAGE}@{train} while offline; the required \
+         package/source must already be in Cargo registry cache {registry} and its build \
+         artifacts in target cache {build}; retry once without --offline to warm that exact \
+         framework train, then repeat with --offline"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,7 +399,7 @@ mod tests {
     fn command_for(spec: &MaterializeSpec, root: &Path, offline: bool) -> Command {
         let package = spec.cargo_package_name();
         let install_args = build_install_args(
-            std::iter::once((package.as_str(), spec.train.as_str())),
+            std::iter::once((package, spec.train.as_str())),
             spec.target.as_deref(),
             spec.profile,
             offline,
@@ -278,14 +427,15 @@ mod tests {
             ),
         ];
         for (catalog_id, kind, short) in cases {
-            let spec = MaterializeSpec::new(catalog_id, "0.42.0");
+            let spec =
+                MaterializeSpec::new(phoxal_cli_catalog::cargo_package_name(catalog_id), "0.42.0");
             assert_eq!(spec.cargo_package_name(), official_binary_name(kind, short));
         }
     }
 
     #[test]
     fn install_command_pins_the_exact_version_and_carries_every_required_flag() {
-        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0");
+        let spec = MaterializeSpec::new("phoxal-service-drive", "0.42.0");
         let command = command_for(&spec, Path::new("/tmp/bundle"), false);
         let argv = args(&command);
         assert_eq!(argv[0], "install");
@@ -334,14 +484,14 @@ mod tests {
 
     #[test]
     fn offline_appends_the_offline_flag() {
-        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0");
+        let spec = MaterializeSpec::new("phoxal-service-drive", "0.42.0");
         let command = command_for(&spec, Path::new("/tmp/bundle"), true);
         assert!(args(&command).contains(&"--offline".to_string()));
     }
 
     #[test]
     fn debug_profile_and_shared_target_directory_are_explicit() {
-        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0")
+        let spec = MaterializeSpec::new("phoxal-service-drive", "0.42.0")
             .with_profile(MaterializeProfile::Debug)
             .with_target_dir(PathBuf::from("/workspace/target"));
         let argv = args(&command_for(&spec, Path::new("/tmp/bundle"), false));
@@ -358,7 +508,7 @@ mod tests {
     fn a_bare_package_name_is_never_installed_without_a_pinned_version() {
         // Regression for the empirically verified failure mode: a bare name
         // installs the newest train the moment one exists.
-        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0");
+        let spec = MaterializeSpec::new("phoxal-service-drive", "0.42.0");
         let command = command_for(&spec, Path::new("/tmp/bundle"), false);
         let argv = args(&command);
         assert!(
@@ -374,7 +524,7 @@ mod tests {
         } else {
             "aarch64-unknown-linux-gnu"
         };
-        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0")
+        let spec = MaterializeSpec::new("phoxal-service-drive", "0.42.0")
             .with_target(Some(foreign.to_string()));
         let command = command_for(&spec, Path::new("/tmp/bundle"), false);
         let argv = args(&command);
@@ -389,7 +539,7 @@ mod tests {
     #[test]
     fn a_target_matching_the_host_omits_the_cross_flag() {
         let host = crate::source::host_target_triple();
-        let spec = MaterializeSpec::new("phoxal/service-drive", "0.42.0").with_target(Some(host));
+        let spec = MaterializeSpec::new("phoxal-service-drive", "0.42.0").with_target(Some(host));
         let command = command_for(&spec, Path::new("/tmp/bundle"), false);
         assert!(!args(&command).contains(&"--target".to_string()));
     }
@@ -408,5 +558,49 @@ mod tests {
         std::fs::write(root.path().join("bin/phoxal-service-drive"), b"binary").unwrap();
         let binary = harvest_binary(root.path(), "phoxal-service-drive").unwrap();
         assert_eq!(binary, root.path().join("bin/phoxal-service-drive"));
+    }
+
+    #[test]
+    fn supervisor_is_an_explicit_non_catalog_release_package() {
+        let spec = supervisor_spec(
+            "0.60.1",
+            Some("aarch64-unknown-linux-gnu".to_string()),
+            Some(PathBuf::from("/workspace/target")),
+        );
+        assert_eq!(spec.cargo_package_name(), SUPERVISOR_PACKAGE);
+        assert_eq!(spec.train, "0.60.1");
+        assert_eq!(spec.profile, MaterializeProfile::Release);
+        assert_eq!(spec.destination, MaterializationDestination::ReleaseRoot);
+        assert!(!spec.destination.enters_runtime_document());
+        assert_eq!(spec.target.as_deref(), Some("aarch64-unknown-linux-gnu"));
+        assert_eq!(spec.target_dir, Some(PathBuf::from("/workspace/target")));
+        let catalog = phoxal_cli_catalog::Catalog::official();
+        assert!(
+            catalog
+                .native()
+                .chain(catalog.simulation())
+                .all(|official| {
+                    phoxal_cli_catalog::cargo_package_name(official.package) != SUPERVISOR_PACKAGE
+                }),
+            "the supervisor must never become a participant catalog entry"
+        );
+    }
+
+    #[test]
+    fn offline_supervisor_diagnostic_names_exact_package_caches_and_warmup() {
+        let diagnostic = offline_supervisor_diagnostic(
+            "0.60.1",
+            Some(Path::new("/cache/cargo")),
+            Some(Path::new("/cache/target")),
+        );
+        for expected in [
+            "phoxal-supervisor@0.60.1",
+            "/cache/cargo/registry",
+            "/cache/target",
+            "without --offline",
+            "then repeat with --offline",
+        ] {
+            assert!(diagnostic.contains(expected), "{diagnostic}");
+        }
     }
 }

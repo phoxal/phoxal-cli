@@ -1,4 +1,4 @@
-//! Shared host filesystem and process-lock contract for the CLI pair.
+//! CLI host policy layered on the framework runtime rendezvous contract.
 
 #![cfg_attr(
     test,

@@ -30,7 +30,7 @@ pub struct EffectSenders {
 /// How an attachment session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachmentOutcome {
-    /// The client left; the daemon keeps running. This is what `q` means.
+    /// The client left; the supervisor keeps running. This is what `q` means.
     Detached,
     /// The execution reached a terminal stopped state while attached.
     ExecutionStopped,
@@ -39,6 +39,6 @@ pub enum AttachmentOutcome {
     /// failure ever observed (see `update_client`'s `ConnectionChanged`
     /// handling).
     ExecutionFailed {
-        reason: Option<phoxal_client::supervisor::snapshot::DaemonFailure>,
+        reason: Option<phoxal_client::supervisor::execution::SupervisorFailure>,
     },
 }

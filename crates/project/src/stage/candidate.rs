@@ -1,7 +1,7 @@
 //! Deployment-release candidate construction and validation.
 //!
 //! The live `.phoxal/release/` is replaced only after every canonical input,
-//! every binary, and the release's own executor have passed validation, so
+//! every binary, and the release's own supervisor have passed validation, so
 //! staging always builds into an adjacent `.phoxal/.release-candidate-<unique>`
 //! directory first and publishes it with one atomic rename. A build that fails
 //! halfway through must never leave a robot with no runtime, and a published
@@ -12,7 +12,7 @@
 //! compiled `runtime.json` absorbs them, and only compiled assets ride along.
 //!
 //! ```text
-//! phoxald                                 written last, by the release step
+//! phoxal-supervisor                       written last, by the release step
 //! bundle/runtime.json                     phoxal/runtime-bundle/v0
 //! bundle/assets/robot/meshes/...
 //! bundle/assets/components/<type>/meshes/...
@@ -43,7 +43,7 @@ impl StagedCandidate {
     }
 
     /// The release root the bundle is staged inside. Only the release step,
-    /// which adds the executor, works against this.
+    /// which adds the supervisor, works against this.
     #[must_use]
     pub(crate) fn release_path(&self) -> &Path {
         self.dir.path()

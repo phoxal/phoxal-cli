@@ -1,0 +1,88 @@
+error[E0277]: the trait bound `StreamEndpoint: ClientReceiveContract` is not satisfied
+  --> tests/trybuild/inbound_stream_cannot_be_received.rs:6:13
+   |
+ 5 |           .stream_receiver(
+   |            --------------- required by a bound introduced by this call
+ 6 | /             robot::topic::owner()
+ 7 | |                 .component("speaker")
+ 8 | |                 .unwrap()
+ 9 | |                 .speaker("audio")
+10 | |                 .unwrap()
+11 | |                 .stream(),
+   | |_________________________^ the trait `ClientReceiveContract` is not implemented for `StreamEndpoint`
+   |
+   = help: the following other types implement trait `ClientReceiveContract`:
+             CandidateEndpoint
+             ClockEndpoint
+             ConstraintsEndpoint
+             DetectionsEndpoint
+             ProgressEndpoint
+             ResultEndpoint
+             RevisionEndpoint
+             StaticTransformsEndpoint
+           and $N others
+note: required by a bound in `Client::stream_receiver`
+  --> src/connection.rs
+   |
+   |     pub async fn stream_receiver<E>(
+   |                  --------------- required by a bound in this associated function
+...
+   |         E: StreamContract + StreamDeliveryContract + ClientReceiveContract,
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Client::stream_receiver`
+
+error[E0277]: the trait bound `StreamEndpoint: ClientReceiveContract` is not satisfied
+  --> tests/trybuild/inbound_stream_cannot_be_received.rs:4:13
+   |
+ 4 |       let _ = client
+   |  _____________^
+ 5 | |         .stream_receiver(
+ 6 | |             robot::topic::owner()
+ 7 | |                 .component("speaker")
+...  |
+11 | |                 .stream(),
+12 | |         )
+   | |_________^ the trait `ClientReceiveContract` is not implemented for `StreamEndpoint`
+   |
+   = help: the following other types implement trait `ClientReceiveContract`:
+             CandidateEndpoint
+             ClockEndpoint
+             ConstraintsEndpoint
+             DetectionsEndpoint
+             ProgressEndpoint
+             ResultEndpoint
+             RevisionEndpoint
+             StaticTransformsEndpoint
+           and $N others
+note: required by a bound in `Client::stream_receiver`
+  --> src/connection.rs
+   |
+   |     pub async fn stream_receiver<E>(
+   |                  --------------- required by a bound in this associated function
+...
+   |         E: StreamContract + StreamDeliveryContract + ClientReceiveContract,
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Client::stream_receiver`
+
+error[E0277]: the trait bound `StreamEndpoint: ClientReceiveContract` is not satisfied
+  --> tests/trybuild/inbound_stream_cannot_be_received.rs:13:10
+   |
+13 |         .await;
+   |          ^^^^^ the trait `ClientReceiveContract` is not implemented for `StreamEndpoint`
+   |
+   = help: the following other types implement trait `ClientReceiveContract`:
+             CandidateEndpoint
+             ClockEndpoint
+             ConstraintsEndpoint
+             DetectionsEndpoint
+             ProgressEndpoint
+             ResultEndpoint
+             RevisionEndpoint
+             StaticTransformsEndpoint
+           and $N others
+note: required by a bound in `Client::stream_receiver`
+  --> src/connection.rs
+   |
+   |     pub async fn stream_receiver<E>(
+   |                  --------------- required by a bound in this associated function
+...
+   |         E: StreamContract + StreamDeliveryContract + ClientReceiveContract,
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Client::stream_receiver`

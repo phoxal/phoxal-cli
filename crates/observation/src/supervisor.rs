@@ -1,6 +1,6 @@
 //! The execution-level observation, projected from one supervisor snapshot.
 
-use phoxal_client::supervisor::snapshot::{DaemonFailure, Lifecycle, StartupStep};
+use phoxal_client::supervisor::execution::{Lifecycle, StartupStep, SupervisorFailure};
 use phoxal_runtime_contract::clock::Clock;
 use phoxal_runtime_contract::identity::{ExecutionId, RobotId};
 
@@ -8,7 +8,7 @@ use phoxal_runtime_contract::identity::{ExecutionId, RobotId};
 ///
 /// Everything here comes from the authoritative snapshot except `project`,
 /// which is the client's own local knowledge of where the bundle it launched
-/// lives - the daemon has no opinion about the operator's directory layout.
+/// lives - the supervisor has no opinion about the operator's directory layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupervisorObservation {
     /// Monotonic within one execution. A client keeps the highest it has seen.
@@ -22,5 +22,5 @@ pub struct SupervisorObservation {
     pub startup: Vec<StartupStep>,
     /// Why `lifecycle` reached `Failed`, as a typed reason plus its evidence;
     /// `None` for every other lifecycle.
-    pub failure: Option<DaemonFailure>,
+    pub failure: Option<SupervisorFailure>,
 }

@@ -41,7 +41,7 @@ pub fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<RuntimeTarget
         )
     };
     let paths = RuntimePaths::for_root(&root);
-    let logical_root = paths.ownership_root.clone();
+    let logical_root = paths.ownership_root().to_path_buf();
     let authority = if crate::paths::runtime::is_installed_root(&root) {
         RuntimeAuthority::SystemdUnit {
             unit: crate::paths::runtime::SYSTEMD_UNIT.to_string(),
@@ -49,10 +49,10 @@ pub fn resolve(explicit: Option<&Path>, fallback: &Path) -> Result<RuntimeTarget
     } else {
         RuntimeAuthority::DetachedSession
     };
-    // The daemon's Zenoh listen endpoint IS the supervisor socket: one stable
+    // The supervisor's Zenoh listen endpoint IS the supervisor socket: one stable
     // path locates the current execution, and the per-boot identity is learned
     // from the router behind it. Checked here so a too-deep project refuses
-    // before any build instead of failing at the daemon's bind.
+    // before any build instead of failing at the supervisor's bind.
     let supervisor_socket = paths.checked_supervisor_socket()?;
     Ok(RuntimeTarget {
         logical_root,
@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(
             target.authority,
             RuntimeAuthority::SystemdUnit {
-                unit: "phoxal.service".to_string()
+                unit: "phoxal-supervisor.service".to_string()
             }
         );
         assert_eq!(target.build_lock, Path::new("/run/phoxal/build.lock"));
