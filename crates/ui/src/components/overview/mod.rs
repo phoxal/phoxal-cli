@@ -7,7 +7,7 @@ use tuirealm::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tuirealm::ratatui::text::{Line, Span, Text};
 use tuirealm::ratatui::widgets::Paragraph;
 
-use phoxal_client::supervisor::snapshot::{StartupStep, StartupStepKind, StartupStepState};
+use phoxal_client::supervisor::execution::{StartupStep, StartupStepKind, StartupStepState};
 
 use crate::Theme;
 use crate::app::AppModel;
@@ -25,7 +25,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         || Text::from("Waiting for attachment snapshot"),
         |snapshot| {
             // The clock IS the mode: `clock: simulated` in the finalized
-            // manifest is what selects the simulator, and the daemon passes it
+            // manifest is what selects the simulator, and the supervisor passes it
             // through untouched.
             let mode = match snapshot.clock {
                 phoxal_runtime_contract::clock::Clock::Real => "real",
@@ -124,7 +124,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     );
 }
 
-/// The daemon's own startup sequence, in the order `phoxald` performs it.
+/// The framework supervisor's startup sequence.
 fn startup_step_label(kind: StartupStepKind) -> &'static str {
     match kind {
         StartupStepKind::Bundle => "Bundle",
@@ -193,7 +193,7 @@ fn startup_timeline(
                     text: step
                         .detail
                         .as_ref()
-                        .map(phoxal_client::supervisor::snapshot::Detail::as_str)
+                        .map(phoxal_client::supervisor::execution::Detail::as_str)
                         .map_or_else(
                             || format!("active: {}", startup_step_label(step.kind)),
                             |detail| {
@@ -272,9 +272,9 @@ fn sanitize(value: &str) -> String {
 #[cfg(test)]
 mod startup_timeline_tests {
     use super::*;
-    use phoxal_client::supervisor::snapshot::Detail;
+    use phoxal_client::supervisor::execution::Detail;
 
-    /// The daemon's own sequence, including one failure and one pending step.
+    /// The supervisor's own sequence, including one failure and one pending step.
     fn timeline() -> Vec<StartupStep> {
         vec![
             StartupStep {

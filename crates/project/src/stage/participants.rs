@@ -225,8 +225,11 @@ fn materialize_platform_runtime(
         return Ok(());
     }
     let spec = context.settings.apply(
-        MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
-            .with_target(runtime.target.clone()),
+        MaterializeSpec::new(
+            phoxal_cli_catalog::cargo_package_name(&runtime.package),
+            runtime.train.clone(),
+        )
+        .with_target(runtime.target.clone()),
     );
     context.pending.push(spec);
     Ok(())
@@ -250,8 +253,11 @@ fn queue_component_driver(
     }
     context.pending.push(
         context.settings.apply(
-            MaterializeSpec::new(runtime.package.clone(), runtime.train.clone())
-                .with_target(runtime.target.clone()),
+            MaterializeSpec::new(
+                phoxal_cli_catalog::cargo_package_name(&runtime.package),
+                runtime.train.clone(),
+            )
+            .with_target(runtime.target.clone()),
         ),
     );
     Ok(())

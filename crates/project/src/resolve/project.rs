@@ -716,12 +716,6 @@ robot:
         resolve(robot, root, options)
     }
 
-    /// The executor a staged release would package. Resolution never reads it -
-    /// only the release step does - so a fixture path is exactly enough here.
-    fn fixture_executor() -> std::path::PathBuf {
-        std::path::PathBuf::from("/fixture/phoxald")
-    }
-
     #[derive(Default)]
     struct RecordingReporter(std::sync::Mutex<Vec<crate::PreparationEvent>>);
 
@@ -745,15 +739,12 @@ robot:
             project.path(),
             &project.path().join(".phoxal/cache/registry"),
             "aarch64-unknown-linux-gnu",
-            fixture_executor(),
             false,
             &reporter,
         )?;
         assert!(
             resolved
-                .set_materialization_build(crate::build::profile::StagingBuild::host_runtime(
-                    fixture_executor()
-                ))
+                .set_materialization_build(crate::build::profile::StagingBuild::host_runtime())
                 .is_err(),
             "a host-runtime profile must not replace a native-bundle resolution"
         );
@@ -761,7 +752,6 @@ robot:
         resolved.set_materialization_build(
             crate::build::profile::StagingBuild::prebuilt_native_bundle(
                 "aarch64-unknown-linux-gnu".to_string(),
-                fixture_executor(),
                 target_dir.path().to_path_buf(),
                 None,
             ),
@@ -859,7 +849,6 @@ robot:
             snapshot.path(),
             &cache_root,
             "aarch64-unknown-linux-gnu",
-            fixture_executor(),
             true,
             &reporter,
         )?;

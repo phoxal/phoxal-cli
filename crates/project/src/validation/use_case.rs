@@ -13,25 +13,25 @@ use crate::validation::{
 };
 
 pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
-    let target = match &request.source {
-        ValidationSource::Project(target) => target,
+    let project_start = match &request.source {
+        ValidationSource::Project(project) => project,
         ValidationSource::Archive(archive) => {
             crate::bundle::archive::extract_build_archive(&archive.archive, &archive.destination)?;
             // A build archive is a whole deployment release. Its shape is
-            // proven here, executor beside bundle, so an installer never
-            // activates a release that is missing the daemon that runs it -
-            // including an archive built before releases owned their executor.
+            // proven here, supervisor beside bundle, so an installer never
+            // activates a release that is missing the supervisor that runs it -
+            // including an archive built before releases owned their supervisor.
             let release = crate::deployment::validate_release(&archive.destination)
                 .context("build archive is not a valid deployment release")?;
             let expected = crate::check::participant_metadata::expected_target_for_host();
             crate::check::participant_metadata::ensure_target(
-                &std::fs::read(&release.executor).with_context(|| {
-                    format!("failed to read executor {}", release.executor.display())
+                &std::fs::read(&release.supervisor).with_context(|| {
+                    format!("failed to read supervisor {}", release.supervisor.display())
                 })?,
-                &release.executor.display().to_string(),
+                &release.supervisor.display().to_string(),
                 &expected,
             )
-            .context("this release's executor cannot run on this host")?;
+            .context("this release's supervisor cannot run on this host")?;
             let bundle = crate::load::layout::validate_runtime_bundle(&release.bundle, expected)
                 .context("runtime archive failed verification")?;
             return Ok(ValidationReport {
@@ -44,7 +44,7 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
             });
         }
     };
-    let loaded = crate::load::project::load(&target.logical_root)?;
+    let loaded = crate::load::project::load(project_start)?;
     let project_root = loaded.root.as_path();
     let robot_path = loaded.robot_path;
     let robot = loaded.robot;

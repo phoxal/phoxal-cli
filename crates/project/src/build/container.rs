@@ -10,9 +10,8 @@
 //!
 //! ## Officials materialize inside the container too
 //!
-//! The deterministic, robot-independent catalog set (every official service
-//! ("every official always runs" per ) is installed with one
-//! multi-package `cargo install` in the SAME container invocation,
+//! The robot-independent set of official services is installed with one
+//! multi-package `cargo install` in the same container invocation,
 //! not host-side: the container already runs natively on the target
 //! architecture ([`platform_for_triple`]), which is exactly the property that
 //! makes cross-compiling from the host risky for a package with any native
@@ -33,9 +32,9 @@
 //! --builder container` resolves the robot graph, from the same frozen
 //! source snapshot the container compiles, BEFORE invoking the container -
 //! specifically to learn them - and adds every registry-sourced driver it
-//! finds to the same `cargo install` batch the container runs. This ensures
-//! describe: a container build no longer leaves any official, including a
-//! component driver, to cross-compile host-side. A missing expected official
+//! finds to the same `cargo install` batch the container runs. A container
+//! build therefore leaves no official package, including a component driver,
+//! to cross-compile host-side. A missing expected official
 //! in the container's own output is a hard error, never a silent fallback to
 //! a host-side cross-compiled install - see
 //! `stager::link_from_officials_source`. A workspace/path-overridden driver
@@ -147,12 +146,11 @@ pub fn require_platform_for_triple(triple: &str) -> Result<&'static str> {
     })
 }
 
-/// One official package [`ContainerBuildSpec::invocation`] installs inside
-/// the container - a Cargo package name (already projected from its catalog
-/// identity, e.g. `phoxal-service-drive`) at the exact train every official
-/// package is pinned to.
+/// One explicit Cargo package [`ContainerBuildSpec::invocation`] installs
+/// inside the container at an exact train. This includes participant packages
+/// and the non-catalog framework supervisor.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContainerOfficial {
+pub struct ContainerPackage {
     pub package: String,
     pub train: String,
 }
@@ -190,14 +188,13 @@ pub struct ContainerBuildSpec {
     /// and be empty before the container runs; its `bin/` subtree becomes
     /// the container build's `officials_source` for host-side staging.
     pub officials_root: PathBuf,
-    /// The complete official set to install via `cargo install` inside the
-    /// container, at the resolved train: the deterministic catalog set
-    /// (services) plus every registry-sourced component
-    /// driver this robot declares.
-    /// Empty skips every official install; the caller then has no
+    /// The complete explicit Cargo-package set installed in one release-profile
+    /// batch: catalog participants, selected registry component drivers, and
+    /// the exact-train framework supervisor.
+    /// Empty skips every registry install; the caller then has no
     /// `officials_source` to hand to host-side staging, which materializes
     /// the whole set itself instead.
-    pub officials: Vec<ContainerOfficial>,
+    pub packages: Vec<ContainerPackage>,
     /// Sorted, deduplicated package names selected from the frozen workspace.
     /// An unselected crate never enters the build command.
     pub workspace_packages: Vec<String>,
@@ -298,7 +295,7 @@ impl ContainerBuildSpec {
             args.push("-v".to_string());
             args.push(format!("{}:{}", git.display(), CONTAINER_CARGO_GIT));
         }
-        if !self.officials.is_empty() {
+        if !self.packages.is_empty() {
             args.push("-v".to_string());
             args.push(format!(
                 "{}:{}",
@@ -342,11 +339,11 @@ impl ContainerBuildSpec {
             }
             commands.push(workspace_build);
         }
-        if !self.officials.is_empty() {
+        if !self.packages.is_empty() {
             let install_args = crate::build::materialise::build_install_args(
-                self.officials
+                self.packages
                     .iter()
-                    .map(|official| (official.package.as_str(), official.train.as_str())),
+                    .map(|package| (package.package.as_str(), package.train.as_str())),
                 Some(&self.target),
                 crate::build::materialise::MaterializeProfile::Release,
                 self.offline,
@@ -454,12 +451,12 @@ mod tests {
             cargo_registry: Some(PathBuf::from("/home/dev/.cargo/registry")),
             cargo_git: Some(PathBuf::from("/home/dev/.cargo/git")),
             officials_root: PathBuf::from("/tmp/officials"),
-            officials: vec![
-                ContainerOfficial {
+            packages: vec![
+                ContainerPackage {
                     package: "phoxal-service-drive".to_string(),
                     train: "0.42.0".to_string(),
                 },
-                ContainerOfficial {
+                ContainerPackage {
                     package: "phoxal-tool-bus".to_string(),
                     train: "0.41.7".to_string(),
                 },
@@ -612,7 +609,7 @@ mod tests {
         let mut spec = spec();
         spec.cargo_registry = None;
         spec.cargo_git = None;
-        spec.officials = Vec::new();
+        spec.packages = Vec::new();
         let joined = spec.invocation().args.join(" ");
         assert!(!joined.contains(".cargo/registry"), "{joined}");
         assert!(!joined.contains(".cargo/git"), "{joined}");
@@ -629,7 +626,7 @@ mod tests {
     #[test]
     fn no_officials_omits_both_the_mount_and_any_install_command() {
         let mut spec = spec();
-        spec.officials = Vec::new();
+        spec.packages = Vec::new();
         let joined = spec.invocation().args.join(" ");
         assert!(!joined.contains("'cargo' 'install'"), "{joined}");
         assert!(!joined.contains(CONTAINER_OFFICIALS), "{joined}");

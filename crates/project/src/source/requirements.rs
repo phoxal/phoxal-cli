@@ -7,8 +7,8 @@
 //! takes no execution options: the finalized manifest already carries the run
 //! intent as data (`clock:` plus the `driver:` blocks finalization kept).
 //!
-//! `phoxal` uses it to decide what to build and stage; `phoxald` uses it to
-//! decide what to validate and launch. There is deliberately no second
+//! `phoxal` uses it to decide what to build and stage; `phoxal-supervisor` uses
+//! it to decide what to validate and launch. There is deliberately no second
 //! derivation for either side to disagree with.
 
 use std::collections::{BTreeMap, BTreeSet};

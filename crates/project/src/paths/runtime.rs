@@ -2,9 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-/// A source project's own deployment release, holding the executor and the
+/// A source project's own deployment release, holding the supervisor and the
 /// bundle this project's last staging produced. It is a directory of its own so
-/// the release stays exactly its three entries, with all local runtime state
+/// the release stays exactly its two entries, with all local runtime state
 /// (locks, sockets, caches, archives) beside it under `.phoxal/` rather than
 /// inside it.
 pub(crate) const RUNTIME_RELEASE_ROOT_RELATIVE: &str = ".phoxal/release";
@@ -16,9 +16,8 @@ pub(crate) fn runtime_release_root(project_root: &Path) -> PathBuf {
 
 pub use phoxal_cli_host::paths::{
     ACTIVE_RUNTIME_ROOT, INSTALL_ROOT, INSTALLED_BINARY_ROOT, INSTALLED_CLIENT_BINARY,
-    INSTALLED_DAEMON_BINARY, INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT, RELEASES_ROOT,
-    RuntimePaths, SYSTEMD_ACTIVE_ROOT, SYSTEMD_UNIT, SYSTEMD_UNIT_PATH, SYSTEMD_UNIT_ROOT,
-    is_installed_root,
+    INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT, RELEASES_ROOT, RuntimePaths,
+    SYSTEMD_ACTIVE_ROOT, SYSTEMD_UNIT, SYSTEMD_UNIT_PATH, SYSTEMD_UNIT_ROOT, is_installed_root,
 };
 
 /// Resolve `/var/phoxal` once after its run lock is held, so the rest of the

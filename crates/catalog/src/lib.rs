@@ -182,7 +182,7 @@ const SIMULATION: &[OfficialRuntime] = &[OfficialRuntime {
     kind: ArtifactKind::Simulator,
 }];
 
-/// The official participant set one `phoxal`/`phoxald` pair interprets.
+/// The official participant set one CLI/framework-supervisor pair interprets.
 ///
 /// A single current snapshot, deliberately not a table keyed by framework
 /// train: every binary in one execution is built on one compatibility line, and

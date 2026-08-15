@@ -1,38 +1,35 @@
-//! The deployment release: one bundle and one executor that runs it.
+//! The deployment release: one bundle and the framework supervisor that runs it.
 //!
 //! A deployment release is what this CLI stages, archives, installs, activates,
 //! and rolls back. It holds exactly two entries:
 //!
 //! ```text
-//! phoxald    the executor this release is run by
-//! bundle/    the runtime bundle, self-verifying through phoxal-bundle
+//! phoxal-supervisor    the framework supervisor this release is run by
+//! bundle/              the runtime bundle, self-verifying through phoxal-bundle
 //! ```
 //!
-//! Packaging the executor beside the bundle is what makes install and rollback
-//! atomic over both halves: activation switches one directory, so an executor
+//! Packaging the supervisor beside the bundle is what makes install and rollback
+//! atomic over both halves: activation switches one directory, so a supervisor
 //! from one release can never end up running another release's bundle.
 //!
-//! The layout is frozen convention, not a document. There is nothing to
-//! describe: the two names are constants, the bundle verifies its own contents
-//! and carries its own framework line, `phoxald` refuses at open a bundle from a
-//! line it does not execute, and the archive a release travels in is verified
-//! whole by its own digest. What validation does here is prove the shape:
-//! both halves present, the executor executable, and nothing else at the root.
+//! The layout is a fixed convention rather than another descriptor file. The
+//! bundle verifies its own contents and framework line, the supervisor refuses
+//! incompatible bundles, and the archive is verified by its digest. Validation
+//! here checks only the release shape: both entries are present, the supervisor
+//! is executable, and nothing else exists at the root.
 //!
-//! The daemon knows nothing of any of this. `phoxald` takes a bundle root and
+//! The supervisor knows nothing of any of this packaging. It takes a bundle root and
 //! nothing else; the release is the CLI's packaging around it.
 
+use anyhow::{Context, Result, bail, ensure};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use anyhow::{Context, Result, bail, ensure};
 
 use crate::check::participant_metadata::{ExpectedTarget, ensure_target};
 
-/// The executor's file name inside a release.
-pub const EXECUTOR_FILE: &str = phoxal_cli_host::paths::DAEMON_BINARY;
+/// The framework supervisor's file name inside a release.
+pub const SUPERVISOR_FILE: &str = "phoxal-supervisor";
 
 /// The bundle directory's name inside a release.
 pub const BUNDLE_DIR: &str = "bundle";
@@ -41,72 +38,50 @@ pub const BUNDLE_DIR: &str = "bundle";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseLayout {
     pub root: PathBuf,
-    pub executor: PathBuf,
+    pub supervisor: PathBuf,
     pub bundle: PathBuf,
 }
 
-/// How a release obtains the `phoxald` its target is executed by.
-///
-/// The CLI's own published pair is the only source of a daemon: there is no
-/// daemon registry, and a robot project never builds the supervisor. This crate
-/// therefore asks rather than resolves - the product's own identity and its
-/// release channel belong to the client, and a robot project's framework must
-/// never be able to reach them.
-pub trait ExecutorSource: Send + Sync {
-    /// The `phoxald` a release for `target` must carry.
-    ///
-    /// # Errors
-    ///
-    /// When no executor for that target can be obtained.
-    fn executor_for(
-        &self,
-        target: &str,
-        offline: bool,
-        ui: &dyn crate::Reporter,
-    ) -> Result<PathBuf>;
-}
-
-/// A shared [`ExecutorSource`], as every use-case request carries one.
-pub type SharedExecutorSource = Arc<dyn ExecutorSource>;
-
 /// Complete a release whose `bundle/` is already staged at `root` by copying
-/// `executor_source` in as the release's executor.
+/// `supervisor_source` in as the release's framework supervisor.
 ///
-/// The executor is proven to be an object file for `expected` before it is
-/// copied, so a cross-target release can never package this host's own daemon,
-/// and a wrong-architecture executor is refused here rather than by an exec
+/// The supervisor is proven to be an object file for `expected` before it is
+/// copied, so a cross-target release can never package this host's own supervisor,
+/// and a wrong-architecture supervisor is refused here rather than by an exec
 /// failure on the device.
 ///
 /// # Errors
 ///
-/// When the executor cannot be read, is not built for `expected`, cannot be
+/// When the supervisor cannot be read, is not built for `expected`, cannot be
 /// written, or the completed release does not validate.
 pub(crate) fn materialize(
     root: &Path,
-    executor_source: &Path,
+    supervisor_source: &Path,
     expected: &ExpectedTarget,
 ) -> Result<ReleaseLayout> {
-    let bytes = fs::read(executor_source).with_context(|| {
+    let bytes = fs::read(supervisor_source).with_context(|| {
         format!(
-            "failed to read the executor {} this release must carry",
-            executor_source.display()
+            "failed to read the supervisor {} this release must carry",
+            supervisor_source.display()
         )
     })?;
-    ensure_target(&bytes, &executor_source.display().to_string(), expected).with_context(|| {
-        format!(
-            "{} cannot execute this release on its target",
-            executor_source.display()
-        )
-    })?;
-    let executor = root.join(EXECUTOR_FILE);
-    fs::write(&executor, &bytes)
-        .with_context(|| format!("failed to write {}", executor.display()))?;
-    make_executable(&executor)?;
+    ensure_target(&bytes, &supervisor_source.display().to_string(), expected).with_context(
+        || {
+            format!(
+                "{} cannot execute this release on its target",
+                supervisor_source.display()
+            )
+        },
+    )?;
+    let supervisor = root.join(SUPERVISOR_FILE);
+    fs::write(&supervisor, &bytes)
+        .with_context(|| format!("failed to write {}", supervisor.display()))?;
+    make_executable(&supervisor)?;
     validate_layout(root)
 }
 
 /// Validate a whole deployment release at `root`: the exact release layout, an
-/// executable executor, and the bundle's own content.
+/// executable supervisor, and the bundle's own content.
 ///
 /// # Errors
 ///
@@ -123,19 +98,19 @@ pub fn validate_release(root: &Path) -> Result<ReleaseLayout> {
     Ok(layout)
 }
 
-/// Whether `root` looks like a deployment release at all. The executor's
+/// Whether `root` looks like a deployment release at all. The supervisor's
 /// presence is the whole test: a release is the pair, so the half that a bundle
 /// directory can never provide is what identifies one.
 #[must_use]
 pub fn is_release_root(root: &Path) -> bool {
-    root.join(EXECUTOR_FILE).is_file()
+    root.join(SUPERVISOR_FILE).is_file()
 }
 
 /// Refuse a runtime bundle handed in where a deployment release belongs.
 ///
-/// A `build.phoxal` written before releases owned their executor is a bundle at
+/// A `build.phoxal` written before releases owned their supervisor is a bundle at
 /// its own root: it verifies as a bundle and would install as one, and the
-/// installed unit would then execute it with whatever `phoxald` the host
+/// installed unit would then execute it with whatever supervisor the host
 /// happened to have. That is exactly the drift releases exist to remove, so the
 /// old shape is refused by name rather than adapted.
 ///
@@ -146,8 +121,8 @@ pub fn refuse_bundle_shaped_release(root: &Path) -> Result<()> {
     ensure!(
         !root.join(phoxal_bundle::RUNTIME_FILE).is_file(),
         "{} is a runtime bundle, not a deployment release: it carries {} at its root instead of \
-         `{EXECUTOR_FILE}` and `{BUNDLE_DIR}/`. This archive predates executor-owning releases, \
-         where a release carries the daemon that runs it; rebuild it with this CLI (`phoxal \
+         `{SUPERVISOR_FILE}` and `{BUNDLE_DIR}/`. This archive predates supervisor-owning releases, \
+         where a release carries the supervisor that runs it; rebuild it with this CLI (`phoxal \
          build`) and install the result",
         root.display(),
         phoxal_bundle::RUNTIME_FILE,
@@ -161,16 +136,16 @@ pub fn refuse_bundle_shaped_release(root: &Path) -> Result<()> {
 fn validate_layout(root: &Path) -> Result<ReleaseLayout> {
     refuse_bundle_shaped_release(root)?;
     require_exact_release_entries(root)?;
-    let executor = root.join(EXECUTOR_FILE);
-    require_executable(&executor)?;
+    let supervisor = root.join(SUPERVISOR_FILE);
+    require_executable(&supervisor)?;
     Ok(ReleaseLayout {
         root: root.to_path_buf(),
-        executor,
+        supervisor,
         bundle: root.join(BUNDLE_DIR),
     })
 }
 
-/// The release root admits exactly the executor and the bundle directory - the
+/// The release root admits exactly the supervisor and the bundle directory - the
 /// same strictness the runtime bundle applies to its own root. A release is its
 /// layout, so anything else there is content nobody put in deliberately.
 fn require_exact_release_entries(root: &Path) -> Result<()> {
@@ -191,20 +166,20 @@ fn require_exact_release_entries(root: &Path) -> Result<()> {
         let is_dir = fs::symlink_metadata(&path)
             .with_context(|| format!("failed to inspect {}", path.display()))?
             .is_dir();
-        if name == EXECUTOR_FILE {
+        if name == SUPERVISOR_FILE {
             ensure!(!is_dir, "{} must be a file", path.display());
         } else if name == BUNDLE_DIR {
             ensure!(is_dir, "{} must be a directory", path.display());
         } else {
             bail!(
                 "{} does not belong to a deployment release: a release holds exactly \
-                 `{EXECUTOR_FILE}` and `{BUNDLE_DIR}/`",
+                 `{SUPERVISOR_FILE}` and `{BUNDLE_DIR}/`",
                 path.display()
             );
         }
         present.insert(name.to_string());
     }
-    for required in [EXECUTOR_FILE, BUNDLE_DIR] {
+    for required in [SUPERVISOR_FILE, BUNDLE_DIR] {
         ensure!(
             present.contains(required),
             "{} is not a complete deployment release: `{required}` is missing",
@@ -214,16 +189,16 @@ fn require_exact_release_entries(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A release's executor has to be runnable, or activating the release would
+/// A release's supervisor has to be runnable, or activating the release would
 /// leave a unit that cannot start.
 fn require_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let metadata = fs::metadata(path)
-        .with_context(|| format!("failed to inspect the executor {}", path.display()))?;
+        .with_context(|| format!("failed to inspect the supervisor {}", path.display()))?;
     ensure!(
         metadata.permissions().mode() & 0o111 != 0,
-        "the executor {} is not executable; a release carries a daemon that can run it",
+        "the supervisor {} is not executable; a release carries a supervisor that can run it",
         path.display()
     );
     Ok(())
@@ -240,12 +215,12 @@ fn make_executable(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// An executor whose bytes are a real object file for this host, so
+    /// A supervisor whose bytes are a real object file for this host, so
     /// materialization's target proof runs against something it can accept.
-    fn host_executor(path: &Path) -> Vec<u8> {
+    fn host_supervisor(path: &Path) -> Vec<u8> {
         let bytes = fs::read(std::env::current_exe().expect("the test binary is readable"))
             .expect("the test binary is readable");
-        fs::write(path, &bytes).expect("write the fixture executor");
+        fs::write(path, &bytes).expect("write the fixture supervisor");
         bytes
     }
 
@@ -254,12 +229,12 @@ mod tests {
     /// phoxal-bundle's contract, proven where that contract lives.
     fn staged_release(root: &Path) -> Vec<u8> {
         fs::create_dir_all(root.join(BUNDLE_DIR)).expect("bundle directory");
-        let bytes = host_executor(&root.join(EXECUTOR_FILE));
-        make_executable(&root.join(EXECUTOR_FILE)).expect("executable bit");
+        let bytes = host_supervisor(&root.join(SUPERVISOR_FILE));
+        make_executable(&root.join(SUPERVISOR_FILE)).expect("executable bit");
         bytes
     }
 
-    /// The whole-release walk: both halves present, the executor runnable, and
+    /// The whole-release walk: both halves present, the supervisor runnable, and
     /// each half resolved to the path its consumer uses.
     #[test]
     fn a_complete_release_validates_and_resolves_both_halves() {
@@ -269,7 +244,7 @@ mod tests {
 
         let layout = validate_layout(&root).expect("a complete release validates");
         assert_eq!(layout.root, root);
-        assert_eq!(layout.executor, root.join("phoxald"));
+        assert_eq!(layout.supervisor, root.join(SUPERVISOR_FILE));
         assert_eq!(layout.bundle, root.join("bundle"));
         assert!(is_release_root(&root));
     }
@@ -289,7 +264,7 @@ mod tests {
         assert_eq!(
             error,
             format!(
-                "{} does not belong to a deployment release: a release holds exactly `phoxald` \
+                "{} does not belong to a deployment release: a release holds exactly `phoxal-supervisor` \
                  and `bundle/`",
                 root.join("leftover.tmp").display()
             )
@@ -302,13 +277,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path().join("release");
         staged_release(&root);
-        fs::remove_file(root.join(EXECUTOR_FILE)).expect("remove the executor");
+        fs::remove_file(root.join(SUPERVISOR_FILE)).expect("remove the supervisor");
         assert_eq!(
             validate_layout(&root)
-                .expect_err("a release without its executor is not a release")
+                .expect_err("a release without its supervisor is not a release")
                 .to_string(),
             format!(
-                "{} is not a complete deployment release: `phoxald` is missing",
+                "{} is not a complete deployment release: `phoxal-supervisor` is missing",
                 root.display()
             )
         );
@@ -329,7 +304,7 @@ mod tests {
     }
 
     /// Each half has to be the kind of entry it is, so a file named `bundle` or
-    /// a directory named `phoxald` is refused rather than half-read.
+    /// a directory named `phoxal-supervisor` is refused rather than half-read.
     #[test]
     fn each_half_must_be_the_kind_of_entry_it_is() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -345,33 +320,36 @@ mod tests {
         );
     }
 
-    /// An executor that cannot be executed is not an executor: activating such
+    /// A supervisor that cannot be executed is not a usable supervisor: activating such
     /// a release would leave a unit that never starts.
     #[test]
-    fn a_release_whose_executor_is_not_executable_is_refused() {
+    fn a_release_whose_supervisor_is_not_executable_is_refused() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path().join("release");
         staged_release(&root);
-        fs::set_permissions(root.join(EXECUTOR_FILE), fs::Permissions::from_mode(0o644))
-            .expect("drop the executable bit");
+        fs::set_permissions(
+            root.join(SUPERVISOR_FILE),
+            fs::Permissions::from_mode(0o644),
+        )
+        .expect("drop the executable bit");
 
         assert_eq!(
             validate_layout(&root)
-                .expect_err("a release carries a daemon that can run")
+                .expect_err("a release carries a supervisor that can run")
                 .to_string(),
             format!(
-                "the executor {} is not executable; a release carries a daemon that can run it",
-                root.join(EXECUTOR_FILE).display()
+                "the supervisor {} is not executable; a release carries a supervisor that can run it",
+                root.join(SUPERVISOR_FILE).display()
             )
         );
     }
 
-    /// An archive from before releases owned their executor is a bundle at its
+    /// An archive from before releases owned their supervisor is a bundle at its
     /// root. It is refused by name, with the rebuild that fixes it.
     #[test]
-    fn a_bundle_shaped_archive_is_refused_as_predating_executor_owning_releases() {
+    fn a_bundle_shaped_archive_is_refused_as_predating_supervisor_owning_releases() {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path().join("extracted");
         fs::create_dir_all(root.join("bin")).expect("bin directory");
@@ -384,8 +362,8 @@ mod tests {
             error,
             format!(
                 "{} is a runtime bundle, not a deployment release: it carries runtime.json at its \
-                 root instead of `phoxald` and `bundle/`. This archive predates executor-owning \
-                 releases, where a release carries the daemon that runs it; rebuild it with this \
+                 root instead of `phoxal-supervisor` and `bundle/`. This archive predates supervisor-owning \
+                 releases, where a release carries the supervisor that runs it; rebuild it with this \
                  CLI (`phoxal build`) and install the result",
                 root.display()
             )
@@ -401,44 +379,47 @@ mod tests {
     }
 
     /// Materialization is the write half of the same contract: it copies the
-    /// executor in, makes it runnable, and hands back a release that validates.
+    /// supervisor in, makes it runnable, and hands back a release that validates.
     #[test]
-    fn materializing_a_release_installs_a_runnable_executor() {
+    fn materializing_a_release_installs_a_runnable_supervisor() {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path().join("release");
         fs::create_dir_all(root.join(BUNDLE_DIR)).expect("bundle directory");
-        let source = temp.path().join("phoxald");
-        let bytes = host_executor(&source);
+        let source = temp.path().join(SUPERVISOR_FILE);
+        let bytes = host_supervisor(&source);
 
         let layout = materialize(
             &root,
             &source,
             &crate::check::participant_metadata::expected_target_for_host(),
         )
-        .expect("a host executor materializes");
+        .expect("a host supervisor materializes");
 
-        assert_eq!(layout.executor, root.join(EXECUTOR_FILE));
-        assert_eq!(fs::read(&layout.executor).expect("executor bytes"), bytes);
+        assert_eq!(layout.supervisor, root.join(SUPERVISOR_FILE));
+        assert_eq!(
+            fs::read(&layout.supervisor).expect("supervisor bytes"),
+            bytes
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&layout.executor)
-                .expect("executor metadata")
+            let mode = fs::metadata(&layout.supervisor)
+                .expect("supervisor metadata")
                 .permissions()
                 .mode();
-            assert_eq!(mode & 0o111, 0o111, "the executor stays executable");
+            assert_eq!(mode & 0o111, 0o111, "the supervisor stays executable");
         }
     }
 
-    /// A release must carry an executor its own target can run, so packaging a
-    /// foreign-architecture daemon fails while the release is still a candidate.
+    /// A release must carry a supervisor its own target can run, so packaging a
+    /// foreign-architecture supervisor fails while the release is still a candidate.
     #[test]
-    fn a_release_refuses_an_executor_built_for_another_target() {
+    fn a_release_refuses_a_supervisor_built_for_another_target() {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path().join("release");
         fs::create_dir_all(root.join(BUNDLE_DIR)).expect("bundle directory");
-        let source = temp.path().join("phoxald");
-        host_executor(&source);
+        let source = temp.path().join(SUPERVISOR_FILE);
+        host_supervisor(&source);
 
         let foreign = if cfg!(target_os = "macos") {
             "aarch64-unknown-linux-gnu"
@@ -451,12 +432,12 @@ mod tests {
             &crate::check::participant_metadata::expected_target_for_triple(foreign)
                 .expect("a known triple"),
         )
-        .expect_err("a foreign-target executor cannot run this release")
+        .expect_err("a foreign-target supervisor cannot run this release")
         .to_string();
         assert!(error.contains("cannot execute this release"), "{error}");
         assert!(
-            !root.join(EXECUTOR_FILE).exists(),
-            "a refused executor is never written into the release"
+            !root.join(SUPERVISOR_FILE).exists(),
+            "a refused supervisor is never written into the release"
         );
     }
 }

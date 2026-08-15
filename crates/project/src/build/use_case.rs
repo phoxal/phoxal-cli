@@ -5,7 +5,7 @@
 //! `refresh_staging_resolved` materialization entry, but for the selected target
 //! rather than the host. It validates the staged bundle through the shared
 //! loader (against the declared target architecture, no execution), packages
-//! that target's `phoxald` beside it, and archives the whole release
+//! that target's exact-train `phoxal-supervisor` beside it, and archives the whole release
 //! deterministically. The archive matches the staged release byte for byte; it
 //! is not a second format.
 //!
@@ -26,7 +26,7 @@ use std::process::Command;
 use super::{BuildBackend, BuildBundleRequest, BuiltBundle};
 use crate::build::builder_image::{prepare_builder_image, reference_for};
 use crate::build::container::{
-    ContainerBuildSpec, ContainerEngine, ContainerOfficial, default_builder_image,
+    ContainerBuildSpec, ContainerEngine, ContainerPackage, default_builder_image,
     host_cargo_caches, platform_for_triple, require_platform_for_triple,
 };
 use crate::build::profile::StagingBuild;
@@ -147,21 +147,6 @@ pub fn build_bundle(request: BuildBundleRequest) -> Result<BuiltBundle> {
 }
 
 impl Worker {
-    /// The `phoxald` a release for `target` must carry, resolved before any
-    /// compilation so a builder that cannot obtain one refuses under its own
-    /// name rather than producing an archive with no executor in it.
-    fn executor_for(&self, target: &str, builder: &str) -> Result<PathBuf> {
-        self.request
-            .executor
-            .executor_for(target, self.request.offline, self.request.reporter.as_ref())
-            .with_context(|| {
-                format!(
-                    "`--builder {builder}` cannot package the {target} phoxald this deployment \
-                     release must carry"
-                )
-            })
-    }
-
     fn build_ssh(
         &self,
         project_root: &Path,
@@ -219,8 +204,8 @@ impl Worker {
                 .prefix("phoxal-ssh-release-")
                 .tempdir()?;
             crate::bundle::archive::extract_build_archive(pulled.path(), extracted.path())?;
-            // The remote built the release with its own installed `phoxald`,
-            // which is the executor for its own triple. This side proves the
+            // The remote materialized the supervisor from the project's exact
+            // locked framework train. This side proves the
             // whole thing: the release's shape, and the bundle it runs against
             // the declared target signature.
             let release = crate::deployment::validate_release(extracted.path())
@@ -260,8 +245,7 @@ impl Worker {
         project_root: &Path,
         target: &str,
     ) -> Result<(PathBuf, String, Option<PathBuf>)> {
-        let executor = self.executor_for(target, "local")?;
-        let staging = StagingBuild::native_bundle(target.to_string(), executor);
+        let staging = StagingBuild::native_bundle(target.to_string());
         // Local builds and stages the live project tree under the lock.
         self.stage_validate_archive(project_root, target, BuildStagingInput::Source(staging))
     }
@@ -294,7 +278,6 @@ impl Worker {
         // sibling of the real project's staged directory.
         let staging = StagingBuild::prebuilt_native_bundle(
             target.to_string(),
-            self.executor_for(target, "container")?,
             cargo_target,
             Some(officials_root.path().to_path_buf()),
         );
@@ -376,7 +359,6 @@ impl Worker {
             snapshot.path(),
             &project_root.join(".phoxal/cache/registry"),
             target,
-            self.executor_for(target, "container")?,
             self.request.offline,
             ui,
         )
@@ -387,7 +369,7 @@ impl Worker {
         // ) - is known from the catalog alone. Its train comes from the
         // same frozen resolution as robot-specific drivers, so a live-tree edit
         // cannot split one container install batch across two trains.
-        let officials = selected_registry_officials(resolved.resolved());
+        let packages = selected_registry_packages(resolved.resolved());
 
         let source_participants = crate::validation::source_participants_from_resolved(
             snapshot.path(),
@@ -428,23 +410,23 @@ impl Worker {
         let package_cache = PackageCache::new(project_root.join(".phoxal/cache/registry"));
         ui.info(format!(
             "reading build requirements for {} registry runtimes",
-            officials.len()
+            packages.len()
         ));
-        for official in &officials {
+        for package in &packages {
             let source = fetch_registry_package(
                 &http,
                 &package_cache,
-                &official.package,
-                &official.train,
+                &package.package,
+                &package.train,
                 self.request.offline,
             )?
             .manifest()?;
             let requirements =
                 phoxal_manifest::build_requirements::BuildRequirements::from_manifest(
                     &source,
-                    &format!("{}@{}", official.package, official.train),
+                    &format!("{}@{}", package.package, package.train),
                 )?;
-            attributed.insert(official.package.clone(), requirements.apt);
+            attributed.insert(package.package.clone(), requirements.apt);
         }
         let merged = merge_requirements(&attributed);
 
@@ -506,7 +488,7 @@ impl Worker {
             cargo_registry,
             cargo_git,
             officials_root: officials_root.path().to_path_buf(),
-            officials,
+            packages,
             workspace_packages: workspace_manifests.into_keys().collect(),
             offline: self.request.offline,
         };
@@ -593,7 +575,6 @@ pub(crate) fn resolve_container_staging(
     snapshot_root: &Path,
     registry_cache_root: &Path,
     target: &str,
-    executor: PathBuf,
     offline: bool,
     ui: &dyn crate::Reporter,
 ) -> Result<crate::run::prepare::ResolvedStagingInput> {
@@ -605,13 +586,13 @@ pub(crate) fn resolve_container_staging(
             drivers_subset: Vec::new(),
             offline,
         },
-        StagingBuild::native_bundle(target.to_string(), executor),
+        StagingBuild::native_bundle(target.to_string()),
         ui,
     )
 }
 
 /// Every distinct registry-sourced component driver package a resolved robot
-/// declares, as [`ContainerOfficial`] entries at that driver's own resolved
+/// declares, as [`ContainerPackage`] entries at that driver's own resolved
 /// train. The container cannot know component drivers from the catalog
 /// alone, so `compile_in_container` resolves the robot graph first and hands
 /// the result here to learn which drivers to install alongside the static
@@ -619,14 +600,14 @@ pub(crate) fn resolve_container_staging(
 /// share one driver package) and skips a workspace/path-overridden driver
 /// entirely - that one is staged from its own build output, in the container
 /// or on the host, and never reaches `cargo install` either way.
-fn component_driver_officials(
+fn component_driver_packages(
     resolved: &crate::source::resolver::BundlePlan,
-) -> Vec<ContainerOfficial> {
+) -> Vec<ContainerPackage> {
     let mut seen_packages = std::collections::BTreeSet::new();
     crate::validation::component_driver_runtimes_by_ref(resolved)
         .into_values()
         .filter(|runtime| seen_packages.insert(runtime.package.clone()))
-        .map(|runtime| ContainerOfficial {
+        .map(|runtime| ContainerPackage {
             package: phoxal_cli_catalog::cargo_package_name(&runtime.package),
             train: runtime.train.clone(),
         })
@@ -636,31 +617,35 @@ fn component_driver_officials(
 /// Select only registry-backed runtime packages from the frozen resolved plan.
 /// A path override is compiled from the snapshot and must never also be fetched
 /// from the registry, even when its package identity matches the catalog.
-fn selected_registry_officials(
+fn selected_registry_packages(
     resolved: &crate::source::resolver::BundlePlan,
-) -> Vec<ContainerOfficial> {
+) -> Vec<ContainerPackage> {
     let overridden = resolved
         .platform_runtimes
         .iter()
         .filter(|runtime| runtime.path_override.is_some())
         .map(|runtime| runtime.package.clone())
         .collect::<BTreeSet<_>>();
-    let mut officials = phoxal_cli_catalog::Catalog::official()
+    let mut packages = phoxal_cli_catalog::Catalog::official()
         .native()
         .filter(|official| !overridden.contains(official.package))
-        .map(|official| ContainerOfficial {
+        .map(|official| ContainerPackage {
             package: phoxal_cli_catalog::cargo_package_name(official.package),
             train: resolved.train.version().to_string(),
         })
         .collect::<Vec<_>>();
-    officials.extend(component_driver_officials(resolved));
-    officials.sort_by(|left, right| {
+    packages.extend(component_driver_packages(resolved));
+    packages.push(ContainerPackage {
+        package: crate::build::materialise::SUPERVISOR_PACKAGE.to_string(),
+        train: resolved.train.version().to_string(),
+    });
+    packages.sort_by(|left, right| {
         left.package
             .cmp(&right.package)
             .then_with(|| left.train.cmp(&right.train))
     });
-    officials.dedup();
-    officials
+    packages.dedup();
+    packages
 }
 
 fn merge_requirements(attributed: &BTreeMap<String, BTreeSet<String>>) -> BTreeSet<String> {
@@ -1197,11 +1182,11 @@ robot:
 
     /// The container materializes more than the static catalog set, including
     /// robot-specific component driver packages and leaving them to
-    /// cross-compile host-side. `component_driver_officials` is the pure
+    /// cross-compile host-side. `component_driver_packages` is the pure
     /// decision that closes the gap - proven here without touching a
     /// container, `cargo install`, or the network.
     #[test]
-    fn component_driver_officials_covers_registry_drivers_and_dedupes_and_skips_path_overrides() {
+    fn component_driver_packages_cover_registry_drivers_and_dedupe_and_skip_path_overrides() {
         let mut resolved = minimal_bundle_plan();
         resolved.components = vec![
             registry_driver_component("left_wheel", "phoxal/component-ddsm115"),
@@ -1213,11 +1198,11 @@ robot:
             path_overridden_driver_component("custom_gripper"),
         ];
 
-        let officials = component_driver_officials(&resolved);
+        let packages = component_driver_packages(&resolved);
 
         assert_eq!(
-            officials,
-            vec![ContainerOfficial {
+            packages,
+            vec![ContainerPackage {
                 package: "phoxal-component-ddsm115".to_string(),
                 train: "0.36.0".to_string(),
             }],
@@ -1242,10 +1227,10 @@ robot:
             "phoxal/component-ddsm115",
         )];
 
-        let officials = selected_registry_officials(&resolved);
-        let packages = officials
+        let selected = selected_registry_packages(&resolved);
+        let packages = selected
             .iter()
-            .map(|official| official.package.as_str())
+            .map(|package| package.package.as_str())
             .collect::<BTreeSet<_>>();
 
         assert!(
@@ -1254,6 +1239,24 @@ robot:
         );
         assert!(packages.contains("phoxal-service-drive"));
         assert!(packages.contains("phoxal-component-ddsm115"));
+        assert!(packages.contains(crate::build::materialise::SUPERVISOR_PACKAGE));
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|package| {
+                    package.package == crate::build::materialise::SUPERVISOR_PACKAGE
+                })
+                .count(),
+            1,
+            "the one target-native Cargo batch carries the supervisor exactly once"
+        );
+        assert!(
+            resolved.platform_runtimes.iter().all(|runtime| {
+                phoxal_cli_catalog::cargo_package_name(&runtime.package)
+                    != crate::build::materialise::SUPERVISOR_PACKAGE
+            }),
+            "container package selection must not mutate the runtime plan"
+        );
     }
 
     #[test]

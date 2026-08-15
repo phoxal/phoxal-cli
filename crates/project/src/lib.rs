@@ -38,13 +38,11 @@ mod validation;
 pub use build::container::ContainerEngine;
 pub use build::shell::shell_quote;
 pub use build::{BuildBackend, BuildBundleRequest, BuiltBundle, build_bundle};
-pub use deployment::{
-    BUNDLE_DIR, EXECUTOR_FILE, ExecutorSource, ReleaseLayout, SharedExecutorSource,
-};
+pub use deployment::{BUNDLE_DIR, ReleaseLayout, SUPERVISOR_FILE};
 pub use paths::runtime::{
     ACTIVE_RUNTIME_ROOT, INSTALL_ROOT, INSTALLED_BINARY_ROOT, INSTALLED_CLIENT_BINARY,
-    INSTALLED_DAEMON_BINARY, INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT, RELEASES_ROOT,
-    RuntimePaths, SYSTEMD_ACTIVE_ROOT, SYSTEMD_UNIT, SYSTEMD_UNIT_PATH, SYSTEMD_UNIT_ROOT,
+    INSTALLED_STATE_ROOT, INSTALLED_VOLATILE_ROOT, RELEASES_ROOT, RuntimePaths,
+    SYSTEMD_ACTIVE_ROOT, SYSTEMD_UNIT, SYSTEMD_UNIT_PATH, SYSTEMD_UNIT_ROOT,
 };
 pub use progress::{PreparationEvent, Reporter, SilentReporter};
 pub use progress_phase::{PhaseId, PhaseOutcome};

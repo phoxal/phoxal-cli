@@ -18,10 +18,10 @@ pub(crate) fn layout_path(project_root: &Path) -> PathBuf {
 
 /// Atomically publish `candidate` as the live `.phoxal/release/`, replacing any
 /// previous release. Call this ONLY after every install, source build, metadata
-/// read, loader validation, and the release step that adds the executor have
+/// read, loader validation, and the release step that adds the supervisor have
 /// already succeeded against the candidate - this is the exact promise the
 /// module docs make, and the only step allowed to touch the live path. The
-/// executor and the bundle therefore change together or not at all.
+/// supervisor and the bundle therefore change together or not at all.
 pub(crate) fn publish_runtime_layout(candidate: StagedCandidate) -> Result<PathBuf> {
     let StagedCandidate {
         dir: candidate,

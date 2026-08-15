@@ -26,15 +26,13 @@ pub struct DriverRequest {
 pub struct PrepareRunRequest {
     pub target: RuntimeTarget,
     pub drivers: DriverRequest,
-    /// Where the release this run publishes gets the `phoxald` that runs it.
-    pub executor: crate::deployment::SharedExecutorSource,
     pub offline: bool,
     pub reporter: Arc<dyn Reporter>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedExecution {
-    /// The verified deployment release to launch: the executor and the bundle
+    /// The verified deployment release to launch: the supervisor and the bundle
     /// it runs, which always come from the same release.
     pub release: crate::deployment::ReleaseLayout,
     pub simulation: Option<super::simulation::PreparedSimulation>,

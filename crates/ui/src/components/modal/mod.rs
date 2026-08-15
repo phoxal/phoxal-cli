@@ -38,7 +38,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         }
         ModalId::ConfirmStop => (
             " Stop project? ",
-            "Enter stops the execution and every supervised process. Esc cancels. Closing the UI with q only detaches - the daemon keeps running.".to_string(),
+            "Enter stops the execution and every supervised process. Esc cancels. Closing the UI with q only detaches - the supervisor keeps running.".to_string(),
         ),
     };
     frame.render_widget(Clear, popup);

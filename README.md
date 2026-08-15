@@ -1,7 +1,8 @@
 # phoxal-cli
 
-Rust workspace for `phoxal`, the project and session CLI, and `phoxald`, the
-robot execution supervisor.
+Rust workspace for `phoxal`, the project, build, deployment, and session CLI.
+Robot releases carry the `phoxal-supervisor` from their selected framework
+train.
 
 Phoxal is pre-1.0 and evolving. Installation and command documentation is
 published at <https://phoxal.com>; the installed commands also provide local
@@ -9,7 +10,6 @@ help.
 
 ```sh
 phoxal --help
-phoxald --help
 ```
 
 ## Develop

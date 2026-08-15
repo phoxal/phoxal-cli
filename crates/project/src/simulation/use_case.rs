@@ -21,6 +21,20 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
     canonical["clock"] = serde_json::Value::String("simulated".to_string());
     resolved.resolved.compiled.robot = serde_json::from_value(canonical)
         .context("failed to derive the simulated canonical robot")?;
+    // Refuse a cold/missing exact-train supervisor before compiling any
+    // simulation participant. Participant builds remain development-profile;
+    // the supervisor materializer is unconditionally release-profile.
+    let target_dir =
+        crate::build::cargo::cargo_target_dir(&resolved.project_root, request.offline)?;
+    let supervisor = crate::build::materialise::materialize_supervisor(
+        resolved.resolved.train.version(),
+        None,
+        request.offline,
+        None,
+        Some(target_dir),
+        request.reporter.as_ref(),
+    )?;
+    crate::progress::ensure_active(request.reporter.as_ref())?;
     let source_participants =
         super::participants::sim_source_participants(&resolved.project_root, &resolved.resolved)?;
     let source_artifacts = {
@@ -41,7 +55,7 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
         )?
     };
     // A simulation bundle is `clock: simulated` with every driver block
-    // stripped; the daemon never learns it is a simulation from anything else.
+    // stripped; the supervisor never learns it is a simulation from anything else.
     let candidate = crate::stage::begin_runtime_layout(&resolved.project_root, &resolved.resolved)
         .context("failed to stage the simulation bundle")?;
     crate::progress::run_phase(
@@ -71,13 +85,6 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
     )?;
     crate::stage::write_runtime_document(candidate.path(), &resolved.resolved)?;
     crate::progress::ensure_active(request.reporter.as_ref())?;
-    // A simulation runs on this host, so its release packages the daemon this
-    // client's own installation provides - the same shape `run` produces.
-    let executor = request.executor.executor_for(
-        &crate::source::host_target_triple(),
-        request.offline,
-        request.reporter.as_ref(),
-    )?;
     let release = crate::progress::run_phase(
         request.reporter.as_ref(),
         crate::progress_phase::PhaseId::new("publish"),
@@ -85,7 +92,7 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
         || {
             crate::stage::finalize_release(
                 candidate,
-                &executor,
+                supervisor.path(),
                 &crate::check::participant_metadata::expected_target_for_host(),
             )
         },

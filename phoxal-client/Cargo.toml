@@ -1,0 +1,28 @@
+[package]
+name = "phoxal-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = ["phoxal-internal"]
+description = "The external client boundary for talking to a running Phoxal robot."
+documentation.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lib]
+name = "phoxal_client"
+path = "src/lib.rs"
+
+[dependencies]
+phoxal-protocol = { workspace = true }
+phoxal-bus = { workspace = true }
+phoxal-runtime-contract = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+trybuild = "1"
+
+[lints]
+workspace = true

@@ -63,33 +63,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libudev-dev pkg-config
 
-      # `phoxal` and `phoxald` are one product at one version,
-      # so they are built together, from the same commit and the same locked
-      # graph, and packaged into the same archive.
-      - name: Build the release pair
+      - name: Build the CLI release
         run: >-
           cargo build
           --locked
           --release
           --target ${{ matrix.target }}
-          -p phoxal-cli-client
-          -p phoxal-cli-supervisor
+          -p phoxal-cli
 
       - name: Package
         run: |
           set -euo pipefail
           # The published asset contract is shared with the phoxal.com installer
-          # (install.sh in phoxal/website) and `phoxal self upgrade`: archive
-          # `phoxal-<version>-<target>.tar.gz` containing BOTH binaries, named
-          # `phoxal-<target>` and `phoxald-<target>`. An archive carrying only
-          # one of them is rejected by `self upgrade` rather than half applied.
+          # and `phoxal self upgrade`: one target-specific CLI binary.
           mkdir -p dist
-          for bin in phoxal phoxald; do
-            cp "target/${{ matrix.target }}/release/${bin}" "dist/${bin}-${{ matrix.target }}"
-          done
+          cp "target/${{ matrix.target }}/release/phoxal" "dist/phoxal-${{ matrix.target }}"
           archive="phoxal-${{ needs.plan.outputs.version }}-${{ matrix.target }}.tar.gz"
-          tar -czf "dist/${archive}" \
-            -C dist "phoxal-${{ matrix.target }}" "phoxald-${{ matrix.target }}"
+          # macOS bsdtar otherwise adds AppleDouble `._*` metadata entries.
+          COPYFILE_DISABLE=1 tar -czf "dist/${archive}" -C dist "phoxal-${{ matrix.target }}"
           # Sibling checksum asset, verified by the phoxal.com installer and
           # `self upgrade`.
           # Format: "<hex>  <archive>" (sha256sum default).

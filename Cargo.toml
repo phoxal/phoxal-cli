@@ -8,22 +8,20 @@ documentation = "https://github.com/phoxal/phoxal-cli#readme"
 homepage = "https://github.com/phoxal/phoxal-cli"
 repository = "https://github.com/phoxal/phoxal-cli"
 
-# Two root applications ship from this workspace and nothing else does:
-# `client/` builds the `phoxal` tool, `supervisor/` builds
-# the `phoxald` daemon. Everything under `crates/` is a domain-oriented library
-# both of them share. The workspace root itself is virtual - it holds no
-# package, so neither executable can accidentally become "the" root crate.
+# `cli/` is the one shipped application. `phoxal-client/` is the reusable,
+# unpublished remote-session boundary, and everything under `crates/` is
+# CLI-specific implementation. The framework train owns `phoxal-supervisor`;
+# this workspace only materializes that exact-train package for robot releases.
 [workspace]
 resolver = "3"
 members = [
-    "client",
+    "cli",
     "crates/catalog",
-    "crates/client-lib",
+    "phoxal-client",
     "crates/host",
     "crates/observation",
     "crates/project",
     "crates/ui",
-    "supervisor",
 ]
 
 [workspace.dependencies]
@@ -60,16 +58,16 @@ thiserror = "2.0.18"
 
 # The framework train. Every crate in this workspace speaks one train, so the
 # pins live here and nowhere else.
-phoxal-api = "0.59.0"
-phoxal-bundle = "0.59.0"
-phoxal-bus = "0.59.0"
-phoxal-manifest = "0.59.0"
-phoxal-model = "0.59.0"
-phoxal-runtime-contract = "0.59.0"
+phoxal-protocol = "0.61.0"
+phoxal-bundle = "0.61.0"
+phoxal-bus = "0.61.0"
+phoxal-manifest = "0.61.0"
+phoxal-model = "0.61.0"
+phoxal-runtime-contract = "0.61.0"
 
 # The external client boundary. Anything in this workspace that speaks to a
 # running robot depends on this and not on the wire crates above.
-phoxal-client = { path = "crates/client-lib" }
+phoxal-client = { path = "phoxal-client" }
 
 phoxal-cli-catalog = { path = "crates/catalog" }
 phoxal-cli-host = { path = "crates/host" }
