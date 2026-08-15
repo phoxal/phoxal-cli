@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use phoxal_client::supervisor::execution::{CommandOutcome, Lifecycle, Snapshot};
+use tokio::sync::oneshot;
 
 use super::lifecycle::Target;
-use super::session::{self, Detachable};
+use super::session::{self, Detachable, OwnedSupervisorExit};
 use super::supervisor::{self, LaunchedSupervisor};
 use super::webots::Webots;
 use crate::attach::Session;
@@ -31,6 +32,10 @@ const HANDSHAKE_BUDGET: Duration = Duration::from_secs(2 * 60);
 /// open-ended: the world clock is already gone, so waiting forever would only
 /// hold the operator's terminal hostage to a wedged supervisor.
 const TERMINAL_BUDGET: Duration = Duration::from_secs(30);
+
+/// How long a simulation-owned supervisor process group gets to disappear
+/// after the graceful bound before cleanup reports a failure.
+const KILL_BUDGET: Duration = Duration::from_secs(5);
 
 /// How often the Webots process is polled while the session runs.
 const WEBOTS_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -95,9 +100,9 @@ pub(crate) async fn run_command(
     // runtime bundle. The supervisor may wait for the external simulator's
     // readiness while its supervisor API remains attachable.
     let launched = supervisor::spawn(&prepared.release)?;
-    let session = await_simulated_attachment(&target, launched, app).await;
-    let session = match session {
-        Ok(session) => session,
+    let attached = await_simulated_attachment(&target, launched, app).await;
+    let (session, launched) = match attached {
+        Ok(attached) => attached,
         Err(error) => {
             return Err(error);
         }
@@ -111,13 +116,26 @@ pub(crate) async fn run_command(
         endpoint: target.endpoint.clone(),
     };
     let launch =
-        tokio::task::spawn_blocking(move || phoxal_cli_project::stage_webots(stage_request))
-            .await?;
+        match tokio::task::spawn_blocking(move || phoxal_cli_project::stage_webots(stage_request))
+            .await
+        {
+            Ok(launch) => launch,
+            Err(error) => {
+                return finish_simulation(
+                    Err(anyhow::Error::new(error).context("the Webots staging worker failed")),
+                    stop_failed_simulation_start(session, launched).await,
+                );
+            }
+        };
     let launch = match launch {
         Ok(launch) => launch,
         Err(error) => {
-            stop_failed_simulation_start(session).await;
-            return Err(error.context("failed to stage Webots after attaching to the execution"));
+            let primary =
+                Err(error.context("failed to stage Webots after attaching to the execution"));
+            return finish_simulation(
+                primary,
+                stop_failed_simulation_start(session, launched).await,
+            );
         }
     };
     app.ui
@@ -125,8 +143,10 @@ pub(crate) async fn run_command(
     let webots = match Webots::launch(&launch) {
         Ok(webots) => webots,
         Err(error) => {
-            stop_failed_simulation_start(session).await;
-            return Err(error);
+            return finish_simulation(
+                Err(error),
+                stop_failed_simulation_start(session, launched).await,
+            );
         }
     };
 
@@ -184,7 +204,34 @@ pub(crate) async fn run_command(
         }
     });
 
-    let outcome = session::drive(app, &target.project, session, Detachable::No).await;
+    let (supervisor_exit_tx, supervisor_exit_rx) = oneshot::channel();
+    let (stop_supervisor_watch, supervisor_watch_stop) = oneshot::channel();
+    let launched = std::sync::Arc::new(tokio::sync::Mutex::new(launched));
+    let supervisor_watcher = tokio::spawn(watch_owned_supervisor(
+        std::sync::Arc::clone(&launched),
+        supervisor_exit_tx,
+        supervisor_watch_stop,
+    ));
+    let outcome = session::drive_with_owned_supervisor_exit(
+        app,
+        &target.project,
+        session,
+        Detachable::No,
+        supervisor_exit_rx,
+    )
+    .await;
+    let _ = stop_supervisor_watch.send(());
+    let supervisor_watch = supervisor_watcher
+        .await
+        .context("the locally owned supervisor watcher failed");
+    let mut launched = std::sync::Arc::into_inner(launched)
+        .ok_or_else(|| anyhow::anyhow!("the locally owned supervisor still has a watcher"))?
+        .into_inner();
+    let owned_exit = match supervisor_watch {
+        Ok(()) => await_owned_supervisor_exit(&mut launched, TERMINAL_BUDGET).await,
+        Err(error) => Err(error),
+    };
+    let supervisor_cleanup = launched.terminate_owned(TERMINAL_BUDGET, KILL_BUDGET).await;
     // Aborting only *requests* cancellation: until the task has actually been
     // joined it may still be holding its clones of the two Arcs, and
     // reclaiming them would then yield `None`. Awaiting the aborted handle is
@@ -202,31 +249,175 @@ pub(crate) async fn run_command(
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let end = SessionEnd::observe(webots_exit, outcome.as_ref());
+    let owned_exit = finish_owned_supervisor_exit(owned_exit, supervisor_cleanup);
+    let end = observe_session_end(webots_exit, outcome.as_ref(), owned_exit.as_ref());
     if let Some(report) = plan(&end).report {
         app.ui.warn(report);
     }
 
     // Whichever way the session ended, Webots is this client's and goes last:
     // gracefully, with the explicit kill only if it will not go.
-    webots.stop().await?;
-    super::lifecycle::report_outcome(&target, outcome?)
+    let primary = match owned_exit {
+        Ok(exit) => match exit {
+            OwnedSupervisorExit::Stopped => report_clean_owned_exit(&target, outcome),
+            OwnedSupervisorExit::Failed { reason } => Err(anyhow::anyhow!(reason)),
+        },
+        Err(error) => Err(error),
+    };
+    finish_simulation(primary, webots.stop().await)
 }
 
-async fn stop_failed_simulation_start(session: Session) {
-    let mut snapshots = session.snapshots();
-    match session.ports.supervisor.stop().await {
-        Ok(CommandOutcome::Accepted { .. }) => {
-            if let Err(error) = await_terminal(&mut snapshots, TERMINAL_BUDGET).await {
-                tracing::warn!(%error, "failed simulation did not reach a terminal state");
-            }
+fn observe_session_end(
+    webots_exit: Option<String>,
+    outcome: Result<&phoxal_cli_ui::AttachmentOutcome, &anyhow::Error>,
+    owned_exit: Result<&OwnedSupervisorExit, &anyhow::Error>,
+) -> SessionEnd {
+    if webots_exit.is_none()
+        && matches!(owned_exit, Ok(OwnedSupervisorExit::Stopped))
+        && matches!(
+            outcome,
+            Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason: None })
+        )
+    {
+        return SessionEnd::Operator;
+    }
+    SessionEnd::observe(webots_exit, outcome)
+}
+
+fn report_clean_owned_exit(
+    target: &Target,
+    outcome: Result<phoxal_cli_ui::AttachmentOutcome>,
+) -> Result<()> {
+    match outcome {
+        Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason: None }) => Ok(()),
+        outcome => outcome.and_then(|outcome| super::lifecycle::report_outcome(target, outcome)),
+    }
+}
+
+fn finish_owned_supervisor_exit(
+    observed: Result<OwnedSupervisorExit>,
+    cleanup: Result<()>,
+) -> Result<OwnedSupervisorExit> {
+    match (observed, cleanup) {
+        (Ok(exit), Ok(())) => Ok(exit),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error.context("owned supervisor cleanup failed")),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("owned supervisor cleanup also failed: {cleanup:#}")))
         }
+    }
+}
+
+fn finish_simulation(primary: Result<()>, cleanup: Result<()>) -> Result<()> {
+    match (primary, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error.context("simulation cleanup failed")),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("simulation cleanup also failed: {cleanup:#}")))
+        }
+    }
+}
+
+async fn stop_failed_simulation_start(
+    session: Session,
+    mut launched: LaunchedSupervisor,
+) -> Result<()> {
+    let accepted = match session.ports.supervisor.stop().await {
+        Ok(CommandOutcome::Accepted { .. }) => true,
         Ok(CommandOutcome::Rejected { reason }) => {
             tracing::warn!(?reason, "the supervisor rejected failed-simulation cleanup");
+            false
         }
-        Err(error) => tracing::warn!(%error, "failed-simulation cleanup request failed"),
+        Err(error) => {
+            tracing::warn!(%error, "failed-simulation cleanup request failed");
+            false
+        }
+    };
+    if tokio::time::timeout(TERMINAL_BUDGET, session.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!("failed-simulation attachment cleanup timed out");
     }
-    session.shutdown().await;
+    if accepted
+        && let Err(error) = await_owned_supervisor_exit(&mut launched, TERMINAL_BUDGET).await
+    {
+        tracing::warn!(%error, "failed-simulation supervisor cleanup timed out");
+    }
+    launched.terminate_owned(TERMINAL_BUDGET, KILL_BUDGET).await
+}
+
+async fn watch_owned_supervisor(
+    launched: std::sync::Arc<tokio::sync::Mutex<LaunchedSupervisor>>,
+    exit: oneshot::Sender<OwnedSupervisorExit>,
+    mut stop: oneshot::Receiver<()>,
+) {
+    loop {
+        tokio::select! {
+            _ = &mut stop => return,
+            _ = tokio::time::sleep(WEBOTS_POLL_INTERVAL) => {
+                let mut launched = launched.lock().await;
+                match launched.exited() {
+                    Ok(Some(status)) => {
+                        let _ = exit.send(classify_owned_supervisor_exit(
+                            status.success(),
+                            status.to_string(),
+                            launched.diagnostics(),
+                        ));
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = exit.send(OwnedSupervisorExit::Failed {
+                            reason: format!("failed to inspect phoxal-supervisor: {error}"),
+                        });
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn await_owned_supervisor_exit(
+    launched: &mut LaunchedSupervisor,
+    budget: Duration,
+) -> Result<OwnedSupervisorExit> {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if let Some(status) = launched.exited()? {
+            return Ok(classify_owned_supervisor_exit(
+                status.success(),
+                status.to_string(),
+                launched.diagnostics(),
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "phoxal-supervisor did not exit within {}s of the simulation session ending",
+                budget.as_secs()
+            );
+        }
+        tokio::time::sleep(WEBOTS_POLL_INTERVAL).await;
+    }
+}
+
+fn classify_owned_supervisor_exit(
+    success: bool,
+    status: String,
+    diagnostics: String,
+) -> OwnedSupervisorExit {
+    if success {
+        return OwnedSupervisorExit::Stopped;
+    }
+    let diagnostics = diagnostics.trim();
+    let reason = if diagnostics.is_empty() {
+        format!("phoxal-supervisor exited with {status}")
+    } else {
+        format!("phoxal-supervisor exited with {status}: {diagnostics}")
+    };
+    OwnedSupervisorExit::Failed { reason }
 }
 
 /// Wait for a terminal snapshot, for the feed to end, or for `budget`.
@@ -367,30 +558,57 @@ async fn await_simulated_attachment(
     target: &Target,
     mut launched: LaunchedSupervisor,
     app: &AppContext,
-) -> Result<Session> {
+) -> Result<(Session, LaunchedSupervisor)> {
     let deadline = tokio::time::Instant::now() + HANDSHAKE_BUDGET;
     loop {
-        if let Some(status) = launched.exited()? {
-            bail!(launched.early_exit_message(status));
+        match launched.exited() {
+            Ok(Some(status)) => {
+                let error = anyhow::anyhow!(launched.early_exit_message(status));
+                return Err(terminate_after_attachment_failure(&mut launched, error).await);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(terminate_after_attachment_failure(&mut launched, error).await);
+            }
         }
         if let Ok(session) =
             Session::open(&target.endpoint, target.project.display().to_string()).await
         {
-            return Ok(session);
+            return Ok((session, launched));
         }
         if tokio::time::Instant::now() >= deadline {
-            if let Some(status) = launched.exited()? {
-                bail!(launched.early_exit_message(status));
+            match launched.exited() {
+                Ok(Some(status)) => {
+                    let error = anyhow::anyhow!(launched.early_exit_message(status));
+                    return Err(terminate_after_attachment_failure(&mut launched, error).await);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(terminate_after_attachment_failure(&mut launched, error).await);
+                }
             }
             let diagnostics = launched.diagnostics();
             app.ui.warn(diagnostics.trim());
-            bail!(
+            let error = anyhow::anyhow!(
                 "timed out after {}s waiting for the simulated execution to answer at {}",
                 HANDSHAKE_BUDGET.as_secs(),
                 target.endpoint
             );
+            return Err(terminate_after_attachment_failure(&mut launched, error).await);
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn terminate_after_attachment_failure(
+    launched: &mut LaunchedSupervisor,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match launched.terminate_owned(TERMINAL_BUDGET, KILL_BUDGET).await {
+        Ok(()) => error,
+        Err(cleanup) => error.context(format!(
+            "failed attachment cleanup also failed: {cleanup:#}"
+        )),
     }
 }
 
@@ -409,6 +627,30 @@ mod tests {
         assert_ne!(Detachable::No, Detachable::Yes);
         assert!(HANDSHAKE_BUDGET > Duration::ZERO);
         assert!(TERMINAL_BUDGET > Duration::ZERO);
+    }
+
+    #[test]
+    fn a_clean_owned_supervisor_exit_is_terminal_stop_evidence() {
+        assert_eq!(
+            classify_owned_supervisor_exit(true, "exit status: 0".to_string(), String::new()),
+            OwnedSupervisorExit::Stopped
+        );
+    }
+
+    #[test]
+    fn an_unsuccessful_owned_supervisor_exit_keeps_its_diagnostics() {
+        let exit = classify_owned_supervisor_exit(
+            false,
+            "signal: 9".to_string(),
+            "bundle admission failed\n".to_string(),
+        );
+        assert_eq!(
+            exit,
+            OwnedSupervisorExit::Failed {
+                reason: "phoxal-supervisor exited with signal: 9: bundle admission failed"
+                    .to_string()
+            }
+        );
     }
 
     /// `q`, a confirmed stop, and an external termination all reach this
@@ -503,5 +745,62 @@ mod tests {
             Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason: None }),
         );
         assert!(matches!(end, SessionEnd::WebotsExited { .. }), "{end:?}");
+    }
+
+    #[test]
+    fn webots_cleanup_cannot_hide_the_authoritative_session_failure() {
+        let error = finish_simulation(
+            Err(anyhow::anyhow!("supervisor failed")),
+            Err(anyhow::anyhow!("Webots cleanup failed")),
+        )
+        .expect_err("both failures must remain failures");
+        let report = format!("{error:#}");
+        assert!(report.contains("supervisor failed"), "{report}");
+        assert!(report.contains("Webots cleanup failed"), "{report}");
+    }
+
+    #[test]
+    fn webots_cleanup_failure_is_reported_after_a_clean_session() {
+        let error = finish_simulation(Ok(()), Err(anyhow::anyhow!("Webots cleanup failed")))
+            .expect_err("cleanup failure must not become success");
+        let report = format!("{error:#}");
+        assert!(report.contains("simulation cleanup failed"), "{report}");
+        assert!(report.contains("Webots cleanup failed"), "{report}");
+    }
+
+    #[test]
+    fn clean_owned_exit_wins_over_only_the_untyped_identity_loss_race() {
+        let target = Target {
+            project: "/tmp/robot".into(),
+            endpoint: "unixsock-stream//tmp/robot.sock".to_string(),
+        };
+        assert!(
+            report_clean_owned_exit(
+                &target,
+                Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason: None }),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            observe_session_end(
+                None,
+                Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason: None }),
+                Ok(&OwnedSupervisorExit::Stopped),
+            ),
+            SessionEnd::Operator
+        );
+
+        let failure = SupervisorFailure {
+            reason: SupervisorFailureReason::ControlPlaneLost,
+            detail: Detail::new("typed failure"),
+        };
+        let error = report_clean_owned_exit(
+            &target,
+            Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed {
+                reason: Some(failure),
+            }),
+        )
+        .expect_err("typed failure must remain authoritative");
+        assert!(format!("{error:#}").contains("typed failure"));
     }
 }

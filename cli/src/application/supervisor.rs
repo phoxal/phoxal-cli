@@ -10,11 +10,14 @@
 //! of a release owning its supervisor: the bundle and the binary that runs it
 //! move together, so a local run and an installed run are the same launch.
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// How much of the supervisor's stderr is kept as early-exit evidence. It
 /// writes its own log; this is only what a client shows when the child died
@@ -57,6 +60,147 @@ impl LaunchedSupervisor {
                 "phoxal-supervisor exited with {status} before a client could attach: {diagnostics}"
             )
         }
+    }
+
+    /// End a supervisor owned by a non-detachable simulation, including every
+    /// participant process group below it.
+    ///
+    /// Ordinary `phoxal run` deliberately never calls this: its supervisor is
+    /// durable and may outlive the client. A simulation is different because
+    /// this client owns its world clock and therefore owns the whole local
+    /// process group. Both waits are bounded so cleanup cannot hold the
+    /// operator's terminal indefinitely.
+    pub(crate) async fn terminate_owned(
+        &mut self,
+        graceful_budget: Duration,
+        kill_budget: Duration,
+    ) -> Result<()> {
+        let supervisor_pid = i32::try_from(self.child.id())
+            .map_err(|_| anyhow!("phoxal-supervisor process id does not fit a process group id"))?;
+        let process_groups = owned_process_groups(supervisor_pid)?;
+
+        signal_process_groups(&process_groups, libc::SIGTERM)?;
+        if self
+            .await_process_groups_exit(&process_groups, graceful_budget)
+            .await?
+        {
+            return Ok(());
+        }
+
+        signal_process_groups(&process_groups, libc::SIGKILL)?;
+        if self
+            .await_process_groups_exit(&process_groups, kill_budget)
+            .await?
+        {
+            return Ok(());
+        }
+
+        bail!(
+            "a simulation-owned process group survived SIGKILL for {}s",
+            kill_budget.as_secs()
+        )
+    }
+
+    async fn await_process_groups_exit(
+        &mut self,
+        process_groups: &HashSet<libc::pid_t>,
+        budget: Duration,
+    ) -> Result<bool> {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            // `try_wait` is also the nonblocking reap for the group leader.
+            let _ = self.child.try_wait()?;
+            if process_groups
+                .iter()
+                .map(|group| process_group_exists(*group))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .all(|exists| !exists)
+            {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+fn owned_process_groups(supervisor_pid: libc::pid_t) -> Result<HashSet<libc::pid_t>> {
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let parents = system
+        .processes()
+        .iter()
+        .map(|(pid, process)| (pid.as_u32(), process.parent().map(Pid::as_u32)))
+        .collect::<Vec<_>>();
+    let descendants = descendant_pids(supervisor_pid as u32, &parents);
+
+    let mut groups = HashSet::from([supervisor_pid]);
+    for descendant in descendants {
+        let pid = i32::try_from(descendant)
+            .context("simulation child process id does not fit a process group id")?;
+        let group = unsafe { libc::getpgid(pid) };
+        if group > 0 {
+            groups.insert(group);
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error).context("failed to inspect a simulation child process group");
+        }
+    }
+    Ok(groups)
+}
+
+fn descendant_pids(supervisor_pid: u32, parents: &[(u32, Option<u32>)]) -> HashSet<u32> {
+    let mut descendants = HashSet::new();
+    loop {
+        let before = descendants.len();
+        for (pid, parent) in parents {
+            if parent
+                .is_some_and(|parent| parent == supervisor_pid || descendants.contains(&parent))
+            {
+                descendants.insert(*pid);
+            }
+        }
+        if descendants.len() == before {
+            break;
+        }
+    }
+    descendants
+}
+
+fn signal_process_groups(process_groups: &HashSet<libc::pid_t>, signal: libc::c_int) -> Result<()> {
+    for process_group in process_groups {
+        signal_process_group(*process_group, signal)?;
+    }
+    Ok(())
+}
+
+fn signal_process_group(process_group: libc::pid_t, signal: libc::c_int) -> Result<()> {
+    let result = unsafe { libc::kill(-process_group, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).context("failed to signal the owned phoxal-supervisor process group")
+}
+
+fn process_group_exists(process_group: libc::pid_t) -> Result<bool> {
+    let result = unsafe { libc::kill(-process_group, 0) };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error).context("failed to inspect the owned phoxal-supervisor process group"),
     }
 }
 
@@ -123,4 +267,25 @@ fn isolate_process_group(command: &mut Command) {
     // `setpgid(0, 0)` in the child: it leaves this client's foreground process
     // group, so a terminal SIGINT never reaches it.
     command.process_group(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::descendant_pids;
+
+    #[test]
+    fn forced_simulation_cleanup_discovers_each_nested_owned_process() {
+        let tree = [
+            (20, Some(10)),
+            (30, Some(20)),
+            (40, Some(30)),
+            (99, Some(1)),
+        ];
+        let descendants = descendant_pids(10, &tree);
+        assert_eq!(descendants.len(), 3);
+        assert!(descendants.contains(&20));
+        assert!(descendants.contains(&30));
+        assert!(descendants.contains(&40));
+        assert!(!descendants.contains(&99));
+    }
 }

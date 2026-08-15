@@ -33,6 +33,14 @@ const HANDSHAKE_BUDGET: Duration = Duration::from_secs(60);
 /// How long `start` waits for the graph to reach readiness after it answers.
 const READINESS_BUDGET: Duration = Duration::from_secs(5 * 60);
 
+/// A stopped execution must not leave the one-shot CLI blocked forever while
+/// a broken transport tears down its local session.
+const SESSION_CLOSE_BUDGET: Duration = Duration::from_secs(5);
+
+/// A lost final bus observation must not leave the one-shot stop command
+/// waiting forever after the supervisor accepted the command.
+const STOP_TERMINAL_BUDGET: Duration = Duration::from_secs(5);
+
 /// How often a launch is re-probed while waiting for the supervisor to come up.
 const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -360,14 +368,27 @@ pub(crate) async fn stop_command(
     let (target, session) = open_existing(app, requested_target, endpoint).await?;
     let outcome = match session.ports.supervisor.stop().await {
         Ok(phoxal_client::supervisor::execution::CommandOutcome::Accepted { .. }) => {
-            await_terminal(&session).await
+            match tokio::time::timeout(STOP_TERMINAL_BUDGET, await_terminal(&session)).await {
+                Ok(outcome) => outcome,
+                Err(_) => Err(anyhow!(
+                    "the supervisor accepted the stop, but no terminal evidence arrived within {}s",
+                    STOP_TERMINAL_BUDGET.as_secs()
+                )),
+            }
         }
         Ok(phoxal_client::supervisor::execution::CommandOutcome::Rejected { reason }) => {
             Err(anyhow!("the supervisor rejected the stop: {reason:?}"))
         }
         Err(error) => stop_command_failure(error, session.disconnect_reason()),
     };
-    finish_stop(outcome, session.close().await)?;
+    let close = match tokio::time::timeout(SESSION_CLOSE_BUDGET, session.close()).await {
+        Ok(close) => close,
+        Err(_) => Err(anyhow!(
+            "the execution stopped, but the local client connection did not close within {}s",
+            SESSION_CLOSE_BUDGET.as_secs()
+        )),
+    };
+    finish_stop(outcome, close)?;
     app.ui
         .info(format!("execution stopped at {}", target.endpoint));
     Ok(())

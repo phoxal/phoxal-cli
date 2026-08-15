@@ -5,7 +5,6 @@
 use std::cell::RefCell;
 use std::io::{self, Stderr};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -35,7 +34,7 @@ use super::effect::{AttachmentOutcome, Effect, EffectSenders};
 use super::id::{ComponentId, PageId};
 use super::message::{Msg, NavigationMsg, SessionInput};
 use super::model::AppModel;
-use super::subscriptions::{InputPort, PendingInputs, UserEvent};
+use super::subscriptions::{PendingInputs, UserEvent};
 use super::update::update;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +77,7 @@ impl AppComponent<Msg, UserEvent> for InputComponent {
             Event::WindowResize(_, _) | Event::FocusGained => {
                 Some(Msg::Navigate(NavigationMsg::Refresh { clear: true }))
             }
-            Event::User(UserEvent::Wake) => Some(Msg::Wake),
+            Event::User(_) => None,
             _ => None,
         }
     }
@@ -129,7 +128,7 @@ where
 
 fn run_blocking(
     handle: Handle,
-    ingress: mpsc::Receiver<SessionInput>,
+    mut ingress: mpsc::Receiver<SessionInput>,
     effects: EffectSenders,
     options: UiOptions,
     initial_inputs: Vec<SessionInput>,
@@ -146,32 +145,46 @@ fn run_blocking(
         ..AppModel::default()
     }));
     apply_initial_inputs(&model, &effects, initial_inputs)?;
-    let pending = Arc::new(PendingInputs::default());
+    let mut pending = PendingInputs::default();
+    let mut ingress_open = true;
     let listener = EventListenerCfg::default()
         .with_handle(handle)
-        .async_crossterm_input_listener(Duration::ZERO, 32)
-        .add_async_port(
-            Box::new(InputPort::new(ingress, Arc::clone(&pending))),
-            Duration::ZERO,
-            1,
-        );
+        .async_crossterm_input_listener(Duration::ZERO, 32);
     let mut application: Application<ComponentId, Msg, UserEvent> = Application::init(listener);
     mount_components(&mut application, &model, options.theme)?;
 
     loop {
+        if ingress_open {
+            ingress_open = collect_ingress(&mut ingress, &mut pending);
+        }
+        for input in pending.drain() {
+            dispatch(&model, &effects, input.into())?;
+        }
         if let Some(exit) = render_requested(&mut terminal, &mut application, &model)? {
             return Ok(exit);
         }
         let messages = application
-            .tick(PollStrategy::BlockCollectUpTo(64))
+            .tick(PollStrategy::UpTo(64, Duration::from_millis(50)))
             .context("tui-realm event listener failed")?;
         for message in messages {
-            if message == Msg::Wake {
-                for input in pending.drain() {
-                    dispatch(&model, &effects, input.into())?;
-                }
-            } else {
-                dispatch(&model, &effects, message)?;
+            dispatch(&model, &effects, message)?;
+        }
+    }
+}
+
+/// Move the currently available bounded ingress batch into the local mailbox.
+/// A disconnected producer is terminal input, not an empty poll.
+fn collect_ingress(
+    ingress: &mut mpsc::Receiver<SessionInput>,
+    pending: &mut PendingInputs,
+) -> bool {
+    loop {
+        match ingress.try_recv() {
+            Ok(input) => pending.push(input),
+            Err(mpsc::error::TryRecvError::Empty) => return true,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                pending.push(SessionInput::Terminate);
+                return false;
             }
         }
     }
@@ -386,6 +399,22 @@ mod tests {
         assert_eq!(
             model.borrow().overview.connection,
             Some(phoxal_cli_observation::ConnectionObservation::Connected)
+        );
+    }
+
+    #[test]
+    fn disconnected_ingress_preserves_available_input_then_terminates() {
+        let (sender, mut ingress) = mpsc::channel(1);
+        sender
+            .try_send(SessionInput::Interrupt)
+            .expect("seed ingress");
+        drop(sender);
+        let mut pending = PendingInputs::default();
+
+        assert!(!collect_ingress(&mut ingress, &mut pending));
+        assert_eq!(
+            pending.drain(),
+            vec![SessionInput::Interrupt, SessionInput::Terminate]
         );
     }
 }

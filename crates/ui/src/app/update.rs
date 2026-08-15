@@ -23,9 +23,7 @@ const LOG_WINDOW_LIMIT: usize = 2_000;
 const RUNTIME_WINDOW_LIMIT: usize = 4_096;
 
 pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
-    let wake = matches!(message, Msg::Wake);
     let effects = match message {
-        Msg::Wake => Vec::new(),
         Msg::Terminate => detach(model),
         Msg::Interrupt => interrupt(model),
         Msg::Diagnostic(message) => {
@@ -34,13 +32,30 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
         }
         Msg::Client(event) => update_client(model, event),
         Msg::Navigate(message) => update_navigation(model, message),
+        Msg::StopProjectAccepted => Vec::new(),
+        Msg::StopProjectRejected(reason) => complete_stop_failure(model, "rejected", reason),
+        Msg::StopProjectFailed(reason) => complete_stop_failure(model, "failed", reason),
+        Msg::OwnedSupervisorStopped => {
+            model.exit = Some(AttachmentOutcome::ExecutionStopped);
+            Vec::new()
+        }
+        Msg::OwnedSupervisorFailed => {
+            model.exit = Some(AttachmentOutcome::ExecutionFailed { reason: None });
+            Vec::new()
+        }
         Msg::Logs(LogsMsg::Window(window)) => accept_logs(model, window),
         Msg::Runtimes(RuntimesMsg::Window(window)) => accept_runtimes(model, window),
     };
-    if !wake {
-        model.redraw_requested = true;
-    }
+    model.redraw_requested = true;
     effects
+}
+
+fn complete_stop_failure(model: &mut AppModel, outcome: &str, reason: String) -> Vec<Effect> {
+    model.stop_requested = false;
+    model
+        .overview
+        .push_diagnostic(format!("stop {outcome}: {reason}; retry"));
+    Vec::new()
 }
 
 /// Leave the session without touching the execution.
@@ -374,6 +389,10 @@ fn handle_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
     }
     if key.code == Key::Char('i') {
         open_modal(model, ModalId::SessionInfo);
+        return Vec::new();
+    }
+    if key.code == Key::Char('S') {
+        open_modal(model, ModalId::ConfirmStop);
         return Vec::new();
     }
     if key.code == Key::Char('q') {
@@ -1086,6 +1105,41 @@ mod tests {
         assert!(update(&mut model, control_c()).is_empty());
     }
 
+    #[test]
+    fn advertised_stop_shortcut_opens_confirmation_and_enter_sends_stop() {
+        let mut model = AppModel::default();
+        assert!(
+            update(
+                &mut model,
+                Msg::Navigate(NavigationMsg::Key(Key::Char('S').into())),
+            )
+            .is_empty()
+        );
+        assert_eq!(model.route.modal(), Some(ModalId::ConfirmStop));
+
+        assert_eq!(
+            update(
+                &mut model,
+                Msg::Navigate(NavigationMsg::Key(Key::Enter.into())),
+            ),
+            vec![Effect::StopProject]
+        );
+    }
+
+    #[test]
+    fn owned_supervisor_exit_is_terminal_without_bus_delivery() {
+        let mut stopped = AppModel::default();
+        assert!(update(&mut stopped, Msg::OwnedSupervisorStopped).is_empty());
+        assert_eq!(stopped.exit, Some(AttachmentOutcome::ExecutionStopped));
+
+        let mut failed = AppModel::default();
+        assert!(update(&mut failed, Msg::OwnedSupervisorFailed).is_empty());
+        assert_eq!(
+            failed.exit,
+            Some(AttachmentOutcome::ExecutionFailed { reason: None })
+        );
+    }
+
     /// A modal opened by reflex must have an exit that does nothing to the
     /// robot, and Esc must simply cancel.
     #[test]
@@ -1126,6 +1180,37 @@ mod tests {
         assert_eq!(stop, vec![Effect::StopProject]);
         assert_eq!(model.exit, None);
         assert!(model.stop_requested);
+    }
+
+    #[test]
+    fn accepted_stop_keeps_waiting_for_terminal_supervisor_evidence() {
+        let mut model = AppModel::default();
+        assert_eq!(request_stop(&mut model), vec![Effect::StopProject]);
+
+        let effects = update(&mut model, Msg::StopProjectAccepted);
+
+        assert!(effects.is_empty());
+        assert!(model.stop_requested);
+        assert_eq!(model.exit, None);
+        assert!(request_stop(&mut model).is_empty());
+    }
+
+    #[test]
+    fn rejected_or_failed_stop_clears_the_guard_and_can_be_retried() {
+        for completion in [
+            Msg::StopProjectRejected("revision moved on".to_string()),
+            Msg::StopProjectFailed("connection closed".to_string()),
+        ] {
+            let mut model = AppModel::default();
+            assert_eq!(request_stop(&mut model), vec![Effect::StopProject]);
+
+            assert!(update(&mut model, completion).is_empty());
+
+            assert!(!model.stop_requested);
+            assert_eq!(model.exit, None);
+            assert!(model.overview.diagnostics[0].contains("retry"));
+            assert_eq!(request_stop(&mut model), vec![Effect::StopProject]);
+        }
     }
 
     #[test]
