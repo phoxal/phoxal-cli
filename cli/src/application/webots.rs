@@ -39,15 +39,27 @@ pub(crate) struct Webots {
 
 impl Webots {
     /// Launch the Webots application from the spec simulation preparation
-    /// produced.
+    /// produced, with its output retained at `log`.
     ///
     /// Its own process group, for the same reason the supervisor gets one: a
     /// terminal Ctrl+C must reach the client's shutdown path, which then stops
     /// both processes in the right order - never the simulator directly, mid
     /// world write.
-    pub(crate) fn launch(spec: &WebotsLaunch) -> Result<Self> {
+    ///
+    /// Neither stream is inherited. Webots writes driver notices
+    /// (`UNSUPPORTED (log once): ...`) whenever it feels like it, and an
+    /// inherited stream puts them straight over the dashboard's frame.
+    pub(crate) fn launch(spec: &WebotsLaunch, log: &std::path::Path) -> Result<Self> {
+        let file = crate::application::supervisor::create_log(log)?;
+        let errors = file
+            .try_clone()
+            .with_context(|| format!("failed to open {} for Webots", log.display()))?;
         let mut command = Command::new(&spec.executable);
-        command.args(&spec.args).stdin(Stdio::null());
+        command
+            .args(&spec.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(file))
+            .stderr(Stdio::from(errors));
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }

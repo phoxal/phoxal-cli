@@ -7,8 +7,17 @@ use anyhow::{Context, Result};
 
 use crate::simulation::webots::root;
 
-/// Link the verified simulator artifact from the runtime bundle into Webots'
+/// Copy the verified simulator artifact from the runtime bundle into Webots'
 /// required controller directory.
+///
+/// A copy, never a link: Webots patches the controller binary *in place* when
+/// it launches it. On macOS it runs `install_name_tool -add_rpath` to point the
+/// executable at `/Applications/Webots.app/` and then re-signs the Mach-O ad
+/// hoc. Through a symlink that edit lands on the file inside the published
+/// release, whose size and digest are recorded in `runtime.json` - so the very
+/// next `open_verified` of that release fails with a size mismatch on a binary
+/// nothing was supposed to touch. Webots may rewrite its own copy as much as it
+/// likes; the bundle stays byte-identical to the document that describes it.
 pub(crate) fn stage_bundled_controller(project_root: &Path, binary: &Path) -> Result<()> {
     anyhow::ensure!(
         binary.is_file(),
@@ -19,21 +28,48 @@ pub(crate) fn stage_bundled_controller(project_root: &Path, binary: &Path) -> Re
     let staged_dir = root::controller_dir(project_root, name);
     std::fs::create_dir_all(&staged_dir)
         .with_context(|| format!("failed to create {}", staged_dir.display()))?;
-    symlink_controller(binary, &staged_dir.join(name))
+    copy_controller(binary, &staged_dir.join(name))
 }
 
-fn symlink_controller(source: &Path, destination: &Path) -> Result<()> {
+fn copy_controller(source: &Path, destination: &Path) -> Result<()> {
+    // Remove rather than overwrite: the destination may be a symlink an older
+    // CLI staged, and copying onto that would write straight through it into
+    // the bundle - the exact corruption this function exists to prevent.
     if destination.symlink_metadata().is_ok() {
         std::fs::remove_file(destination)
             .with_context(|| format!("failed to replace {}", destination.display()))?;
     }
-    std::os::unix::fs::symlink(source, destination).with_context(|| {
+    std::fs::copy(source, destination).with_context(|| {
         format!(
-            "failed to symlink controller {} -> {}",
-            destination.display(),
-            source.display()
+            "failed to copy controller {} -> {}",
+            source.display(),
+            destination.display()
         )
     })?;
+    // `fs::copy` preserves the mode on Unix, but Webots refuses a controller it
+    // cannot execute, so the one bit that matters is asserted rather than
+    // assumed.
+    ensure_executable(destination)
+}
+
+#[cfg(unix)]
+fn ensure_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path)
+        .with_context(|| format!("failed to inspect {}", path.display()))?
+        .permissions();
+    let mode = permissions.mode();
+    if mode & 0o111 == 0o111 {
+        return Ok(());
+    }
+    permissions.set_mode(mode | 0o111);
+    std::fs::set_permissions(path, permissions)
+        .with_context(|| format!("failed to make {} executable", path.display()))
+}
+
+#[cfg(not(unix))]
+const fn ensure_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -61,5 +97,56 @@ impl Drop for WebotsHomeEnvGuard {
                 std::env::remove_var("WEBOTS_HOME");
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Webots rewrites the controller it launches, so what it launches must be
+    /// this staging directory's own file - never a link into the verified
+    /// bundle - and a link left by an older CLI must be replaced by one.
+    #[test]
+    fn staging_produces_a_regular_executable_file_and_replaces_a_stale_link() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let bundled = directory.path().join("bin/controller");
+        std::fs::create_dir_all(bundled.parent().context("the bin directory")?)?;
+        std::fs::write(&bundled, b"original bundle bytes")?;
+        std::fs::set_permissions(&bundled, std::fs::Permissions::from_mode(0o755))?;
+
+        let staged = directory.path().join("staged/controller");
+        std::fs::create_dir_all(staged.parent().context("the staging directory")?)?;
+        std::os::unix::fs::symlink(&bundled, &staged)?;
+
+        copy_controller(&bundled, &staged)?;
+
+        let metadata = std::fs::symlink_metadata(&staged)?;
+        assert!(
+            metadata.file_type().is_file(),
+            "the staged controller must be a real file, not a link into the bundle"
+        );
+        assert!(metadata.permissions().mode() & 0o111 != 0, "not executable");
+
+        // What Webots does next must not reach the bundle.
+        std::fs::write(&staged, b"patched by webots")?;
+        assert_eq!(std::fs::read(&bundled)?, b"original bundle bytes");
+        Ok(())
+    }
+
+    /// A source without the executable bit is still staged as an executable:
+    /// Webots refuses a controller it cannot run.
+    #[test]
+    fn a_non_executable_source_is_staged_executable() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("controller");
+        std::fs::write(&source, b"binary")?;
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644))?;
+        let staged = directory.path().join("staged-controller");
+
+        copy_controller(&source, &staged)?;
+        assert!(std::fs::metadata(&staged)?.permissions().mode() & 0o111 != 0);
+        Ok(())
     }
 }
