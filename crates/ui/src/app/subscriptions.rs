@@ -1,21 +1,15 @@
-//! Bounded typed ingress behind tui-realm's equality-constrained user event.
+//! Bounded typed ingress mailbox for the synchronous terminal loop.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, PoisonError};
 
 use phoxal_cli_observation::{AttachmentEpoch, AttachmentEvent};
-use tokio::sync::mpsc;
-use tuirealm::event::Event;
-use tuirealm::listener::{PollAsync, PortResult};
 
 use super::message::SessionInput;
 
 const PENDING_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum UserEvent {
-    Wake,
-}
+pub(crate) enum UserEvent {}
 
 #[derive(Debug, Clone, Copy)]
 enum Slot {
@@ -28,103 +22,107 @@ enum Slot {
     RuntimesChanged = 6,
     LogsReply = 7,
     RuntimesReply = 8,
+    StopProjectCompletion = 9,
+    OwnedSupervisorExit = 10,
 }
 
-const SLOT_COUNT: usize = Slot::RuntimesReply as usize + 1;
+const SLOT_COUNT: usize = Slot::OwnedSupervisorExit as usize + 1;
 
-struct Mailbox {
+pub(crate) struct PendingInputs {
     epoch: Option<AttachmentEpoch>,
     epoch_pending: bool,
     slots: [Option<SessionInput>; SLOT_COUNT],
     diagnostics: VecDeque<String>,
-    terminate: bool,
-    wake_pending: bool,
+    controls: VecDeque<SessionInput>,
 }
 
-impl Default for Mailbox {
+impl Default for PendingInputs {
     fn default() -> Self {
         Self {
             epoch: None,
             epoch_pending: false,
             slots: std::array::from_fn(|_| None),
             diagnostics: VecDeque::new(),
-            terminate: false,
-            wake_pending: false,
+            controls: VecDeque::new(),
         }
     }
-}
-
-#[derive(Default)]
-pub(crate) struct PendingInputs {
-    state: Mutex<Mailbox>,
 }
 
 impl PendingInputs {
-    fn push(&self, input: SessionInput) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let accepted = match input {
+    pub(crate) fn push(&mut self, input: SessionInput) {
+        match input {
             SessionInput::Client(AttachmentEvent::EpochChanged(epoch)) => {
-                let connection = state.slots[Slot::Connection as usize].take();
-                let terminal_supervisor = state.slots[Slot::Supervisor as usize]
+                let connection = self.slots[Slot::Connection as usize].take();
+                let terminal_supervisor = self.slots[Slot::Supervisor as usize]
                     .take()
                     .filter(is_terminal_supervisor);
-                state.epoch = Some(epoch);
-                state.epoch_pending = true;
-                state.slots.fill(None);
-                state.slots[Slot::Connection as usize] = connection;
-                state.slots[Slot::Supervisor as usize] = terminal_supervisor;
-                true
+                self.epoch = Some(epoch);
+                self.epoch_pending = true;
+                self.slots.fill(None);
+                self.slots[Slot::Connection as usize] = connection;
+                self.slots[Slot::Supervisor as usize] = terminal_supervisor;
             }
             SessionInput::Diagnostic(message) => {
-                if state.diagnostics.len() == PENDING_CAPACITY {
-                    state.diagnostics.pop_front();
+                if self.diagnostics.len() == PENDING_CAPACITY {
+                    self.diagnostics.pop_front();
                 }
-                state.diagnostics.push_back(message);
-                true
+                self.diagnostics.push_back(message);
             }
-            SessionInput::Terminate => {
-                state.terminate = true;
-                true
-            }
-            input => slot_for(&input).is_some_and(|slot| {
-                if input_epoch(&input).is_some_and(|epoch| Some(epoch) != state.epoch) {
-                    return false;
+            input @ (SessionInput::Interrupt | SessionInput::Terminate) => {
+                if matches!(input, SessionInput::Terminate)
+                    && self
+                        .controls
+                        .iter()
+                        .any(|pending| matches!(pending, SessionInput::Terminate))
+                {
+                    return;
                 }
-                state.slots[slot as usize] = Some(input);
-                true
-            }),
-        };
-        if !accepted || state.wake_pending {
-            return false;
+                if self.controls.len() == PENDING_CAPACITY {
+                    let Some(oldest_interrupt) = self
+                        .controls
+                        .iter()
+                        .position(|pending| matches!(pending, SessionInput::Interrupt))
+                    else {
+                        return;
+                    };
+                    if self.controls.remove(oldest_interrupt).is_none() {
+                        return;
+                    }
+                }
+                self.controls.push_back(input);
+            }
+            input => {
+                let Some(slot) = slot_for(&input) else {
+                    return;
+                };
+                if input_epoch(&input).is_some_and(|epoch| Some(epoch) != self.epoch) {
+                    return;
+                }
+                self.slots[slot as usize] = Some(input);
+            }
         }
-        state.wake_pending = true;
-        true
     }
 
-    pub(crate) fn drain(&self) -> Vec<SessionInput> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+    pub(crate) fn drain(&mut self) -> Vec<SessionInput> {
         let mut drained = Vec::with_capacity(
-            usize::from(state.epoch_pending)
+            usize::from(self.epoch_pending)
                 + SLOT_COUNT
-                + state.diagnostics.len()
-                + usize::from(state.terminate),
+                + self.diagnostics.len()
+                + self.controls.len(),
         );
-        if state.epoch_pending {
-            if let Some(epoch) = state.epoch {
+        if self.epoch_pending {
+            if let Some(epoch) = self.epoch {
                 drained.push(SessionInput::Client(AttachmentEvent::EpochChanged(epoch)));
             }
-            state.epoch_pending = false;
+            self.epoch_pending = false;
         }
-        for slot in &mut state.slots {
+        for slot in &mut self.slots {
             if let Some(input) = slot.take() {
                 drained.push(input);
             }
         }
-        drained.extend(state.diagnostics.drain(..).map(SessionInput::Diagnostic));
-        if std::mem::take(&mut state.terminate) {
-            drained.push(SessionInput::Terminate);
-        }
-        state.wake_pending = false;
+        drained.extend(self.diagnostics.drain(..).map(SessionInput::Diagnostic));
+        drained.extend(self.controls.drain(..));
         drained
     }
 }
@@ -152,6 +150,12 @@ fn slot_for(input: &SessionInput) -> Option<Slot> {
         SessionInput::Client(AttachmentEvent::RuntimesChanged(_)) => Some(Slot::RuntimesChanged),
         SessionInput::Logs(_) => Some(Slot::LogsReply),
         SessionInput::Runtimes(_) => Some(Slot::RuntimesReply),
+        SessionInput::StopProjectAccepted
+        | SessionInput::StopProjectRejected(_)
+        | SessionInput::StopProjectFailed(_) => Some(Slot::StopProjectCompletion),
+        SessionInput::OwnedSupervisorStopped | SessionInput::OwnedSupervisorFailed => {
+            Some(Slot::OwnedSupervisorExit)
+        }
         SessionInput::Client(AttachmentEvent::EpochChanged(_))
         | SessionInput::Diagnostic(_)
         | SessionInput::Interrupt
@@ -178,43 +182,6 @@ fn input_epoch(input: &SessionInput) -> Option<AttachmentEpoch> {
     }
 }
 
-pub(crate) struct InputPort {
-    receiver: mpsc::Receiver<SessionInput>,
-    pending: Arc<PendingInputs>,
-    closed: bool,
-}
-
-impl InputPort {
-    #[must_use]
-    pub(crate) fn new(receiver: mpsc::Receiver<SessionInput>, pending: Arc<PendingInputs>) -> Self {
-        Self {
-            receiver,
-            pending,
-            closed: false,
-        }
-    }
-}
-
-#[tuirealm::async_trait]
-impl PollAsync<UserEvent> for InputPort {
-    async fn poll(&mut self) -> PortResult<Option<Event<UserEvent>>> {
-        if self.closed {
-            std::future::pending::<()>().await;
-            return Ok(None);
-        }
-        let Some(first) = self.receiver.recv().await else {
-            self.closed = true;
-            let wake = self.pending.push(SessionInput::Terminate);
-            return Ok(wake.then_some(Event::User(UserEvent::Wake)));
-        };
-        let mut wake = self.pending.push(first);
-        while let Ok(input) = self.receiver.try_recv() {
-            wake |= self.pending.push(input);
-        }
-        Ok(wake.then_some(Event::User(UserEvent::Wake)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -238,15 +205,15 @@ mod tests {
     }
 
     #[test]
-    fn repeated_invalidations_share_one_bounded_slot_and_one_wake() {
-        let pending = PendingInputs::default();
+    fn repeated_invalidations_share_one_bounded_slot() {
+        let mut pending = PendingInputs::default();
         pending.push(SessionInput::Client(AttachmentEvent::EpochChanged(
             changed_epoch(),
         )));
         pending.drain();
-        assert!(pending.push(changed(1)));
+        pending.push(changed(1));
         for revision in 2..=1_000 {
-            assert!(!pending.push(changed(revision)));
+            pending.push(changed(revision));
         }
         let drained = pending.drain();
         assert_eq!(drained.len(), 1);
@@ -258,7 +225,7 @@ mod tests {
 
     #[test]
     fn pending_queue_never_exceeds_capacity() {
-        let pending = PendingInputs::default();
+        let mut pending = PendingInputs::default();
         for index in 0..(PENDING_CAPACITY * 2) {
             pending.push(SessionInput::Diagnostic(index.to_string()));
         }
@@ -267,7 +234,7 @@ mod tests {
 
     #[test]
     fn a_query_reply_has_a_fixed_slot_and_is_never_dropped() {
-        let pending = PendingInputs::default();
+        let mut pending = PendingInputs::default();
         pending.push(SessionInput::Client(AttachmentEvent::EpochChanged(
             changed_epoch(),
         )));
@@ -280,7 +247,7 @@ mod tests {
             token: QueryToken(7),
             rows: Arc::from([]),
         });
-        assert!(!pending.push(reply));
+        pending.push(reply);
         let drained = pending.drain();
         assert_eq!(drained.len(), PENDING_CAPACITY + 2);
         assert!(drained.iter().any(
@@ -290,7 +257,7 @@ mod tests {
 
     #[test]
     fn epoch_change_is_a_barrier_and_purges_old_invalidations() {
-        let pending = PendingInputs::default();
+        let mut pending = PendingInputs::default();
         let old = changed_epoch();
         // A new execution is a new attachment, so a different execution id is
         // exactly what an epoch change is.
@@ -329,7 +296,7 @@ mod tests {
 
     #[test]
     fn stale_query_reply_after_epoch_change_is_discarded() {
-        let pending = PendingInputs::default();
+        let mut pending = PendingInputs::default();
         let old = changed_epoch();
         // A new execution is a new attachment, so a different execution id is
         // exactly what an epoch change is.
@@ -351,7 +318,7 @@ mod tests {
 
     #[test]
     fn epoch_and_termination_survive_diagnostic_saturation() {
-        let pending = PendingInputs::default();
+        let mut pending = PendingInputs::default();
         for index in 0..(PENDING_CAPACITY * 2) {
             pending.push(SessionInput::Diagnostic(index.to_string()));
         }
@@ -368,7 +335,7 @@ mod tests {
 
     #[test]
     fn terminal_supervisor_observation_survives_diagnostic_saturation() {
-        let pending = PendingInputs::default();
+        let mut pending = PendingInputs::default();
         for index in 0..(PENDING_CAPACITY * 2) {
             pending.push(SessionInput::Diagnostic(index.to_string()));
         }
@@ -389,6 +356,50 @@ mod tests {
             SessionInput::Client(AttachmentEvent::SupervisorChanged(supervisor))
                 if supervisor.lifecycle == Lifecycle::Stopped
         )));
+    }
+
+    #[test]
+    fn stop_completion_survives_diagnostic_saturation() {
+        let mut pending = PendingInputs::default();
+        for index in 0..(PENDING_CAPACITY * 2) {
+            pending.push(SessionInput::Diagnostic(index.to_string()));
+        }
+        pending.push(SessionInput::StopProjectRejected("busy".to_string()));
+
+        assert!(pending.drain().iter().any(|input| matches!(
+            input,
+            SessionInput::StopProjectRejected(reason) if reason == "busy"
+        )));
+    }
+
+    #[test]
+    fn interrupts_and_termination_are_preserved_in_order() {
+        let mut pending = PendingInputs::default();
+        pending.push(SessionInput::Interrupt);
+        pending.push(SessionInput::Interrupt);
+        pending.push(SessionInput::Terminate);
+
+        assert_eq!(
+            pending.drain(),
+            vec![
+                SessionInput::Interrupt,
+                SessionInput::Interrupt,
+                SessionInput::Terminate,
+            ]
+        );
+    }
+
+    #[test]
+    fn termination_survives_control_saturation() {
+        let mut pending = PendingInputs::default();
+        pending.push(SessionInput::Terminate);
+        for _ in 0..(PENDING_CAPACITY * 2) {
+            pending.push(SessionInput::Interrupt);
+        }
+
+        let drained = pending.drain();
+        assert_eq!(drained.len(), PENDING_CAPACITY);
+        assert!(drained.contains(&SessionInput::Terminate));
     }
 
     fn changed_epoch() -> AttachmentEpoch {

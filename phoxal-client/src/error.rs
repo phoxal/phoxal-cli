@@ -142,10 +142,6 @@ pub enum ClientError {
     #[error("the execution stopped before it became ready")]
     StoppedBeforeReady,
 
-    /// A fenced command was requested before any snapshot revision existed.
-    #[error("no supervisor snapshot revision is available to fence the command")]
-    NoSnapshotRevision,
-
     /// The underlying typed transport operation failed.
     #[error(transparent)]
     Bus(#[from] BusError),

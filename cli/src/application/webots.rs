@@ -8,12 +8,23 @@
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::num::NonZeroI32;
+
+#[cfg(unix)]
+use anyhow::bail;
 use anyhow::{Context, Result};
 use phoxal_cli_project::WebotsLaunch;
 
 /// How long a SIGTERMed Webots is given to close its world before the
 /// fallback. Webots writes state on the way out, so this is generous.
 const GRACEFUL_BUDGET: Duration = Duration::from_secs(20);
+
+#[cfg(unix)]
+const SHUTDOWN: [(libc::c_int, Duration); 2] = [
+    (libc::SIGTERM, GRACEFUL_BUDGET),
+    (libc::SIGKILL, Duration::from_secs(1)),
+];
 
 /// How often the exit is polled while waiting.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -22,6 +33,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Debug)]
 pub(crate) struct Webots {
     child: Child,
+    #[cfg(unix)]
+    process_group: Option<NonZeroI32>,
 }
 
 impl Webots {
@@ -46,7 +59,19 @@ impl Webots {
         let child = command
             .spawn()
             .with_context(|| format!("failed to launch Webots ({})", spec.executable.display()))?;
-        Ok(Self { child })
+        #[cfg(unix)]
+        let process_group = Some(
+            NonZeroI32::new(
+                libc::pid_t::try_from(child.id())
+                    .context("Webots process id does not fit in a Unix process-group id")?,
+            )
+            .context("Webots process group must have a positive id")?,
+        );
+        Ok(Self {
+            child,
+            #[cfg(unix)]
+            process_group,
+        })
     }
 
     /// Whether Webots has already exited, and with what.
@@ -60,37 +85,63 @@ impl Webots {
     /// outright leaves the host with a crash report to dismiss rather than a
     /// clean exit.
     pub(crate) async fn stop(mut self) -> Result<()> {
-        if self.child.try_wait()?.is_some() {
-            return Ok(());
-        }
         #[cfg(unix)]
         {
-            // SAFETY: `kill` takes no pointer, and the pid is this process's
-            // own direct child, which has not been reaped.
-            unsafe {
-                libc::kill(
-                    i32::try_from(self.child.id()).unwrap_or(i32::MAX),
-                    libc::SIGTERM,
-                );
-            }
+            self.stop_unix().await
         }
-        let deadline = tokio::time::Instant::now() + GRACEFUL_BUDGET;
-        loop {
+        #[cfg(not(unix))]
+        {
             if self.child.try_wait()?.is_some() {
                 return Ok(());
             }
-            if tokio::time::Instant::now() >= deadline {
-                break;
+            let deadline = tokio::time::Instant::now() + GRACEFUL_BUDGET;
+            loop {
+                if self.child.try_wait()?.is_some() {
+                    return Ok(());
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tracing::warn!(
+                "Webots did not exit within {}s of SIGTERM; killing it",
+                GRACEFUL_BUDGET.as_secs()
+            );
+            self.child.kill().ok();
+            self.child.wait()?;
+            Ok(())
         }
-        tracing::warn!(
-            "Webots did not exit within {}s of SIGTERM; killing it",
-            GRACEFUL_BUDGET.as_secs()
-        );
-        self.child.kill().ok();
-        self.child.wait()?;
-        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn stop_unix(&mut self) -> Result<()> {
+        let process_group = self
+            .process_group
+            .context("Webots process group ownership was already released")?;
+        for (signal, budget) in SHUTDOWN {
+            signal_process_group(process_group, signal)?;
+            let deadline = tokio::time::Instant::now() + budget;
+            loop {
+                if !process_group_alive(&mut self.child, process_group)? {
+                    self.process_group = None;
+                    return Ok(());
+                }
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                tokio::time::sleep(POLL_INTERVAL.min(remaining)).await;
+            }
+            if signal == libc::SIGKILL {
+                bail!("Webots process group remained alive after SIGKILL");
+            }
+            tracing::warn!(
+                "Webots did not exit within {}s of SIGTERM; killing its process group",
+                GRACEFUL_BUDGET.as_secs()
+            );
+        }
+        unreachable!("the shutdown signal sequence is non-empty")
     }
 }
 
@@ -99,9 +150,58 @@ impl Drop for Webots {
     /// the graceful path is [`Self::stop`], and this is the last resort for a
     /// panic or an early return that skipped it.
     fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            if let Some(process_group) = self.process_group.take() {
+                let _ = signal_process_group(process_group, libc::SIGKILL);
+            }
+        }
+        #[cfg(not(unix))]
         if matches!(self.child.try_wait(), Ok(None)) {
             self.child.kill().ok();
-            self.child.wait().ok();
         }
+        let _ = self.child.try_wait();
+    }
+}
+
+#[cfg(unix)]
+fn signal_process_group(process_group: NonZeroI32, signal: libc::c_int) -> Result<()> {
+    // SAFETY: `kill` takes no pointer. The negative pid targets exactly the
+    // process group created for the direct Webots child at launch.
+    if unsafe { libc::kill(-process_group.get(), signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).context("failed to signal the Webots process group")
+}
+
+#[cfg(unix)]
+fn process_group_alive(child: &mut Child, process_group: NonZeroI32) -> Result<bool> {
+    // Reap the direct child before probing: an unreaped group-leader zombie can
+    // otherwise make `kill(-pgid, 0)` look alive until the graceful budget ends.
+    let _ = child.try_wait()?;
+    if unsafe { libc::kill(-process_group.get(), 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error).context("failed to inspect the Webots process group"),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_targets_the_group_with_term_then_kill() {
+        assert_eq!(-NonZeroI32::new(42).unwrap().get(), -42);
+        assert_eq!(SHUTDOWN[0].0, libc::SIGTERM);
+        assert_eq!(SHUTDOWN[1].0, libc::SIGKILL);
     }
 }

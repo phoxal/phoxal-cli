@@ -17,8 +17,9 @@ pub struct AppModel {
     /// A simulation session is not detachable: the client owns Webots, so `q`
     /// there ends the whole session.
     pub detachable: bool,
-    /// Whether a stop has already been sent. The session keeps rendering until
-    /// the supervisor's own terminal snapshot arrives.
+    /// Whether a stop is in flight or accepted. Rejection or transport failure
+    /// clears the guard for retry; acceptance keeps rendering until terminal
+    /// supervisor evidence arrives.
     pub stop_requested: bool,
     pub route: FocusRoute,
     pub overview: OverviewModel,

@@ -62,6 +62,7 @@ pub struct Client {
     bus: BusHandle,
     snapshots: watch::Receiver<Option<Snapshot>>,
     terminal: watch::Receiver<Option<DisconnectReason>>,
+    current: Querier<supervisor::snapshot::CurrentRequest, SnapshotDocument>,
     command: Querier<supervisor::command::Request, supervisor::command::Reply>,
     logs: Querier<supervisor::logs::SnapshotRequest, supervisor::logs::Snapshot>,
     telemetry: Querier<supervisor::telemetry::SnapshotRequest, supervisor::telemetry::Snapshot>,
@@ -257,10 +258,16 @@ impl Client {
         .await
     }
 
-    /// End the execution, fenced on the newest installed snapshot revision.
+    /// End the execution, fenced on a fresh authoritative snapshot revision.
     pub async fn stop(&self) -> Result<CommandOutcome, ClientError> {
+        self.ensure_connected()?;
+        let current = self
+            .current
+            .query(supervisor::snapshot::CurrentRequest {})
+            .await?
+            .into_snapshot();
         self.command(Command::Stop {
-            expected_revision: self.revision()?,
+            expected_revision: current.revision,
         })
         .await
     }
@@ -311,15 +318,6 @@ impl Client {
     ) -> Result<StreamReceiver<supervisor::endpoint::telemetry::FollowEndpoint>, ClientError> {
         self.stream_receiver(supervisor::topic::client().telemetry().follow())
             .await
-    }
-
-    fn revision(&self) -> Result<u64, ClientError> {
-        self.ensure_connected()?;
-        self.snapshots
-            .borrow()
-            .as_ref()
-            .map(|snapshot| snapshot.revision)
-            .ok_or(ClientError::NoSnapshotRevision)
     }
 
     fn ensure_connected(&self) -> Result<(), ClientError> {
@@ -378,6 +376,7 @@ impl Connection {
             terminal_tx,
             identity,
             tasks,
+            current,
             command,
             logs,
             telemetry,
@@ -387,6 +386,7 @@ impl Connection {
             bus,
             snapshots,
             terminal: terminal.clone(),
+            current,
             command,
             logs,
             telemetry,
@@ -453,6 +453,7 @@ struct Initialized {
     terminal_tx: watch::Sender<Option<DisconnectReason>>,
     identity: KeyLivelinessObserver,
     tasks: JoinSet<SnapshotPumpExit>,
+    current: Querier<supervisor::snapshot::CurrentRequest, SnapshotDocument>,
     command: Querier<supervisor::command::Request, supervisor::command::Reply>,
     logs: Querier<supervisor::logs::SnapshotRequest, supervisor::logs::Snapshot>,
     telemetry: Querier<supervisor::telemetry::SnapshotRequest, supervisor::telemetry::Snapshot>,
@@ -463,14 +464,15 @@ async fn initialize(bus: &BusHandle, execution: ExecutionId) -> Result<Initializ
     ensure_compatible_framework(framework, FrameworkVersion::CURRENT)?;
 
     let stream = StreamReceiver::new(bus, &supervisor::topic::client().snapshot().topic()).await?;
-    let current = Querier::new(
+    let current_query = Querier::new(
         bus.clone(),
         &supervisor::topic::client().snapshot().current(),
         DEFAULT_QUERY_TIMEOUT,
-    )?
-    .query(supervisor::snapshot::CurrentRequest {})
-    .await?
-    .into_snapshot();
+    )?;
+    let current = current_query
+        .query(supervisor::snapshot::CurrentRequest {})
+        .await?
+        .into_snapshot();
     current.validate()?;
     let info = Querier::new(
         bus.clone(),
@@ -510,6 +512,7 @@ async fn initialize(bus: &BusHandle, execution: ExecutionId) -> Result<Initializ
         terminal_tx,
         identity,
         tasks,
+        current: current_query,
         command: Querier::new(
             bus.clone(),
             &supervisor::topic::client().command().topic(),

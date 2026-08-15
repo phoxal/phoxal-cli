@@ -1200,7 +1200,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2759,12 +2759,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ntapi"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3b335231dfd352ffb0f8017f3b6027a4917f7df785ea2143d8af2adc66980ae"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3224,9 +3233,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bundle"
-version = "0.61.0"
+version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ec910826fcffad8b5234dac6658fa2477141bd2a533f7ace6cb3f3d7c08c58a"
+checksum = "76b09529ebcd09f80c125ed849190876c66c4414121fa6dc726fc6283de0603f"
 dependencies = [
  "jsonschema",
  "phoxal-macros",
@@ -3240,9 +3249,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bus"
-version = "0.61.0"
+version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fab5bfc1903bc1fa7a6718c5f367f0d1bd3d6759080d874ddb381ae88e072b8b"
+checksum = "81388300589387431fc5b5982fae280cd5bc16e18ad77917bcc32039a34711ce"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -3284,6 +3293,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sysinfo",
  "tar",
  "tempfile",
  "tokio",
@@ -3372,9 +3382,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.61.0"
+version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c58e3e2197ed6fdb03543809a47af68e2fb0c6311ac157411bd285c6bd3d8e09"
+checksum = "70015502a8f2eaa0a059ef692164b30bf1f809a4a691d494b772f2e0b6dec611"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3385,9 +3395,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-manifest"
-version = "0.61.0"
+version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9641532e2d66ea6a2fc578d1e392115b08e26e1ca774f04426bc269ea3220634"
+checksum = "e409e9b34f471adbebf1f9f1d3da285ddcf540bc591a9b6d45692fd7885e4cfb"
 dependencies = [
  "phoxal-model",
  "phoxal-runtime-contract",
@@ -3402,9 +3412,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-model"
-version = "0.61.0"
+version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "900a32d34b819f104f81f4421d4a9e5876d43417159b862417c9a4dc277e1247"
+checksum = "6ea12679bcf8b030b5f33660e887a01b68f6be5ee6d2ed5955664742e1343cac"
 dependencies = [
  "phoxal-macros",
  "phoxal-runtime-contract",
@@ -3416,9 +3426,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-protocol"
-version = "0.61.0"
+version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7ad9b7b1472f66c00789cee56318949767ccf7e578f59bd1bb5241cbdbf5bcb"
+checksum = "f5896c6d88dce57deb324438105462dcc9af8d372aaf5c40a58fdb6ffe4d79f0"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -3430,9 +3440,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-runtime-contract"
-version = "0.61.0"
+version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f4feb34e90ddd56689c4b3610a0b0e87f3e41072a335c1b29892d8fc0abef0b"
+checksum = "8ce625aaff7938bb4a16f9d01ae9197a143a4977d9e333dadd7f54cd5c3d8762"
 dependencies = [
  "const_format",
  "getrandom 0.3.4",
@@ -3637,7 +3647,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4050,7 +4060,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4118,7 +4128,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4773,6 +4783,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sysinfo"
+version = "0.38.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92ab6a2f8bfe508deb3c6406578252e491d299cbbf3bc0529ecc3313aee4a52f"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "windows",
+]
+
+[[package]]
 name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4805,7 +4829,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5741,7 +5765,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
