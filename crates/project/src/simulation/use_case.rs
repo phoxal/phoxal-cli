@@ -16,7 +16,7 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
         options,
         request.reporter.as_ref(),
     )?;
-    resolved.resolved.source_manifest.clock = phoxal_manifest::source::robot::v0::Clock::Simulated;
+    finalize_simulation_manifest(&mut resolved.resolved.source_manifest);
     let mut canonical = serde_json::to_value(&resolved.resolved.compiled.robot)?;
     canonical["clock"] = serde_json::Value::String("simulated".to_string());
     resolved.resolved.compiled.robot = serde_json::from_value(canonical)
@@ -107,6 +107,13 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
     })
 }
 
+fn finalize_simulation_manifest(manifest: &mut phoxal_manifest::source::robot::v0::Manifest) {
+    manifest.clock = phoxal_manifest::source::robot::v0::Clock::Simulated;
+    for component in manifest.robot.components.values_mut() {
+        component.driver = None;
+    }
+}
+
 pub fn stage_webots(request: StageWebotsRequest) -> Result<WebotsLaunch> {
     let bundle = RuntimeBundle::open_verified(&request.staged_root)
         .context("failed to open the simulated runtime bundle")?;
@@ -169,6 +176,60 @@ fn webots_launch_args(staged_world_path: &std::path::Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simulation_finalization_changes_only_clock_and_driver_blocks() -> Result<()> {
+        let mut manifest = crate::source::resolver::parse_robot_from_string(
+            r#"schema: phoxal/robot/v0
+robot:
+  id: testbot
+  motion_limits:
+    max_linear_speed_mps: 0.6
+    max_angular_speed_radps: 2.0
+  kinematic:
+    kind: omnidirectional
+    actuators: [left_drive.motor]
+    encoders: []
+  components:
+    left_drive:
+      component: ddsm115
+      mount_link: base
+      driver:
+        connection:
+          type: serial
+          port: /dev/ttyUSB0
+          baud: 115200
+"#,
+        )?;
+        let authored = manifest.clone();
+        let authored_component = authored
+            .robot
+            .components
+            .get("left_drive")
+            .expect("fixture declares left_drive");
+        assert!(authored_component.driver.is_some());
+        let mut expected = authored.clone();
+        expected.clock = phoxal_manifest::source::robot::v0::Clock::Simulated;
+        expected
+            .robot
+            .components
+            .get_mut("left_drive")
+            .expect("fixture declares left_drive")
+            .driver = None;
+
+        finalize_simulation_manifest(&mut manifest);
+
+        assert_eq!(manifest, expected);
+        let finalized_component = manifest
+            .robot
+            .components
+            .get("left_drive")
+            .expect("finalization preserves left_drive");
+        assert_eq!(finalized_component.component, "ddsm115");
+        assert_eq!(finalized_component.mount_link, "base");
+        assert_eq!(manifest.robot.kinematic, authored.robot.kinematic);
+        Ok(())
+    }
 
     #[test]
     fn webots_host_arguments_are_stable_and_contain_no_runtime_identity() {
