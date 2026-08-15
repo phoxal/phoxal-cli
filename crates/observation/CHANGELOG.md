@@ -4,6 +4,10 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.37.7](https://github.com/phoxal/phoxal-cli/releases/tag/v0.37.7) - 2026-08-15
+
+
+
 ## [0.37.6](https://github.com/phoxal/phoxal-cli/releases/tag/v0.37.6) - 2026-08-15
 
 
