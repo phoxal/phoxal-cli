@@ -370,10 +370,7 @@ pub(crate) async fn stop_command(
         Ok(phoxal_client::supervisor::execution::CommandOutcome::Accepted { .. }) => {
             match tokio::time::timeout(STOP_TERMINAL_BUDGET, await_terminal(&session)).await {
                 Ok(outcome) => outcome,
-                Err(_) => Err(anyhow!(
-                    "the supervisor accepted the stop, but no terminal evidence arrived within {}s",
-                    STOP_TERMINAL_BUDGET.as_secs()
-                )),
+                Err(_) => confirm_accepted_stop(&target).await,
             }
         }
         Ok(phoxal_client::supervisor::execution::CommandOutcome::Rejected { reason }) => {
@@ -392,6 +389,28 @@ pub(crate) async fn stop_command(
     app.ui
         .info(format!("execution stopped at {}", target.endpoint));
     Ok(())
+}
+
+/// Confirm an accepted stop when the dying transport loses its final
+/// liveliness notification. A fresh connection attempt is independent of the
+/// original session: only an absent supervisor proves that the execution is
+/// gone, while every other result remains an error.
+async fn confirm_accepted_stop(target: &Target) -> Result<()> {
+    let options = ConnectOptions::new(&target.endpoint, CLIENT_PARTICIPANT);
+    match tokio::time::timeout(STOP_TERMINAL_BUDGET, Connection::connect(&options)).await {
+        Ok(Err(ConnectError::NoExecution { .. } | ConnectError::SupervisorUnavailable)) => Ok(()),
+        Ok(Err(error)) => Err(error).context(
+            "the supervisor accepted the stop, but a fresh connection could not confirm its exit",
+        ),
+        Ok(Ok(connection)) => {
+            let _ = tokio::time::timeout(SESSION_CLOSE_BUDGET, connection.close()).await;
+            bail!("the supervisor accepted the stop, but the execution still answers")
+        }
+        Err(_) => bail!(
+            "the supervisor accepted the stop, but a fresh connection did not finish within {}s",
+            STOP_TERMINAL_BUDGET.as_secs()
+        ),
+    }
 }
 
 /// Interpret a command failure using the connection's structured terminal
