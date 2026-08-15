@@ -6,19 +6,18 @@
 //! every other builder uses. The container is only a compilation environment: it
 //! mounts a deterministic source snapshot plus Cargo's persistent target,
 //! registry, and git caches, builds the selected packages, and installs every official
-//! package in one Cargo invocation. It never produces a Docker/OCI image.
+//! package in one container invocation. It never produces a Docker/OCI image.
 //!
 //! ## Officials materialize inside the container too
 //!
-//! The robot-independent set of official services is installed with one
-//! multi-package `cargo install` in the same container invocation,
-//! not host-side: the container already runs natively on the target
+//! The robot-independent set of official services is installed in the same
+//! container invocation, not host-side: the container already runs natively on the target
 //! architecture ([`platform_for_triple`]), which is exactly the property that
 //! makes cross-compiling from the host risky for a package with any native
 //! dependency - the very thing the container exists to avoid for the
 //! workspace build. Doing the same for officials keeps that guarantee for
 //! the *whole* deterministic set, not just the user's own crates, and
-//! reuses the identical `cargo install` invocation shape
+//! reuses the identical package-isolated `cargo install` shape
 //! [`crate::build::materialise`] uses everywhere else.
 //!
 //! On Linux with rootful Docker, container-written entries in the persistent
@@ -76,7 +75,7 @@
 //! (Rust 1.85). `--builder-image` overrides the default entirely - a user-provided
 //! image owns its own toolchain and glibc.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -172,9 +171,9 @@ pub struct ContainerBuildSpec {
     /// Host directory holding the deterministic source snapshot; mounted at
     /// [`CONTAINER_WORKDIR`] and used as the cargo working directory.
     pub snapshot: PathBuf,
-    /// The real project's Cargo target directory, mounted over the snapshot's
-    /// `target/` path. Both workspace builds and official installs reuse it
-    /// across container invocations.
+    /// The real project's persistent Cargo target root, mounted over the
+    /// snapshot's `target/` path. Workspace output stays directly under it;
+    /// official installs use distinct `phoxal-install/<package>` children.
     pub cargo_target: PathBuf,
     /// Host Cargo registry cache (`$CARGO_HOME/registry`), mounted read-write so
     /// the container reuses already-fetched crates AND official packages -
@@ -188,9 +187,9 @@ pub struct ContainerBuildSpec {
     /// and be empty before the container runs; its `bin/` subtree becomes
     /// the container build's `officials_source` for host-side staging.
     pub officials_root: PathBuf,
-    /// The complete explicit Cargo-package set installed in one release-profile
-    /// batch: catalog participants, selected registry component drivers, and
-    /// the exact-train framework supervisor.
+    /// The complete explicit Cargo-package set installed as one release-profile
+    /// batch of package-isolated commands: catalog participants, selected
+    /// registry component drivers, and the exact-train framework supervisor.
     /// Empty skips every registry install; the caller then has no
     /// `officials_source` to hand to host-side staging, which materializes
     /// the whole set itself instead.
@@ -259,10 +258,11 @@ impl ContainerBuildSpec {
     /// materializes the deterministic official set inside the image. The
     /// container runs, as a compilation environment only,
     /// `cargo build --package <selected> ... --locked --release --target <triple>`
-    /// against the mounted snapshot, then one `cargo install` carrying every exact
-    /// `<package>@<train>` operand. Shared Cargo flags are emitted once and the
-    /// whole build runs on [`Self::platform`], so it is native rather than
-    /// cross-compiled.
+    /// against the mounted snapshot, then one `cargo install` per exact
+    /// `<package>@<train>`. Registry sources stay shared, while each package's
+    /// compiler output is isolated because its published lock graph is
+    /// independent. The whole build runs on [`Self::platform`], so it is native
+    /// rather than cross-compiled.
     #[must_use]
     pub fn invocation(&self) -> EngineInvocation {
         let mut args = vec!["run".to_string(), "--rm".to_string()];
@@ -320,7 +320,8 @@ impl ContainerBuildSpec {
     }
 
     /// The shell script run inside the prepared image: selected workspace
-    /// packages, then one `cargo install` for all registry runtimes.
+    /// packages, then one package-isolated `cargo install` for each registry
+    /// runtime.
     fn container_script(&self) -> String {
         let mut commands = Vec::new();
         if !self.workspace_packages.is_empty() {
@@ -340,29 +341,33 @@ impl ContainerBuildSpec {
             commands.push(workspace_build);
         }
         if !self.packages.is_empty() {
-            let install_args = crate::build::materialise::build_install_args(
-                self.packages
-                    .iter()
-                    .map(|package| (package.package.as_str(), package.train.as_str())),
-                Some(&self.target),
-                crate::build::materialise::MaterializeProfile::Release,
-                self.offline,
-            );
-            let mut command = vec!["cargo".to_string(), "install".to_string()];
-            command.extend(install_args);
-            command.extend([
-                "--target-dir".to_string(),
-                format!("{CONTAINER_WORKDIR}/target"),
-            ]);
-            command.push("--root".to_string());
-            command.push(CONTAINER_OFFICIALS.to_string());
-            commands.push(
-                command
-                    .iter()
-                    .map(|arg| shell_quote(arg))
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
+            let shared_target = Path::new(CONTAINER_WORKDIR).join("target");
+            for package in &self.packages {
+                let install_args = crate::build::materialise::build_install_args(
+                    &package.package,
+                    &package.train,
+                    Some(&self.target),
+                    crate::build::materialise::MaterializeProfile::Release,
+                    self.offline,
+                );
+                let package_target =
+                    crate::build::materialise::package_target_dir(&shared_target, &package.package);
+                let mut command = vec!["cargo".to_string(), "install".to_string()];
+                command.extend(install_args);
+                command.extend([
+                    "--target-dir".to_string(),
+                    package_target.display().to_string(),
+                ]);
+                command.push("--root".to_string());
+                command.push(CONTAINER_OFFICIALS.to_string());
+                commands.push(
+                    command
+                        .iter()
+                        .map(|arg| shell_quote(arg))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
         }
         if commands.is_empty() {
             "set -e".to_string()
@@ -569,16 +574,22 @@ mod tests {
         assert!(joined.contains("phoxal"), "{joined}");
         assert!(joined.contains("--locked"), "{joined}");
         assert!(
-            joined.contains("--target-dir /phoxal/src/target"),
+            joined.contains(
+                "'--target-dir' '/phoxal/src/target/phoxal-install/phoxal-service-drive'"
+            ),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("'--target-dir' '/phoxal/src/target/phoxal-install/phoxal-tool-bus'"),
             "{joined}"
         );
         assert_eq!(
             joined.matches("'cargo' 'install'").count(),
-            1,
-            "all officials must share one Cargo invocation: {joined}"
+            2,
+            "each independently locked official needs its own Cargo invocation: {joined}"
         );
-        assert_eq!(joined.matches("--registry").count(), 1, "{joined}");
-        assert_eq!(joined.matches("--locked").count(), 2, "{joined}");
+        assert_eq!(joined.matches("--registry").count(), 2, "{joined}");
+        assert_eq!(joined.matches("--locked").count(), 3, "{joined}");
         // `set -e` so a failed official install stops the whole script rather
         // than silently continuing with a partial officials root.
         assert!(joined.contains("set -e"), "{joined}");

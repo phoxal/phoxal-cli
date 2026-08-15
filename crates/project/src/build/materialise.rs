@@ -4,8 +4,11 @@
 //! and every component driver package, against the static registry
 //! `sparse+https://phoxal.github.io/registry/`.
 //! There is no vendored artifact store and no suite/tarball download anymore:
-//! `cargo install` resolves, fetches, verifies, and builds each package, and
-//! Cargo's own build-directory locking covers its own cache.
+//! `cargo install` resolves, fetches, verifies, and builds each package. Every
+//! package gets its own persistent compiler-output directory: separate
+//! published packages carry separate lock graphs, so sharing one target
+//! directory between their installs can invalidate an artifact while another
+//! graph still needs it. Cargo's registry and git caches remain shared.
 //!
 //! Every invocation is pinned to the *exact* locked framework train
 //! (`<package>@<train>`, never a bare name) and passes `--locked` so the
@@ -111,9 +114,10 @@ impl MaterializeSpec {
         self
     }
 
-    /// Share Cargo's project target directory with source builds. The install
-    /// root still owns only the final runtime binary; compiler intermediates
-    /// stay in Cargo's standard cache.
+    /// Use this persistent directory as the parent of package-isolated Cargo
+    /// target directories. The install root still owns only the final runtime
+    /// binary; compiler intermediates stay under
+    /// `<target_dir>/phoxal-install/<package>`.
     #[must_use]
     pub fn with_target_dir(mut self, target_dir: PathBuf) -> Self {
         self.target_dir = Some(target_dir);
@@ -151,7 +155,7 @@ pub(crate) fn supervisor_spec(
     spec
 }
 
-/// Install a compatible exact-version registry group with one Cargo process.
+/// Install a compatible exact-version registry group.
 /// The caller groups by target/profile/target-directory and invokes this
 /// neutral mechanism separately for distinct destinations. In particular, the
 /// host supervisor's `ReleaseRoot` batch is not folded into a participant
@@ -188,30 +192,31 @@ pub fn cargo_install_batch(
             );
         }
     }
-    let args = build_install_args(
-        packages
-            .iter()
-            .map(|(package, train)| (package.as_str(), train.as_str())),
-        first.target.as_deref(),
-        first.profile,
-        offline,
-    );
-    let mut command = Command::new("cargo");
-    command.arg("install").args(&args);
-    if let Some(target_dir) = &first.target_dir {
-        command.arg("--target-dir").arg(target_dir);
-    }
-    command.arg("--root").arg(root);
-    let operands = packages
-        .iter()
-        .map(|(package, train)| format!("{package}@{train}"))
-        .collect::<Vec<_>>()
-        .join(", ");
     crate::progress::run_phase(
         reporter,
         crate::progress_phase::PhaseId::new("materialize-registry-batch"),
         format!("Materializing registry batch ({} packages)", packages.len()),
-        || run_cargo_install(&mut command, &operands, reporter),
+        || {
+            for (package, train) in &packages {
+                let args = build_install_args(
+                    package,
+                    train,
+                    first.target.as_deref(),
+                    first.profile,
+                    offline,
+                );
+                let mut command = Command::new("cargo");
+                command.arg("install").args(&args);
+                if let Some(target_dir) = &first.target_dir {
+                    command
+                        .arg("--target-dir")
+                        .arg(package_target_dir(target_dir, package));
+                }
+                command.arg("--root").arg(root);
+                run_cargo_install(&mut command, &format!("{package}@{train}"), reporter)?;
+            }
+            Ok(())
+        },
     )?;
     packages
         .keys()
@@ -227,16 +232,14 @@ pub fn cargo_install_batch(
 /// an explicit host-triple target is the plain native build, matching
 /// the selected-source batch builder's identical check.
 #[must_use]
-pub fn build_install_args<'a>(
-    packages: impl IntoIterator<Item = (&'a str, &'a str)>,
+pub fn build_install_args(
+    package: &str,
+    train: &str,
     target: Option<&str>,
     profile: MaterializeProfile,
     offline: bool,
 ) -> Vec<String> {
-    let mut args = packages
-        .into_iter()
-        .map(|(package, train)| format!("{package}@{train}"))
-        .collect::<Vec<_>>();
+    let mut args = vec![format!("{package}@{train}")];
     args.extend([
         "--registry".to_string(),
         REGISTRY_NAME.to_string(),
@@ -256,6 +259,12 @@ pub fn build_install_args<'a>(
         args.push("--offline".to_string());
     }
     args
+}
+
+/// Persistent compiler output for one independently locked registry package.
+#[must_use]
+pub fn package_target_dir(shared_target: &Path, package: &str) -> PathBuf {
+    shared_target.join("phoxal-install").join(package)
 }
 
 fn run_cargo_install(
@@ -399,7 +408,8 @@ mod tests {
     fn command_for(spec: &MaterializeSpec, root: &Path, offline: bool) -> Command {
         let package = spec.cargo_package_name();
         let install_args = build_install_args(
-            std::iter::once((package, spec.train.as_str())),
+            package,
+            spec.train.as_str(),
             spec.target.as_deref(),
             spec.profile,
             offline,
@@ -407,7 +417,9 @@ mod tests {
         let mut command = Command::new("cargo");
         command.arg("install").args(&install_args);
         if let Some(target_dir) = &spec.target_dir {
-            command.arg("--target-dir").arg(target_dir);
+            command
+                .arg("--target-dir")
+                .arg(package_target_dir(target_dir, package));
         }
         command.arg("--root").arg(root);
         command
@@ -460,23 +472,15 @@ mod tests {
     }
 
     #[test]
-    fn install_args_batch_packages_at_independent_exact_versions() {
+    fn install_args_pin_one_independently_locked_package() {
         let args = build_install_args(
-            [
-                ("phoxal-service-drive", "0.42.3"),
-                ("phoxal-component-ddsm115", "0.41.7"),
-            ],
+            "phoxal-component-ddsm115",
+            "0.41.7",
             None,
             MaterializeProfile::Release,
             false,
         );
-        assert_eq!(
-            &args[..2],
-            [
-                "phoxal-service-drive@0.42.3",
-                "phoxal-component-ddsm115@0.41.7",
-            ]
-        );
+        assert_eq!(&args[..1], ["phoxal-component-ddsm115@0.41.7"]);
         assert_eq!(args.iter().filter(|arg| *arg == "--registry").count(), 1);
         assert_eq!(args.iter().filter(|arg| *arg == "--locked").count(), 1);
         assert_eq!(args.iter().filter(|arg| *arg == "--config").count(), 1);
@@ -501,7 +505,23 @@ mod tests {
             .position(|arg| arg == "--target-dir")
             .map(|index| argv[index + 1].clone())
             .expect("--target-dir is present");
-        assert_eq!(target_dir, "/workspace/target");
+        assert_eq!(
+            target_dir,
+            "/workspace/target/phoxal-install/phoxal-service-drive"
+        );
+    }
+
+    #[test]
+    fn independently_locked_packages_never_share_compiler_output() {
+        let shared = Path::new("/workspace/target");
+        assert_eq!(
+            package_target_dir(shared, "phoxal-component-bno085"),
+            Path::new("/workspace/target/phoxal-install/phoxal-component-bno085")
+        );
+        assert_eq!(
+            package_target_dir(shared, "phoxal-component-ddsm115"),
+            Path::new("/workspace/target/phoxal-install/phoxal-component-ddsm115")
+        );
     }
 
     #[test]
