@@ -58,8 +58,8 @@ fn resolve_project_with(
     let world_path = world::resolve_world(&project_root, &options.world)?;
     let robot = crate::source::resolver::load_robot(&robot_path)?;
 
-    // Resolve Cargo-workspace component drivers for compile-time metadata and
-    // for their crate-owned model assets. Physical drivers are never launched.
+    // Resolve every component definition and its model assets, but no physical
+    // driver artifact: Webots supplies the component behavior in simulation.
     let resolved = crate::progress::run_phase(
         reporter,
         crate::progress_phase::PhaseId::new("validate"),
@@ -70,6 +70,7 @@ fn resolve_project_with(
                 &project_root,
                 ResolveOptions {
                     offline: options.offline,
+                    drivers: crate::source::intent::DriverSelection::None,
                     ..Default::default()
                 },
             )
@@ -114,6 +115,11 @@ mod resolve_project_tests {
             &reporter,
             |_robot, _root, options| {
                 assert!(options.offline, "simulation must never drop --offline");
+                assert_eq!(
+                    options.drivers,
+                    crate::source::intent::DriverSelection::None,
+                    "simulation must not resolve physical component drivers"
+                );
                 seen.store(true, std::sync::atomic::Ordering::SeqCst);
                 anyhow::bail!("stop after observing options")
             },
