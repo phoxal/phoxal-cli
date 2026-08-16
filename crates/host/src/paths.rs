@@ -73,6 +73,29 @@ impl RuntimePaths {
         self.rendezvous.supervisor_lock()
     }
 
+    /// Everything one startup printed, plus the dependency output it did not.
+    /// Truncated by each new startup: it describes the current attempt.
+    #[must_use]
+    pub fn startup_log(&self) -> PathBuf {
+        self.rendezvous.volatile_root().join("startup.log")
+    }
+
+    /// The launched supervisor's own standard error. The supervisor is durable
+    /// and outlives the client that started it, so it owns this file directly
+    /// rather than writing down a pipe nobody is left to read.
+    #[must_use]
+    pub fn supervisor_log(&self) -> PathBuf {
+        self.rendezvous.volatile_root().join("supervisor.log")
+    }
+
+    /// The Webots application's own output. It must never reach the terminal:
+    /// Webots prints driver notices over whatever is on screen, and during a
+    /// session that is the dashboard.
+    #[must_use]
+    pub fn webots_log(&self) -> PathBuf {
+        self.rendezvous.volatile_root().join("webots.log")
+    }
+
     #[must_use]
     pub fn supervisor_socket(&self) -> PathBuf {
         self.rendezvous.supervisor_socket()
@@ -109,6 +132,20 @@ mod tests {
         assert_eq!(
             source.supervisor_socket(),
             Path::new("/tmp/robot/.phoxal/run/supervisor.sock")
+        );
+        // Every per-session artifact shares the one volatile root, so a
+        // project only ever has one place to look and one place to clean.
+        assert_eq!(
+            source.startup_log(),
+            Path::new("/tmp/robot/.phoxal/run/startup.log")
+        );
+        assert_eq!(
+            source.supervisor_log(),
+            Path::new("/tmp/robot/.phoxal/run/supervisor.log")
+        );
+        assert_eq!(
+            source.webots_log(),
+            Path::new("/tmp/robot/.phoxal/run/webots.log")
         );
 
         let installed = RuntimePaths::for_root(Path::new(

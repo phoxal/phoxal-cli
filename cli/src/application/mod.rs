@@ -14,5 +14,7 @@ pub(crate) mod schema;
 pub(crate) mod service;
 pub(crate) mod session;
 pub(crate) mod simulation;
+pub(crate) mod startup;
+pub(crate) mod summary;
 pub(crate) mod supervisor;
 pub(crate) mod webots;

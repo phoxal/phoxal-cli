@@ -10,9 +10,11 @@ use std::io::IsTerminal;
 
 use phoxal_cli_ui::Theme;
 
+pub(crate) mod brand;
 pub(crate) mod diagnostics;
 pub(crate) mod plain;
 pub(crate) mod progress;
+pub(crate) mod welcome;
 
 #[must_use]
 pub fn tracing_ansi_enabled() -> bool {

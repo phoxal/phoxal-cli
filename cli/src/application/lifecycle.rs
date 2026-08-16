@@ -19,12 +19,18 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal_client::supervisor::execution::{Lifecycle, Snapshot};
-use phoxal_client::{ClientError, ConnectError, ConnectOptions, Connection, DisconnectReason};
+use phoxal_client::{
+    BusError, ClientError, ConnectError, ConnectOptions, Connection, DisconnectReason,
+};
 
 use super::session::{self, Detachable};
+use super::startup::Startup;
+use super::summary::{SessionSummary, attachment_ending};
 use super::supervisor::{self, LaunchedSupervisor};
 use crate::attach::{CLIENT_PARTICIPANT, Session};
 use crate::cli::context::AppContext;
+use crate::cli::exit::ReportedExit;
+use crate::cli::output::welcome::{Mode, StepId};
 use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
 /// How long a client waits for a freshly launched supervisor to answer connect.
@@ -43,6 +49,10 @@ const STOP_TERMINAL_BUDGET: Duration = Duration::from_secs(5);
 
 /// How often a launch is re-probed while waiting for the supervisor to come up.
 const PROBE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long a supervisor that just dropped its identity is given to actually
+/// exit, so its own account of why can be quoted instead of the transport's.
+const SUPERVISOR_EXIT_EVIDENCE_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DriversMode {
@@ -93,10 +103,16 @@ pub(crate) async fn run_command(
     options: RunOptions,
 ) -> Result<()> {
     let target = Target::resolve(requested_target, app.project.root())?;
-    let launched = build_publish_and_launch(app, &target, options).await?;
-    let session = await_attachment(&target, launched, HANDSHAKE_BUDGET).await?;
+    let startup = Startup::begin(app, &target.project, Mode::Native);
+    let session = match open_fresh_execution(app, &target, options, &startup).await {
+        Ok(session) => session,
+        Err(error) => return Err(startup.failed(error)),
+    };
+    // The dashboard takes the terminal only from here: the graph is up, and
+    // the checklist has already given the terminal back.
+    startup.ready();
     let outcome = session::drive(app, &target.project, session, Detachable::Yes).await?;
-    report_outcome(&target, outcome)
+    report_outcome(app, &target, outcome)
 }
 
 pub(crate) async fn start_command(
@@ -105,15 +121,68 @@ pub(crate) async fn start_command(
     options: RunOptions,
 ) -> Result<()> {
     let target = Target::resolve(requested_target, app.project.root())?;
-    let launched = build_publish_and_launch(app, &target, options).await?;
-    let session = await_attachment(&target, launched, HANDSHAKE_BUDGET).await?;
-    await_readiness(&session, READINESS_BUDGET).await?;
+    let startup = Startup::begin(app, &target.project, Mode::Native);
+    let session = match open_fresh_execution(app, &target, options, &startup).await {
+        Ok(session) => session,
+        Err(error) => return Err(startup.failed(error)),
+    };
+    startup.ready();
     let display = target.project.display();
     session.shutdown().await;
     app.ui.info(format!(
         "robot instance ready; attach with `phoxal attach {display}` or stop with `phoxal stop {display}`"
     ));
     Ok(())
+}
+
+/// Build, launch, attach, and wait for the graph - the whole road from a
+/// project to an execution an operator can be shown.
+async fn open_fresh_execution(
+    app: &AppContext,
+    target: &Target,
+    options: RunOptions,
+    startup: &Startup,
+) -> Result<Session> {
+    let launched = build_publish_and_launch(app, target, options, startup).await?;
+    startup.step(StepId::Supervisor, "waiting for the supervisor");
+    let (session, mut launched) = await_attachment(target, launched, HANDSHAKE_BUDGET).await?;
+    if let Err(error) = startup.await_graph(&session, READINESS_BUDGET).await {
+        let error = explain_with_supervisor_exit(error, &mut launched).await;
+        // Close the attachment before reporting. An abandoned session tears its
+        // transport down during process shutdown instead, which is where the
+        // "subscriber closed" noise and a lost graceful detach come from.
+        session.shutdown().await;
+        return Err(error);
+    }
+    Ok(session)
+}
+
+/// Prefer the supervisor's own account when the graph wait ended because the
+/// supervisor went away.
+///
+/// What the client observes in that moment is its transport losing the
+/// supervisor's identity token - true, and useless: it names the consequence.
+/// The supervisor writes the cause to its log on the way out, so the exit is
+/// awaited briefly first: the identity is dropped as the supervisor begins
+/// unwinding, and the process itself is a moment behind. A supervisor that is
+/// still running after the bound did not cause this, and the original evidence
+/// stands.
+async fn explain_with_supervisor_exit(
+    error: anyhow::Error,
+    launched: &mut LaunchedSupervisor,
+) -> anyhow::Error {
+    let deadline = tokio::time::Instant::now() + SUPERVISOR_EXIT_EVIDENCE_BUDGET;
+    loop {
+        match launched.exited() {
+            Ok(Some(status)) => return anyhow!(launched.startup_exit_message(status)),
+            Ok(None) => {}
+            Err(_) => return error,
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return error;
+        }
+        tokio::time::sleep(PROBE_INTERVAL).await;
+    }
 }
 
 /// The shared front half of `run` and `start`.
@@ -133,6 +202,7 @@ async fn build_publish_and_launch(
     app: &AppContext,
     target: &Target,
     options: RunOptions,
+    startup: &Startup,
 ) -> Result<LaunchedSupervisor> {
     refuse_if_live(target).await?;
     let _lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
@@ -150,8 +220,7 @@ async fn build_publish_and_launch(
 
     let runtime_target =
         phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;
-    let (reporter, signal_task) =
-        crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
+    let reporter = startup.reporter();
     let offline = app.offline;
     let prepared = tokio::task::spawn_blocking(move || {
         phoxal_cli_project::prepare_run(phoxal_cli_project::PrepareRunRequest {
@@ -167,15 +236,23 @@ async fn build_publish_and_launch(
             reporter,
         })
     })
-    .await?;
-    signal_task.abort();
-    let prepared = prepared?;
+    .await??;
 
-    app.ui.info(format!(
-        "launching the deployment release at {}",
-        prepared.release.root.display()
-    ));
-    supervisor::spawn(&prepared.release)
+    startup.complete(StepId::PrepareRuntime, staged_detail(&prepared.release));
+    supervisor::spawn(
+        &prepared.release,
+        &phoxal_cli_host::paths::RuntimePaths::for_root(&target.project).supervisor_log(),
+    )
+}
+
+/// What the prepared release actually contains, counted from the release
+/// itself rather than from the build events that produced it: an unchanged
+/// project skips every build event and still stages the same binaries.
+pub(crate) fn staged_detail(release: &phoxal_cli_project::ReleaseLayout) -> String {
+    match std::fs::read_dir(release.bundle.join("bin")) {
+        Ok(entries) => format!("{} binaries staged", entries.count()),
+        Err(_) => "release ready".to_string(),
+    }
 }
 
 /// Fail with the commands that actually apply when an execution already
@@ -213,10 +290,51 @@ fn already_live_message(target: &Target) -> String {
 async fn probe(endpoint: &str) -> Result<Option<Connection>> {
     match Connection::connect(&ConnectOptions::new(endpoint, CLIENT_PARTICIPANT)).await {
         Ok(connection) => Ok(Some(connection)),
-        Err(error) if classify_connect_error(&error) == ConnectFailure::RetryableAbsence => {
-            Ok(None)
+        Err(error) => {
+            let error = anyhow::Error::new(error);
+            if classify_connect_at(endpoint, &error) == ConnectFailure::RetryableAbsence {
+                return Ok(None);
+            }
+            Err(error)
         }
-        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether a transport failure at a local endpoint is simply nothing being
+/// there.
+///
+/// A `unixsock-stream` endpoint *is* a filesystem path: with no socket file at
+/// it, nothing has ever bound it, and the transport failure that follows is
+/// that absence rather than a fault. The transport cannot tell the two apart -
+/// it reports the same "unable to connect to any of [...]" for a missing socket
+/// and for a broken one - so this checks the one local fact that decides it.
+///
+/// Both halves are required. Only a *transport* failure qualifies, because
+/// every other opening failure means an execution was already discovered, and
+/// a discovered execution's evidence must survive. Without this, the first
+/// probe of a project that has never run - and every probe of a supervisor that
+/// has not yet bound its socket - reads as a hard failure instead of as the
+/// startup latency it is.
+fn is_absent_local_endpoint(endpoint: &str, error: &anyhow::Error) -> bool {
+    if !matches!(
+        error.downcast_ref::<ConnectError>(),
+        Some(ConnectError::Bus(BusError::Transport(_)))
+    ) {
+        return false;
+    }
+    endpoint
+        .strip_prefix("unixsock-stream/")
+        .is_some_and(|path| !Path::new(path).exists())
+}
+
+/// Classify an opening failure against the endpoint it was addressed to.
+fn classify_connect_at(endpoint: &str, error: &anyhow::Error) -> ConnectFailure {
+    match classify_connect_failure(error) {
+        ConnectFailure::RetryableAbsence => ConnectFailure::RetryableAbsence,
+        ConnectFailure::Fatal if is_absent_local_endpoint(endpoint, error) => {
+            ConnectFailure::RetryableAbsence
+        }
+        ConnectFailure::Fatal => ConnectFailure::Fatal,
     }
 }
 
@@ -248,6 +366,31 @@ fn classify_connect_failure(error: &anyhow::Error) -> ConnectFailure {
         .map_or(ConnectFailure::Fatal, classify_connect_error)
 }
 
+/// The same question, asked while waiting for a supervisor this client just
+/// launched and can see is still alive.
+///
+/// The bar is different here, and deliberately lower. A supervisor comes up in
+/// stages - it binds its socket, opens its router, then declares the supervisor
+/// API - so "nothing announced yet", "the supervisor API has no responder yet",
+/// and a query or transport that found nobody are all the same fact: not yet.
+/// Treating them as answers is what turns a lost race with a starting
+/// supervisor into a failed `run`. Only a permanent fact about a discovered
+/// execution - a version disagreement, an unreadable bootstrap, two executions
+/// at one endpoint - ends the wait before the budget does.
+const fn classify_launch_failure(error: &ConnectError) -> ConnectFailure {
+    match error {
+        ConnectError::NoExecution { .. }
+        | ConnectError::SupervisorUnavailable
+        | ConnectError::Query(_)
+        | ConnectError::Bus(_) => ConnectFailure::RetryableAbsence,
+        ConnectError::MultipleExecutions { .. }
+        | ConnectError::SourceLabel(_)
+        | ConnectError::IncompatibleFramework { .. }
+        | ConnectError::UnreadableBootstrap { .. }
+        | ConnectError::Snapshot(_) => ConnectFailure::Fatal,
+    }
+}
+
 /// Watch the launched supervisor until it answers connect, or until it exits.
 ///
 /// Before the handshake completes there is nothing but process facts and
@@ -257,19 +400,23 @@ async fn await_attachment(
     target: &Target,
     mut launched: LaunchedSupervisor,
     budget: Duration,
-) -> Result<Session> {
+) -> Result<(Session, LaunchedSupervisor)> {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
         if let Some(status) = launched.exited()? {
             bail!(launched.early_exit_message(status));
         }
         match Session::open(&target.endpoint, target.project.display().to_string()).await {
-            Ok(session) => return Ok(session),
+            Ok(session) => return Ok((session, launched)),
             Err(error) => {
-                // Only "nothing announced yet" is startup latency. Once an
-                // execution was discovered, ambiguity, identity loss, invalid
-                // state, or a protocol/transport failure is already an answer.
-                if classify_connect_failure(&error) == ConnectFailure::Fatal {
+                // The child is alive, so "not answering yet" is latency; only a
+                // permanent fact about a discovered execution is already an
+                // answer.
+                if error
+                    .downcast_ref::<ConnectError>()
+                    .map_or(ConnectFailure::Fatal, classify_launch_failure)
+                    == ConnectFailure::Fatal
+                {
                     return Err(error);
                 }
                 if tokio::time::Instant::now() >= deadline {
@@ -295,19 +442,6 @@ async fn await_attachment(
             }
         }
     }
-}
-
-/// Wait for the graph to reach readiness, or fail with the reason it did not.
-async fn await_readiness(session: &Session, budget: Duration) -> Result<()> {
-    tokio::time::timeout(budget, session.wait_ready())
-        .await
-        .with_context(|| {
-            format!(
-                "timed out after {}s waiting for the graph to become ready",
-                budget.as_secs()
-            )
-        })??;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -340,14 +474,21 @@ async fn open_existing(
 /// what happened; telling the operator to start another execution would bury
 /// that evidence under advice for a different problem.
 fn describe_missing_execution(error: anyhow::Error, target: &Target) -> anyhow::Error {
-    if classify_connect_failure(&error) == ConnectFailure::Fatal {
+    if classify_connect_at(&target.endpoint, &error) == ConnectFailure::Fatal {
         return error;
     }
-    error.context(format!(
+    let missing = format!(
         "no execution answered at {}. Start one with `phoxal run {}`",
         target.endpoint,
         target.project.display()
-    ))
+    );
+    // An endpoint with no socket file has already been fully explained. The
+    // transport's own account of failing to reach it adds a crates.io source
+    // path and no information, so it is dropped rather than appended.
+    if is_absent_local_endpoint(&target.endpoint, &error) {
+        return anyhow!(missing);
+    }
+    error.context(missing)
 }
 
 pub(crate) async fn attach_command(
@@ -357,7 +498,7 @@ pub(crate) async fn attach_command(
 ) -> Result<()> {
     let (target, session) = open_existing(app, requested_target, endpoint).await?;
     let outcome = session::drive(app, &target.project, session, Detachable::Yes).await?;
-    report_outcome(&target, outcome)
+    report_outcome(app, &target, outcome)
 }
 
 pub(crate) async fn stop_command(
@@ -621,22 +762,28 @@ fn failure_message(snapshot: &Snapshot) -> String {
     )
 }
 
+/// Close a dashboard session with the one block that says what happened.
+///
+/// The failure is reported *in* the block rather than as a second, separate
+/// error line: the operator has just watched a terminal application vanish, and
+/// one plain account of the ending - with the log that holds the rest - is the
+/// whole answer.
 pub(crate) fn report_outcome(
+    app: &AppContext,
     target: &Target,
     outcome: phoxal_cli_ui::AttachmentOutcome,
 ) -> Result<()> {
     use phoxal_cli_ui::AttachmentOutcome;
-    match outcome {
-        AttachmentOutcome::Detached | AttachmentOutcome::ExecutionStopped => Ok(()),
-        AttachmentOutcome::ExecutionFailed { reason } => match reason {
-            Some(failure) => bail!("{:?}: {}", failure.reason, failure.detail.as_str()),
-            None => bail!(
-                "the execution at {} ended without reporting a reason; see the supervisor's own \
-                 output for the exact error",
-                target.endpoint
-            ),
-        },
+    let failed = matches!(outcome, AttachmentOutcome::ExecutionFailed { .. });
+    SessionSummary::new(
+        attachment_ending(&outcome),
+        vec![phoxal_cli_host::paths::RuntimePaths::for_root(&target.project).supervisor_log()],
+    )
+    .print(&target.project, app.output.theme);
+    if failed {
+        return Err(ReportedExit(1).into());
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -759,6 +906,89 @@ mod tests {
             classify_connect_failure(&anyhow::anyhow!("untyped opening failure")),
             ConnectFailure::Fatal
         );
+    }
+
+    /// A local endpoint with no socket file is nothing to connect to, not a
+    /// failure to connect: it is both the first probe of a project that has
+    /// never run and every probe of a supervisor that has not bound its socket
+    /// yet. Only the transport failure qualifies - a discovered execution's
+    /// evidence survives whatever the filesystem looks like.
+    #[test]
+    fn a_missing_local_socket_is_absence_rather_than_a_transport_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("supervisor.sock");
+        let endpoint = format!("unixsock-stream/{}", socket.display());
+        let transport: anyhow::Error = ConnectError::Bus(BusError::Transport(
+            "Unable to connect to any of [unixsock-stream//...]".to_string(),
+        ))
+        .into();
+
+        assert_eq!(
+            classify_connect_at(&endpoint, &transport),
+            ConnectFailure::RetryableAbsence
+        );
+
+        // The same transport failure against a socket that exists is a real
+        // failure: something is bound there and it did not answer.
+        std::fs::write(&socket, b"").unwrap();
+        assert_eq!(
+            classify_connect_at(&endpoint, &transport),
+            ConnectFailure::Fatal
+        );
+        std::fs::remove_file(&socket).unwrap();
+
+        // A discovered execution keeps its evidence even with no socket file.
+        assert_eq!(
+            classify_connect_at(&endpoint, &mismatch()),
+            ConnectFailure::Fatal
+        );
+        // A remote endpoint has no local fact to check.
+        assert_eq!(
+            classify_connect_at("tcp/127.0.0.1:7447", &transport),
+            ConnectFailure::Fatal
+        );
+    }
+
+    /// A supervisor comes up in stages, so a client that launched it and can
+    /// see it running must keep waiting through every "not yet" - and must
+    /// still stop at once for a permanent fact about what it found.
+    #[test]
+    fn a_launch_wait_retries_every_not_yet_and_stops_at_a_permanent_fact() {
+        for pending in [
+            ConnectError::NoExecution {
+                endpoint: "unixsock-stream//tmp/rover.sock".to_string(),
+            },
+            ConnectError::SupervisorUnavailable,
+            ConnectError::Query(QueryError::Unavailable),
+            ConnectError::Bus(BusError::Closed),
+        ] {
+            assert_eq!(
+                classify_launch_failure(&pending),
+                ConnectFailure::RetryableAbsence,
+                "{pending}"
+            );
+        }
+        for permanent in [
+            ConnectError::MultipleExecutions {
+                endpoint: "tcp/127.0.0.1:7447".to_string(),
+                count: 2,
+                executions: vec![phoxal_runtime_contract::identity::ExecutionId::mint()],
+            },
+            ConnectError::IncompatibleFramework {
+                remote: phoxal_runtime_contract::version::FrameworkVersion::new(0, 57, 0),
+                client: phoxal_runtime_contract::version::FrameworkVersion::new(0, 56, 2),
+                refusal: phoxal_client::CompatibilityRefusal::RemoteNewer,
+            },
+            ConnectError::UnreadableBootstrap {
+                detail: "phoxal/supervisor-connect/v1".to_string(),
+            },
+        ] {
+            assert_eq!(
+                classify_launch_failure(&permanent),
+                ConnectFailure::Fatal,
+                "{permanent}"
+            );
+        }
     }
 
     /// A discovered but incompatible execution reaches the operator unchanged.

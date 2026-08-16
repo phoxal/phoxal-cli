@@ -175,10 +175,6 @@ impl Session {
         self.client.disconnect_reason()
     }
 
-    pub(crate) async fn wait_ready(&self) -> Result<supervisor::execution::Snapshot> {
-        Ok(self.client.wait_ready().await?)
-    }
-
     /// One backward page of the supervisor's bounded log history.
     pub(crate) async fn logs(
         &self,

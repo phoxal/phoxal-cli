@@ -18,10 +18,14 @@ use tokio::sync::oneshot;
 
 use super::lifecycle::Target;
 use super::session::{self, Detachable, OwnedSupervisorExit};
+use super::startup::Startup;
+use super::summary::SessionSummary;
 use super::supervisor::{self, LaunchedSupervisor};
 use super::webots::Webots;
 use crate::attach::Session;
 use crate::cli::context::AppContext;
+use crate::cli::exit::ReportedExit;
+use crate::cli::output::welcome::{Mode, StepId};
 use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
 /// How long the supervisor is given to answer connect after Webots is up.
@@ -46,6 +50,36 @@ pub(crate) async fn run_command(
     project: Option<&Path>,
 ) -> Result<()> {
     let target = Target::resolve(project, app.project.root())?;
+    let startup = Startup::begin(app, &target.project, Mode::Webots);
+    let started = match start_simulation(app, &target, world, &startup).await {
+        Ok(started) => started,
+        Err(error) => return Err(startup.failed(error)),
+    };
+    // The dashboard takes the terminal only from here: both processes are up
+    // and the graph is ready.
+    startup.ready();
+    drive_simulation(app, &target, started).await
+}
+
+/// Everything one simulation session owns for its whole life.
+///
+/// The build lock is in here on purpose: a simulation holds it until the
+/// session ends, because the bundle it is executing is the one this command
+/// just published.
+struct StartedSimulation {
+    session: Session,
+    launched: LaunchedSupervisor,
+    webots: Webots,
+    lock: ProjectLock,
+}
+
+/// Prepare, launch, attach, stage, and start both halves of a simulation.
+async fn start_simulation(
+    app: &AppContext,
+    target: &Target,
+    world: String,
+    startup: &Startup,
+) -> Result<StartedSimulation> {
     phoxal_cli_project::source::train::resolve_locked_train(&target.project, app.offline)
         .with_context(|| {
             format!(
@@ -54,7 +88,7 @@ pub(crate) async fn run_command(
             )
         })?;
 
-    let _lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
+    let lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
         &target.project,
         ProjectOperation::Run,
     ))
@@ -66,47 +100,41 @@ pub(crate) async fn run_command(
     // The client finalizes the simulated bundle: `clock: simulated`, driver
     // blocks stripped, simulators staged. The supervisor is handed the result and
     // told nothing about it.
-    let webots = webots_host()?;
+    let webots_host = webots_host()?;
     let runtime_target =
         phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;
-    let (reporter, signal_task) =
-        crate::cli::output::progress::cancellable_preparation_reporter(app.ui);
+    let reporter = startup.reporter();
     let offline = app.offline;
     let prepared = tokio::task::spawn_blocking(move || {
         phoxal_cli_project::prepare_simulation(phoxal_cli_project::PrepareSimulationRequest {
             target: runtime_target,
             world,
             offline,
-            webots,
+            webots: webots_host,
             reporter,
         })
     })
-    .await?;
-    signal_task.abort();
-    let prepared = prepared?;
+    .await??;
     let simulation = prepared
         .simulation
         .as_ref()
         .context("simulation preparation returned no simulation data")?;
-
-    app.ui.info(format!(
-        "world source: {}; release: {}",
-        simulation.world_source.display(),
-        prepared.release.root.display()
-    ));
+    startup.complete(
+        StepId::PrepareRuntime,
+        super::lifecycle::staged_detail(&prepared.release),
+    );
 
     // The supervisor owns execution identity. Start and attach first, then derive
     // the Webots controller launch from that exact execution and the verified
     // runtime bundle. The supervisor may wait for the external simulator's
     // readiness while its supervisor API remains attachable.
-    let launched = supervisor::spawn(&prepared.release)?;
-    let attached = await_simulated_attachment(&target, launched, app).await;
-    let (session, launched) = match attached {
-        Ok(attached) => attached,
-        Err(error) => {
-            return Err(error);
-        }
-    };
+    startup.step(StepId::Supervisor, "waiting for the supervisor");
+    let paths = phoxal_cli_host::paths::RuntimePaths::for_root(&target.project);
+    let launched = supervisor::spawn(&prepared.release, &paths.supervisor_log())?;
+    let (session, launched) = await_simulated_attachment(target, launched).await?;
+    startup.attached(&session);
+
+    startup.step(StepId::Webots, "staging the world");
     let stage_request = phoxal_cli_project::StageWebotsRequest {
         staged_root: prepared.release.bundle.clone(),
         project_root: simulation.project_root.clone(),
@@ -121,34 +149,75 @@ pub(crate) async fn run_command(
         {
             Ok(launch) => launch,
             Err(error) => {
-                return finish_simulation(
-                    Err(anyhow::Error::new(error).context("the Webots staging worker failed")),
-                    stop_failed_simulation_start(session, launched).await,
+                let cleanup = stop_failed_simulation_start(session, launched).await;
+                return failed_start(
+                    anyhow::Error::new(error).context("the Webots staging worker failed"),
+                    cleanup,
                 );
             }
         };
     let launch = match launch {
         Ok(launch) => launch,
         Err(error) => {
-            let primary =
-                Err(error.context("failed to stage Webots after attaching to the execution"));
-            return finish_simulation(
-                primary,
-                stop_failed_simulation_start(session, launched).await,
+            let cleanup = stop_failed_simulation_start(session, launched).await;
+            return failed_start(
+                error.context("failed to stage Webots after attaching to the execution"),
+                cleanup,
             );
         }
     };
-    app.ui
-        .info(format!("staged world: {}", launch.world.display()));
-    let webots = match Webots::launch(&launch) {
+    let world_name = launch
+        .world
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("world")
+        .to_string();
+    startup.detail(StepId::Webots, format!("world {world_name}"));
+    let webots = match Webots::launch(&launch, &paths.webots_log()) {
         Ok(webots) => webots,
         Err(error) => {
-            return finish_simulation(
-                Err(error),
-                stop_failed_simulation_start(session, launched).await,
-            );
+            let cleanup = stop_failed_simulation_start(session, launched).await;
+            return failed_start(error, cleanup);
         }
     };
+    startup.complete(StepId::Webots, format!("world {world_name} · launched"));
+
+    // A simulated graph is only ready once Webots has opened the world, so the
+    // handshake budget - not a shorter readiness one - is what bounds it.
+    if let Err(error) = startup.await_graph(&session, HANDSHAKE_BUDGET).await {
+        let cleanup = stop_failed_simulation_start(session, launched).await;
+        let stopped = webots.stop().await;
+        return failed_start(error, finish_simulation(cleanup, stopped));
+    }
+
+    Ok(StartedSimulation {
+        session,
+        launched,
+        webots,
+        lock,
+    })
+}
+
+/// A start that failed is a failure whatever its cleanup managed to do; this is
+/// [`finish_simulation`]'s failed half, in a form the caller can return.
+fn failed_start<T>(primary: anyhow::Error, cleanup: Result<()>) -> Result<T> {
+    Err(match cleanup {
+        Ok(()) => primary,
+        Err(cleanup) => primary.context(format!("simulation cleanup also failed: {cleanup:#}")),
+    })
+}
+
+async fn drive_simulation(
+    app: &AppContext,
+    target: &Target,
+    started: StartedSimulation,
+) -> Result<()> {
+    let StartedSimulation {
+        session,
+        launched,
+        webots,
+        lock: _lock,
+    } = started;
 
     // Either exit order: if Webots goes first, the execution it was the world
     // clock for has nothing left to run on, so the supervisor is asked to stop and
@@ -251,20 +320,31 @@ pub(crate) async fn run_command(
 
     let owned_exit = finish_owned_supervisor_exit(owned_exit, supervisor_cleanup);
     let end = observe_session_end(webots_exit, outcome.as_ref(), owned_exit.as_ref());
-    if let Some(report) = plan(&end).report {
-        app.ui.warn(report);
-    }
+    let report = plan(&end).report;
 
     // Whichever way the session ended, Webots is this client's and goes last:
     // gracefully, with the explicit kill only if it will not go.
     let primary = match owned_exit {
         Ok(exit) => match exit {
-            OwnedSupervisorExit::Stopped => report_clean_owned_exit(&target, outcome),
+            OwnedSupervisorExit::Stopped => report_clean_owned_exit(outcome),
             OwnedSupervisorExit::Failed { reason } => Err(anyhow::anyhow!(reason)),
         },
         Err(error) => Err(error),
     };
-    finish_simulation(primary, webots.stop().await)
+    let result = finish_simulation(primary, webots.stop().await);
+
+    // One account of the ending, printed only now: the dashboard has released
+    // the terminal, and both processes are already down.
+    let paths = phoxal_cli_host::paths::RuntimePaths::for_root(&target.project);
+    let ending = match &result {
+        Ok(()) => report.unwrap_or_else(|| {
+            "you ended it; the execution was stopped and Webots was closed".to_string()
+        }),
+        Err(error) => format!("{error:#}"),
+    };
+    SessionSummary::new(ending, vec![paths.supervisor_log(), paths.webots_log()])
+        .print(&target.project, app.output.theme);
+    result.map_err(|_| ReportedExit(1).into())
 }
 
 fn observe_session_end(
@@ -284,13 +364,17 @@ fn observe_session_end(
     SessionEnd::observe(webots_exit, outcome)
 }
 
-fn report_clean_owned_exit(
-    target: &Target,
-    outcome: Result<phoxal_cli_ui::AttachmentOutcome>,
-) -> Result<()> {
-    match outcome {
-        Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason: None }) => Ok(()),
-        outcome => outcome.and_then(|outcome| super::lifecycle::report_outcome(target, outcome)),
+/// Classify how the attachment ended when the owned supervisor exited cleanly.
+///
+/// An untyped `ExecutionFailed` after a clean supervisor exit is the lost
+/// identity token of a supervisor that already stopped on request - the
+/// expected consequence of the stop, not a failure - so it is not one here.
+fn report_clean_owned_exit(outcome: Result<phoxal_cli_ui::AttachmentOutcome>) -> Result<()> {
+    match outcome? {
+        phoxal_cli_ui::AttachmentOutcome::ExecutionFailed {
+            reason: Some(failure),
+        } => bail!("{:?}: {}", failure.reason, failure.detail.as_str()),
+        _ => Ok(()),
     }
 }
 
@@ -557,7 +641,6 @@ fn webots_host() -> Result<phoxal_cli_project::WebotsHost> {
 async fn await_simulated_attachment(
     target: &Target,
     mut launched: LaunchedSupervisor,
-    app: &AppContext,
 ) -> Result<(Session, LaunchedSupervisor)> {
     let deadline = tokio::time::Instant::now() + HANDSHAKE_BUDGET;
     loop {
@@ -588,9 +671,14 @@ async fn await_simulated_attachment(
                 }
             }
             let diagnostics = launched.diagnostics();
-            app.ui.warn(diagnostics.trim());
+            let diagnostics = diagnostics.trim();
+            let hint = if diagnostics.is_empty() {
+                String::new()
+            } else {
+                format!("; phoxal-supervisor reported: {diagnostics}")
+            };
             let error = anyhow::anyhow!(
-                "timed out after {}s waiting for the simulated execution to answer at {}",
+                "timed out after {}s waiting for the simulated execution to answer at {}{hint}",
                 HANDSHAKE_BUDGET.as_secs(),
                 target.endpoint
             );
@@ -770,15 +858,10 @@ mod tests {
 
     #[test]
     fn clean_owned_exit_wins_over_only_the_untyped_identity_loss_race() {
-        let target = Target {
-            project: "/tmp/robot".into(),
-            endpoint: "unixsock-stream//tmp/robot.sock".to_string(),
-        };
         assert!(
-            report_clean_owned_exit(
-                &target,
-                Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason: None }),
-            )
+            report_clean_owned_exit(Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed {
+                reason: None
+            }))
             .is_ok()
         );
         assert_eq!(
@@ -794,13 +877,11 @@ mod tests {
             reason: SupervisorFailureReason::ControlPlaneLost,
             detail: Detail::new("typed failure"),
         };
-        let error = report_clean_owned_exit(
-            &target,
-            Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed {
+        let error =
+            report_clean_owned_exit(Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed {
                 reason: Some(failure),
-            }),
-        )
-        .expect_err("typed failure must remain authoritative");
+            }))
+            .expect_err("typed failure must remain authoritative");
         assert!(format!("{error:#}").contains("typed failure"));
     }
 }
