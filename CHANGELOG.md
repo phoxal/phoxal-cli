@@ -4,6 +4,15 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.38.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.38.0) - 2026-08-16
+
+
+### Added
+
+- Restore the startup welcome and make simulation session endings legible ([#326](https://github.com/phoxal/phoxal-cli/pull/326))
+- Launch the robot from the CLI and build one bundle for every mode ([#328](https://github.com/phoxal/phoxal-cli/pull/328)) [**breaking**]
+
+
 ## [0.37.7](https://github.com/phoxal/phoxal-cli/releases/tag/v0.37.7) - 2026-08-15
 
 
