@@ -136,9 +136,11 @@ pub(crate) fn runtime_log(paths: &phoxal_cli_host::paths::RuntimePaths, runtime:
 
 /// Start every selected runtime of `bundle_root` against `endpoint`.
 ///
-/// A failure part-way through leaves the already-started children running: the
-/// caller owns them from the moment this returns either way, and it is the
-/// caller that has the record to stop them with.
+/// All of them or none: a failure part-way through signals the children this
+/// call already started before it returns. There is no session record yet at
+/// that point - the caller writes one only once every runtime is up - so a
+/// child left behind here would be a process nothing owns and `phoxal stop`
+/// cannot reach.
 pub(crate) fn launch(
     bundle_root: &Path,
     endpoint: &str,
@@ -155,10 +157,31 @@ pub(crate) fn launch(
         let log = runtime_log(paths, &runtime.participant_id);
         match spawn_one(bundle_root, endpoint, simulation, runtime, &log) {
             Ok(child) => launched.push(child),
-            Err(error) => return Err(error),
+            Err(error) => {
+                abandon(&launched);
+                return Err(error);
+            }
         }
     }
     Ok(launched)
+}
+
+/// Signal the children of an abandoned launch, best effort.
+///
+/// SIGTERM only, and no wait: the launch has already failed, the caller is on
+/// its way out with a real error, and a runtime that ignores SIGTERM must not
+/// turn that error into a hang. Each pid is a process-group leader, so the
+/// signal reaches whatever the runtime started for itself.
+fn abandon(launched: &[LaunchedRuntime]) {
+    for runtime in launched {
+        if let Err(error) = signal_all(&[runtime.pid()], libc::SIGTERM) {
+            tracing::warn!(
+                runtime = %runtime.participant,
+                %error,
+                "failed to signal a runtime of an abandoned launch"
+            );
+        }
+    }
 }
 
 fn spawn_one(
