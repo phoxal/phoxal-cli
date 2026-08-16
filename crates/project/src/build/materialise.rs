@@ -471,7 +471,6 @@ mod tests {
         use crate::source::resolver::official_binary_name;
         use phoxal_cli_catalog::ArtifactKind;
 
-
         let cases = [
             ("phoxal/service-drive", ArtifactKind::Service, "drive"),
             (
@@ -638,9 +637,11 @@ mod tests {
         assert_eq!(spec.target.as_deref(), Some("aarch64-unknown-linux-gnu"));
         assert_eq!(spec.target_dir, Some(PathBuf::from("/workspace/target")));
         assert!(
-            phoxal_cli_catalog::Catalog::official().native().all(|official| {
-                phoxal_cli_catalog::cargo_package_name(official.package) != SUPERVISOR_PACKAGE
-            }),
+            phoxal_cli_catalog::Catalog::official()
+                .native()
+                .all(|official| {
+                    phoxal_cli_catalog::cargo_package_name(official.package) != SUPERVISOR_PACKAGE
+                }),
             "the supervisor must never become a participant catalog entry"
         );
     }

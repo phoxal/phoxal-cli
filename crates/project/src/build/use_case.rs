@@ -234,9 +234,8 @@ impl Worker {
             // where they land, so `install` has the same sidecar to refuse
             // against.
             let sidecar = crate::bundle::archive::digest_sidecar(&output);
-            std::fs::write(&sidecar, format!("{digest}\n")).with_context(|| {
-                format!("failed to write digest sidecar {}", sidecar.display())
-            })?;
+            std::fs::write(&sidecar, format!("{digest}\n"))
+                .with_context(|| format!("failed to write digest sidecar {}", sidecar.display()))?;
             Ok((output, digest, staged_root))
         })();
         let cleanup = cleanup_remote_temp(host, &remote_dir, reporter);

@@ -17,9 +17,11 @@ pub struct AppModel {
     /// A simulation session is not detachable: the client owns Webots, so `q`
     /// there ends the whole session.
     pub detachable: bool,
-    /// Whether a stop is in flight or accepted. Rejection or transport failure
-    /// clears the guard for retry; acceptance keeps rendering until terminal
-    /// supervisor evidence arrives.
+    /// Whether this client launched the session it is attached to, and can
+    /// therefore end it. An attachment to somebody else's execution cannot:
+    /// there is no stop command to send, and this client started nothing.
+    pub stoppable: bool,
+    /// Whether a stop is in flight. A failure clears the guard for retry.
     pub stop_requested: bool,
     pub route: FocusRoute,
     pub overview: OverviewModel,
@@ -36,6 +38,7 @@ impl Default for AppModel {
         Self {
             epoch: None,
             detachable: true,
+            stoppable: false,
             stop_requested: false,
             route: FocusRoute::default(),
             overview: OverviewModel::default(),

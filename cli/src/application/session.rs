@@ -11,11 +11,11 @@ use std::time::Duration;
 use crate::cli::output::diagnostics::RuntimeEvent;
 use anyhow::{Context, Result};
 use phoxal_cli_ui::{AttachmentOutcome, Effect, EffectSenders, SessionInput, UiOptions};
-use phoxal_client::supervisor::execution::{CommandOutcome, CommandRejection};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 
+use super::launcher::OwnedSession;
 use crate::attach::{Session, SessionPorts};
 use crate::cli::context::AppContext;
 
@@ -42,13 +42,23 @@ impl Detachable {
 
 /// Terminal evidence from a supervisor process owned by the calling command.
 ///
-/// Simulation owns the supervisor child it launched. This side channel lets
-/// that owner end the attachment even if the final bus observation is lost;
-/// ordinary attach and run sessions still rely solely on supervisor evidence.
+/// Every local session owns the supervisor it launched. This side channel lets
+/// that owner end the attachment with its own account of why, rather than with
+/// the transport's report of the identity token it lost as a consequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OwnedSupervisorExit {
     Stopped,
     Failed { reason: String },
+}
+
+/// Everything a driven session may own beyond the attachment itself.
+#[derive(Default)]
+pub(crate) struct SessionOwnership {
+    /// The session this client launched, and can therefore stop. Absent for an
+    /// attachment to an execution somebody else started.
+    pub(crate) owned: Option<OwnedSession>,
+    /// The exit of the supervisor this client launched, when it has one.
+    pub(crate) supervisor_exit: Option<oneshot::Receiver<OwnedSupervisorExit>>,
 }
 
 /// Drive one attachment through the terminal application until it ends.
@@ -57,49 +67,27 @@ pub(crate) async fn drive(
     project: &Path,
     session: Session,
     detachable: Detachable,
+    ownership: SessionOwnership,
 ) -> Result<AttachmentOutcome> {
-    drive_inner(app, project, session, detachable, None).await
-}
-
-/// Drive an attachment whose caller also owns the launched supervisor child.
-pub(crate) async fn drive_with_owned_supervisor_exit(
-    app: &AppContext,
-    project: &Path,
-    session: Session,
-    detachable: Detachable,
-    owned_supervisor_exit: oneshot::Receiver<OwnedSupervisorExit>,
-) -> Result<AttachmentOutcome> {
-    drive_inner(
-        app,
-        project,
-        session,
-        detachable,
-        Some(owned_supervisor_exit),
-    )
-    .await
-}
-
-async fn drive_inner(
-    app: &AppContext,
-    project: &Path,
-    session: Session,
-    detachable: Detachable,
-    mut owned_supervisor_exit: Option<oneshot::Receiver<OwnedSupervisorExit>>,
-) -> Result<AttachmentOutcome> {
+    let SessionOwnership {
+        owned,
+        supervisor_exit,
+    } = ownership;
+    let mut owned_supervisor_exit = supervisor_exit;
     let Session { ports, .. } = &session;
     let SessionPorts {
         events: _,
-        supervisor,
         input_commands,
         logs,
         runtimes,
     } = ports;
     let effect_ports = EffectPorts {
-        supervisor: supervisor.clone(),
+        owned,
         input: input_commands.clone(),
         logs: logs.clone(),
         runtimes: runtimes.clone(),
     };
+    let stoppable = effect_ports.owned.is_some();
     let mut session = session;
 
     let (ingress_tx, ingress_rx) = mpsc::channel(UI_INGRESS_CAPACITY);
@@ -117,6 +105,7 @@ async fn drive_inner(
         title: terminal_title(project),
         theme: app.output.theme,
         detachable: detachable.allows_detach(),
+        stoppable,
     };
     let ui = phoxal_cli_ui::run(
         ingress_rx,
@@ -203,11 +192,13 @@ async fn drive_inner(
                     Ok(OwnedSupervisorExit::Stopped) => SessionInput::OwnedSupervisorStopped,
                     Ok(OwnedSupervisorExit::Failed { reason }) => {
                         tracing::error!(%reason, "locally owned supervisor exited unsuccessfully");
-                        SessionInput::OwnedSupervisorFailed
+                        SessionInput::OwnedSupervisorFailed(reason)
                     }
                     Err(error) => {
                         tracing::error!(%error, "locally owned supervisor exit observer ended");
-                        SessionInput::OwnedSupervisorFailed
+                        SessionInput::OwnedSupervisorFailed(format!(
+                            "the supervisor exit observer ended: {error}"
+                        ))
                     }
                 };
                 owned_supervisor_exit = None;
@@ -252,7 +243,7 @@ async fn drive_inner(
             }
             completed = confirmed_stop_tasks.join_next(), if !confirmed_stop_tasks.is_empty() => {
                 if let Some(Err(error)) = completed {
-                    let _ = ingress_tx.try_send(SessionInput::StopProjectFailed(format!(
+                    let _ = ingress_tx.try_send(SessionInput::StopSessionFailed(format!(
                         "confirmed stop task failed: {error}"
                     )));
                 }
@@ -278,6 +269,7 @@ async fn drive_inner(
     outcome
 }
 
+#[allow(clippy::future_not_send)]
 async fn receive_owned_supervisor_exit(
     receiver: &mut Option<oneshot::Receiver<OwnedSupervisorExit>>,
 ) -> std::result::Result<OwnedSupervisorExit, oneshot::error::RecvError> {
@@ -289,7 +281,10 @@ async fn receive_owned_supervisor_exit(
 
 #[derive(Clone)]
 struct EffectPorts {
-    supervisor: crate::attach::SupervisorCommands,
+    /// Present exactly when this client launched the session it is attached
+    /// to. Stopping is ending those processes, not sending a command: the
+    /// supervisor starts nothing and has no stop to accept.
+    owned: Option<OwnedSession>,
     input: crate::attach::ports::input::InputCommands,
     logs: crate::attach::ports::logs::LogReader,
     runtimes: crate::attach::ports::runtimes::RuntimeReader,
@@ -305,7 +300,7 @@ fn spawn_effect(
 ) {
     // A stop must never be dropped for want of a slot: it is the one effect an
     // operator explicitly confirmed.
-    if matches!(effect, Effect::StopProject) {
+    if matches!(effect, Effect::StopSession) {
         let ports = ports.clone();
         let ingress = ingress.clone();
         confirmed_stop_tasks.spawn(async move {
@@ -351,20 +346,11 @@ async fn send_input(sender: &mpsc::Sender<SessionInput>, input: SessionInput) ->
 }
 
 async fn route_effect(effect: Effect, ports: &EffectPorts) -> Option<SessionInput> {
-    if matches!(effect, Effect::StopProject) {
-        return Some(stop_project_completion(ports.supervisor.stop().await));
+    if matches!(effect, Effect::StopSession) {
+        return Some(stop_session_completion(ports.owned.as_ref()).await);
     }
     let result = match effect {
-        Effect::Restart {
-            process,
-            expected_producer,
-        } => ports
-            .supervisor
-            .restart(process, expected_producer)
-            .await
-            .and_then(accepted)
-            .map(|()| None),
-        Effect::StopProject => unreachable!("stop effects are routed above"),
+        Effect::StopSession => unreachable!("stop effects are routed above"),
         Effect::InputSelect(device) => ports.input.select(device.0).await.map(|()| None),
         Effect::InputEnable(enabled) => ports.input.set_enabled(enabled).await.map(|()| None),
         Effect::InputRescan => ports.input.rescan().await.map(|()| None),
@@ -381,46 +367,21 @@ async fn route_effect(effect: Effect, ports: &EffectPorts) -> Option<SessionInpu
     }
 }
 
-fn stop_project_completion(result: Result<CommandOutcome>) -> SessionInput {
-    match result {
-        Ok(CommandOutcome::Accepted { .. }) => SessionInput::StopProjectAccepted,
-        Ok(CommandOutcome::Rejected { reason }) => {
-            SessionInput::StopProjectRejected(rejection(reason).to_string())
-        }
-        Err(error) => SessionInput::StopProjectFailed(format!("{error:#}")),
-    }
-}
-
-/// A rejection is a typed outcome the operator must see, not a transport
-/// error: the supervisor answered, and it said no and why.
-fn accepted(outcome: CommandOutcome) -> Result<()> {
-    match outcome {
-        CommandOutcome::Accepted { .. } => Ok(()),
-        CommandOutcome::Rejected { reason } => Err(anyhow::anyhow!(
-            "the supervisor rejected the command: {}",
-            rejection(reason)
-        )),
-    }
-}
-
-fn rejection(reason: CommandRejection) -> &'static str {
-    match reason {
-        CommandRejection::UnknownParticipant => {
-            "no process in the current snapshot has that key; the graph moved on"
-        }
-        CommandRejection::ProducerFenced => {
-            "the target's producer is not the one you saw - it has already been replaced, or the \
-             fresh incarnation has not opened its session yet"
-        }
-        CommandRejection::RevisionStale => {
-            "the snapshot the command fenced on is no longer current; the execution moved on"
-        }
-        CommandRejection::Busy => "the supervisor is already applying another lifecycle command",
-        CommandRejection::UnsupportedHostAction => {
-            "the supervisor does not manage the host this execution runs on"
-        }
-        CommandRejection::ControlClosed => "the supervisor lifecycle loop has already ended",
-        CommandRejection::Unknown => "the supervisor returned an unknown rejection",
+/// End the session this client launched, and report what happened.
+///
+/// A client with nothing of its own cannot reach here - the UI refuses the key
+/// before emitting the effect - but the absence is reported rather than
+/// assumed away, because an effect that silently did nothing would look to an
+/// operator exactly like a stop that worked.
+async fn stop_session_completion(owned: Option<&OwnedSession>) -> SessionInput {
+    let Some(owned) = owned else {
+        return SessionInput::StopSessionFailed(
+            "this client launched nothing here, so there is nothing for it to stop".to_string(),
+        );
+    };
+    match owned.stop().await {
+        Ok(()) => SessionInput::SessionStopped,
+        Err(error) => SessionInput::StopSessionFailed(format!("{error:#}")),
     }
 }
 
@@ -460,44 +421,19 @@ impl Drop for DiagnosticGuard {
 mod tests {
     use super::*;
 
-    /// The operator sees the supervisor's own reason, not "command failed".
-    #[test]
-    fn every_rejection_reason_renders_something_actionable() {
-        for reason in [
-            CommandRejection::UnknownParticipant,
-            CommandRejection::ProducerFenced,
-            CommandRejection::RevisionStale,
-            CommandRejection::Busy,
-            CommandRejection::UnsupportedHostAction,
-            CommandRejection::ControlClosed,
-            CommandRejection::Unknown,
-        ] {
-            let error = accepted(CommandOutcome::Rejected { reason })
-                .expect_err("a rejection is not silently accepted");
-            let rendered = format!("{error:#}");
-            assert!(rendered.contains("rejected"), "{rendered}");
-            assert!(rendered.len() > "the supervisor rejected the command: ".len());
-        }
-        assert!(accepted(CommandOutcome::Accepted { at_revision: 1 }).is_ok());
-    }
-
-    #[test]
-    fn stop_completion_preserves_typed_acceptance_rejection_and_failure() {
-        assert_eq!(
-            stop_project_completion(Ok(CommandOutcome::Accepted { at_revision: 7 })),
-            SessionInput::StopProjectAccepted
-        );
-        assert_eq!(
-            stop_project_completion(Ok(CommandOutcome::Rejected {
-                reason: CommandRejection::Busy,
-            })),
-            SessionInput::StopProjectRejected(
-                "the supervisor is already applying another lifecycle command".to_string()
-            )
-        );
-        assert_eq!(
-            stop_project_completion(Err(anyhow::anyhow!("transport closed"))),
-            SessionInput::StopProjectFailed("transport closed".to_string())
+    /// A stop is the operator's own confirmed act, so an absent owner is
+    /// reported rather than treated as a stop that worked. This can only
+    /// happen through the effect router - the dashboard refuses the key first -
+    /// and even then it says something true.
+    #[tokio::test]
+    async fn stopping_with_nothing_owned_reports_it_instead_of_claiming_success() {
+        let input = stop_session_completion(None).await;
+        assert!(
+            matches!(
+                &input,
+                SessionInput::StopSessionFailed(reason) if reason.contains("launched nothing")
+            ),
+            "{input:?}"
         );
     }
 }

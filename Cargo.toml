@@ -55,7 +55,6 @@ webots-proto = "0.2.0"
 gilrs = "0.11.2"
 jsonschema = { version = "0.46.6", default-features = false }
 thiserror = "2.0.18"
-sysinfo = { version = "0.38.0", default-features = false, features = ["system"] }
 
 # The framework train. Every crate in this workspace speaks one train, so the
 # pins live here and nowhere else.

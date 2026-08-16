@@ -109,9 +109,13 @@ pub fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel, theme: The
         .map_or_else(String::new, |message| {
             format!("  ! {}", crate::format::sanitize_terminal_text(message))
         });
+    // `S` is advertised only when it does something: a client that did not
+    // launch this execution cannot stop it, and a footer that offers the key
+    // anyway is offering a keystroke that can only print a refusal.
+    let stop = if model.stoppable { "  S stop" } else { "" };
     frame.render_widget(
         Paragraph::new(format!(
-            " {depth}  Enter descend  Esc ascend  ? help  i session  S stop  q {}{diagnostic}",
+            " {depth}  Enter descend  Esc ascend  ? help  i session{stop}  q {}{diagnostic}",
             quit_hint(model.detachable)
         ))
         .style(crate::theme::role::muted(theme))

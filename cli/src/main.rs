@@ -35,7 +35,6 @@ mod application;
 mod attach;
 mod bootstrap;
 mod cli;
-mod digest;
 mod joypad;
 mod lock;
 mod reconcile;

@@ -10,14 +10,13 @@
 //! of a release owning its supervisor: the bundle and the binary that runs it
 //! move together, so a local run and an installed run are the same launch.
 
-use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use anyhow::{Context, Result};
+use tokio::sync::oneshot;
 
 /// How much of the supervisor's log is read back to find its last words.
 const MAX_DIAGNOSTIC_BYTES: u64 = 8 * 1024;
@@ -35,6 +34,12 @@ pub(crate) struct LaunchedSupervisor {
 }
 
 impl LaunchedSupervisor {
+    /// The supervisor's process id, recorded in the session so any terminal
+    /// can end it.
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// The supervisor's last words: the final lines of its log.
     ///
     /// Read from the file rather than from a pipe this client pumps: an
@@ -57,13 +62,6 @@ impl LaunchedSupervisor {
         self.exit_message(status, " before a client could attach")
     }
 
-    /// The same, for a supervisor that answered and then gave up during
-    /// startup. It is a different sentence because it is a different event:
-    /// the client did attach, and watched the graph fail to come up.
-    pub(crate) fn startup_exit_message(&self, status: std::process::ExitStatus) -> String {
-        self.exit_message(status, " while its graph was starting")
-    }
-
     fn exit_message(&self, status: std::process::ExitStatus, during: &str) -> String {
         let diagnostics = self.diagnostics();
         let diagnostics = diagnostics.trim();
@@ -73,147 +71,67 @@ impl LaunchedSupervisor {
             format!("phoxal-supervisor exited with {status}{during}: {diagnostics}")
         }
     }
-
-    /// End a supervisor owned by a non-detachable simulation, including every
-    /// participant process group below it.
-    ///
-    /// Ordinary `phoxal run` deliberately never calls this: its supervisor is
-    /// durable and may outlive the client. A simulation is different because
-    /// this client owns its world clock and therefore owns the whole local
-    /// process group. Both waits are bounded so cleanup cannot hold the
-    /// operator's terminal indefinitely.
-    pub(crate) async fn terminate_owned(
-        &mut self,
-        graceful_budget: Duration,
-        kill_budget: Duration,
-    ) -> Result<()> {
-        let supervisor_pid = i32::try_from(self.child.id())
-            .map_err(|_| anyhow!("phoxal-supervisor process id does not fit a process group id"))?;
-        let process_groups = owned_process_groups(supervisor_pid)?;
-
-        signal_process_groups(&process_groups, libc::SIGTERM)?;
-        if self
-            .await_process_groups_exit(&process_groups, graceful_budget)
-            .await?
-        {
-            return Ok(());
-        }
-
-        signal_process_groups(&process_groups, libc::SIGKILL)?;
-        if self
-            .await_process_groups_exit(&process_groups, kill_budget)
-            .await?
-        {
-            return Ok(());
-        }
-
-        bail!(
-            "a simulation-owned process group survived SIGKILL for {}s",
-            kill_budget.as_secs()
-        )
-    }
-
-    async fn await_process_groups_exit(
-        &mut self,
-        process_groups: &HashSet<libc::pid_t>,
-        budget: Duration,
-    ) -> Result<bool> {
-        let deadline = tokio::time::Instant::now() + budget;
-        loop {
-            // `try_wait` is also the nonblocking reap for the group leader.
-            let _ = self.child.try_wait()?;
-            if process_groups
-                .iter()
-                .map(|group| process_group_exists(*group))
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .all(|exists| !exists)
-            {
-                return Ok(true);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Ok(false);
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
 }
 
-fn owned_process_groups(supervisor_pid: libc::pid_t) -> Result<HashSet<libc::pid_t>> {
-    let mut system = System::new();
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    let parents = system
-        .processes()
-        .iter()
-        .map(|(pid, process)| (pid.as_u32(), process.parent().map(Pid::as_u32)))
-        .collect::<Vec<_>>();
-    let descendants = descendant_pids(supervisor_pid as u32, &parents);
+/// How often a locally owned supervisor is polled for its own exit.
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-    let mut groups = HashSet::from([supervisor_pid]);
-    for descendant in descendants {
-        let pid = i32::try_from(descendant)
-            .context("simulation child process id does not fit a process group id")?;
-        let group = unsafe { libc::getpgid(pid) };
-        if group > 0 {
-            groups.insert(group);
-            continue;
-        }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(error).context("failed to inspect a simulation child process group");
-        }
-    }
-    Ok(groups)
-}
-
-fn descendant_pids(supervisor_pid: u32, parents: &[(u32, Option<u32>)]) -> HashSet<u32> {
-    let mut descendants = HashSet::new();
+/// Watch the supervisor this client launched until it exits or the session
+/// ends, and report its own account of why.
+///
+/// Every local session owns its supervisor now, so this is not a simulation
+/// specialisation: it is how any launched session learns that its supervisor
+/// went away, with the exit status and the log tail rather than with the
+/// transport's report of the identity token it lost as a consequence.
+pub(crate) async fn watch_owned(
+    launched: std::sync::Arc<tokio::sync::Mutex<LaunchedSupervisor>>,
+    exit: oneshot::Sender<super::session::OwnedSupervisorExit>,
+    mut stop: oneshot::Receiver<()>,
+) {
     loop {
-        let before = descendants.len();
-        for (pid, parent) in parents {
-            if parent
-                .is_some_and(|parent| parent == supervisor_pid || descendants.contains(&parent))
-            {
-                descendants.insert(*pid);
+        tokio::select! {
+            _ = &mut stop => return,
+            () = tokio::time::sleep(EXIT_POLL_INTERVAL) => {
+                let mut launched = launched.lock().await;
+                match launched.exited() {
+                    Ok(Some(status)) => {
+                        let _ = exit.send(classify_owned_exit(
+                            status.success(),
+                            &status.to_string(),
+                            &launched.diagnostics(),
+                        ));
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = exit.send(super::session::OwnedSupervisorExit::Failed {
+                            reason: format!("failed to inspect phoxal-supervisor: {error}"),
+                        });
+                        return;
+                    }
+                }
             }
         }
-        if descendants.len() == before {
-            break;
-        }
     }
-    descendants
 }
 
-fn signal_process_groups(process_groups: &HashSet<libc::pid_t>, signal: libc::c_int) -> Result<()> {
-    for process_group in process_groups {
-        signal_process_group(*process_group, signal)?;
+/// A supervisor that exited cleanly stopped; one that did not keeps whatever
+/// it managed to say on the way out.
+pub(crate) fn classify_owned_exit(
+    success: bool,
+    status: &str,
+    diagnostics: &str,
+) -> super::session::OwnedSupervisorExit {
+    if success {
+        return super::session::OwnedSupervisorExit::Stopped;
     }
-    Ok(())
-}
-
-fn signal_process_group(process_group: libc::pid_t, signal: libc::c_int) -> Result<()> {
-    let result = unsafe { libc::kill(-process_group, signal) };
-    if result == 0 {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        return Ok(());
-    }
-    Err(error).context("failed to signal the owned phoxal-supervisor process group")
-}
-
-fn process_group_exists(process_group: libc::pid_t) -> Result<bool> {
-    let result = unsafe { libc::kill(-process_group, 0) };
-    if result == 0 {
-        return Ok(true);
-    }
-    let error = std::io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ESRCH) => Ok(false),
-        Some(libc::EPERM) => Ok(true),
-        _ => Err(error).context("failed to inspect the owned phoxal-supervisor process group"),
-    }
+    let diagnostics = diagnostics.trim();
+    let reason = if diagnostics.is_empty() {
+        format!("phoxal-supervisor exited with {status}")
+    } else {
+        format!("phoxal-supervisor exited with {status}: {diagnostics}")
+    };
+    super::session::OwnedSupervisorExit::Failed { reason }
 }
 
 /// Spawn `<release>/phoxal-supervisor <release>/bundle`, with its standard
@@ -221,10 +139,11 @@ fn process_group_exists(process_group: libc::pid_t) -> Result<bool> {
 ///
 /// The supervisor is placed in its own process group. That is not tidiness: a
 /// Ctrl+C in the terminal running this client goes to the client's foreground
-/// process group, and the supervisor is durable - it must survive the client that
-/// started it, because detaching is not stopping. The same durability is why
-/// the child owns the log file descriptor outright: there is no client left to
-/// pump a pipe once the operator detaches.
+/// process group, and the supervisor is durable - it must survive the client
+/// that started it, because detaching is not stopping and `phoxal start` leaves
+/// deliberately. The same durability is why the child owns the log file
+/// descriptor outright: there is no client left to pump a pipe once the
+/// operator detaches.
 pub(crate) fn spawn(
     release: &phoxal_cli_project::ReleaseLayout,
     log: &Path,
@@ -326,7 +245,7 @@ fn isolate_process_group(command: &mut Command) {
 
 #[cfg(test)]
 mod tests {
-    use super::{descendant_pids, last_lines, read_tail};
+    use super::{classify_owned_exit, last_lines, read_tail};
 
     /// A supervisor's message is its last words, not its whole run: the log is
     /// on disk for the rest.
@@ -377,19 +296,29 @@ mod tests {
         assert!(read_tail(&directory.path().join("absent.log"), 1_024).is_none());
     }
 
+    /// A clean exit is a stop; anything else keeps the supervisor's own last
+    /// words, which is the whole reason this client watches its child rather
+    /// than reading the transport's account of the identity it lost.
     #[test]
-    fn forced_simulation_cleanup_discovers_each_nested_owned_process() {
-        let tree = [
-            (20, Some(10)),
-            (30, Some(20)),
-            (40, Some(30)),
-            (99, Some(1)),
-        ];
-        let descendants = descendant_pids(10, &tree);
-        assert_eq!(descendants.len(), 3);
-        assert!(descendants.contains(&20));
-        assert!(descendants.contains(&30));
-        assert!(descendants.contains(&40));
-        assert!(!descendants.contains(&99));
+    fn an_owned_supervisor_exit_keeps_its_own_account_of_why() {
+        use crate::application::session::OwnedSupervisorExit;
+
+        assert_eq!(
+            classify_owned_exit(true, "exit status: 0", ""),
+            OwnedSupervisorExit::Stopped
+        );
+        assert_eq!(
+            classify_owned_exit(false, "signal: 9", "bundle admission failed\n"),
+            OwnedSupervisorExit::Failed {
+                reason: "phoxal-supervisor exited with signal: 9: bundle admission failed"
+                    .to_string()
+            }
+        );
+        assert_eq!(
+            classify_owned_exit(false, "exit status: 1", "   "),
+            OwnedSupervisorExit::Failed {
+                reason: "phoxal-supervisor exited with exit status: 1".to_string()
+            }
+        );
     }
 }

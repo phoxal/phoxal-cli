@@ -99,6 +99,9 @@ mod tests {
             official_crate_dir(ArtifactKind::ComponentDriver, "ddsm115"),
             PathBuf::from("components/ddsm115")
         );
-        assert_eq!(PathBuf::from(SUPERVISOR_CRATE_DIR), PathBuf::from("supervisor"));
+        assert_eq!(
+            PathBuf::from(SUPERVISOR_CRATE_DIR),
+            PathBuf::from("supervisor")
+        );
     }
 }

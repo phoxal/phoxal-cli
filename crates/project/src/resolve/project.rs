@@ -145,8 +145,12 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
         },
     )?;
 
-    let workspace =
-        apply_workspace_runtimes(robot, project_root, &project.runtimes, &mut platform_runtimes)?;
+    let workspace = apply_workspace_runtimes(
+        robot,
+        project_root,
+        &project.runtimes,
+        &mut platform_runtimes,
+    )?;
 
     let component_roots = components
         .iter()

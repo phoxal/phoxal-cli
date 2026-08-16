@@ -42,11 +42,7 @@ pub(crate) fn write_manifest_document(root: &Path, resolved: &BundlePlan) -> Res
         }
     }
 
-    verify_staged_binaries(
-        root,
-        &resolved.compiled.robot,
-        resolved.train.framework(),
-    )?;
+    verify_staged_binaries(root, &resolved.compiled.robot, resolved.train.framework())?;
 
     let document = ManifestDocument::new(resolved.compiled.robot.clone());
     let bytes = serde_json::to_vec_pretty(&document)?;
@@ -69,10 +65,11 @@ fn verify_staged_binaries(
 ) -> Result<()> {
     for binary in crate::runtimes::robot_binaries(robot) {
         let path = root.join(phoxal_bundle::BIN_DIR).join(&binary);
-        let contract = crate::check::participant_metadata::extract_participant_metadata_for_project(
-            &path, framework,
-        )
-        .with_context(|| format!("failed to inspect {}", path.display()))?;
+        let contract =
+            crate::check::participant_metadata::extract_participant_metadata_for_project(
+                &path, framework,
+            )
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
         anyhow::ensure!(
             contract.id.as_str() == binary,
             "{} declares participant '{}', but the manifest launches it as '{binary}'",
@@ -128,7 +125,10 @@ mod tests {
         let error = super::verify_staged_binaries(staged.path(), &robot(), FIXTURE_FRAMEWORK)
             .expect_err("a mislabelled binary must not reach a published bundle");
         let rendered = format!("{error:#}");
-        assert!(rendered.contains("declares participant 'odometry'"), "{rendered}");
+        assert!(
+            rendered.contains("declares participant 'odometry'"),
+            "{rendered}"
+        );
         assert!(rendered.contains("launches it as 'drive'"), "{rendered}");
 
         stage_binary(&bin, "drive", "drive", "service");

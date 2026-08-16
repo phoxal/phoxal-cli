@@ -85,16 +85,6 @@ impl Selection {
             Self::Drivers(selected) => selected.contains(&runtime.participant_id),
         }
     }
-
-    /// The drivers this selection deliberately leaves out, for the one advisory
-    /// line that explains why hardware rows are absent.
-    pub(crate) fn excluded(&self, available: &BTreeSet<String>) -> Vec<String> {
-        match self {
-            Self::All => Vec::new(),
-            Self::DriversOff => available.iter().cloned().collect(),
-            Self::Drivers(selected) => available.difference(selected).cloned().collect(),
-        }
-    }
 }
 
 /// One runtime this session started.
@@ -138,7 +128,10 @@ fn argv(runtime: &str, bundle_root: &Path, endpoint: &str, simulation: bool) -> 
 
 /// Where one runtime's output is retained for this session.
 pub(crate) fn runtime_log(paths: &phoxal_cli_host::paths::RuntimePaths, runtime: &str) -> PathBuf {
-    paths.volatile_root().join("log").join(format!("{runtime}.log"))
+    paths
+        .volatile_root()
+        .join("log")
+        .join(format!("{runtime}.log"))
 }
 
 /// Start every selected runtime of `bundle_root` against `endpoint`.
@@ -155,7 +148,10 @@ pub(crate) fn launch(
 ) -> Result<Vec<LaunchedRuntime>> {
     let runtimes = phoxal_cli_project::bundle_runtimes(bundle_root)?;
     let mut launched = Vec::new();
-    for runtime in runtimes.iter().filter(|runtime| selection.includes(runtime)) {
+    for runtime in runtimes
+        .iter()
+        .filter(|runtime| selection.includes(runtime))
+    {
         let log = runtime_log(paths, &runtime.participant_id);
         match spawn_one(bundle_root, endpoint, simulation, runtime, &log) {
             Ok(child) => launched.push(child),
@@ -174,7 +170,9 @@ fn spawn_one(
 ) -> Result<LaunchedRuntime> {
     use std::os::unix::process::CommandExt;
 
-    let executable = bundle_root.join(phoxal_bundle::BIN_DIR).join(&runtime.binary);
+    let executable = bundle_root
+        .join(phoxal_bundle::BIN_DIR)
+        .join(&runtime.binary);
     let file = create_log(log)?;
     let errors = file
         .try_clone()
@@ -301,9 +299,8 @@ impl SessionRecord {
         match std::fs::remove_file(record_path(paths)) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| {
-                format!("failed to remove {}", record_path(paths).display())
-            }),
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to remove {}", record_path(paths).display())),
         }
     }
 
@@ -319,6 +316,30 @@ impl SessionRecord {
 // ---------------------------------------------------------------------------
 // stopping
 // ---------------------------------------------------------------------------
+
+/// A session this client launched, in the form the dashboard's stop needs.
+///
+/// It is plain data on purpose: the stop is "signal these recorded pids", so
+/// there is no live handle to keep and nothing that stops working once the
+/// launching command has moved on.
+#[derive(Clone, Debug)]
+pub(crate) struct OwnedSession {
+    record: SessionRecord,
+    paths: phoxal_cli_host::paths::RuntimePaths,
+}
+
+impl OwnedSession {
+    pub(crate) const fn new(
+        record: SessionRecord,
+        paths: phoxal_cli_host::paths::RuntimePaths,
+    ) -> Self {
+        Self { record, paths }
+    }
+
+    pub(crate) async fn stop(&self) -> Result<()> {
+        stop_session(&self.record, &self.paths).await
+    }
+}
 
 /// How long every recorded runtime is given to exit on SIGTERM before it is
 /// killed. A runtime that will not stop must not hold the operator's terminal.
@@ -414,11 +435,18 @@ fn signal_group(pid: u32, signal: libc::c_int) -> Result<()> {
     }
 }
 
-/// Whether the process group led by `pid` still has a member.
+/// Whether the process group led by `pid` still has a running member.
+///
+/// A signalled child of *this* process does not disappear when it dies: it
+/// stays in the process table as a zombie until its parent reaps it, and
+/// `kill(pid, 0)` reports a zombie as very much present. So the reap comes
+/// first, unconditionally - without it, `run`'s own stop would wait out the
+/// whole SIGKILL budget on children that died immediately.
 fn running(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };
+    reap(pid);
     // SAFETY: signal 0 performs the permission and existence check only.
     if unsafe { libc::kill(-pid, 0) } == 0 {
         return true;
@@ -426,11 +454,24 @@ fn running(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Collect `pid` if it is this process's own child and has already exited.
+///
+/// A `stop` issued from another terminal is not the parent, and `waitpid` says
+/// so with `ECHILD`; that is the ordinary case and nothing to report.
+fn reap(pid: libc::pid_t) {
+    let mut status = 0;
+    // SAFETY: `waitpid` with WNOHANG never blocks and writes only `status`.
+    unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn runtime(id: &str, role: phoxal_cli_project::RuntimeRole) -> phoxal_cli_project::RobotRuntime {
+    fn runtime(
+        id: &str,
+        role: phoxal_cli_project::RuntimeRole,
+    ) -> phoxal_cli_project::RobotRuntime {
         phoxal_cli_project::RobotRuntime {
             participant_id: id.to_string(),
             binary: id.to_string(),
@@ -449,7 +490,12 @@ mod tests {
     /// only one the CLI ever decides on its own.
     #[test]
     fn a_runtimes_argv_is_the_id_the_bundle_the_endpoint_and_nothing_else() {
-        let plain = argv("drive", Path::new("/srv/bundle"), "tcp/127.0.0.1:7447", false);
+        let plain = argv(
+            "drive",
+            Path::new("/srv/bundle"),
+            "tcp/127.0.0.1:7447",
+            false,
+        );
         assert_eq!(
             plain,
             vec![
@@ -461,10 +507,19 @@ mod tests {
                 "tcp/127.0.0.1:7447",
             ]
         );
-        for retired in ["--execution-id", "--execution-origin", "--shutdown-grace-ms"] {
+        for retired in [
+            "--execution-id",
+            "--execution-origin",
+            "--shutdown-grace-ms",
+        ] {
             assert!(!plain.iter().any(|arg| arg == retired), "{plain:?}");
         }
-        let simulated = argv("drive", Path::new("/srv/bundle"), "tcp/127.0.0.1:7447", true);
+        let simulated = argv(
+            "drive",
+            Path::new("/srv/bundle"),
+            "tcp/127.0.0.1:7447",
+            true,
+        );
         assert_eq!(simulated.last().map(String::as_str), Some("--simulation"));
     }
 
@@ -511,21 +566,6 @@ mod tests {
         );
     }
 
-    /// What a selection leaves out is what the session summary has to explain.
-    #[test]
-    fn the_excluded_drivers_are_exactly_what_the_operator_will_see_absent() {
-        assert!(Selection::All.excluded(&available()).is_empty());
-        assert_eq!(
-            Selection::DriversOff.excluded(&available()),
-            vec!["left_drive".to_string(), "right_drive".to_string()]
-        );
-        assert_eq!(
-            Selection::Drivers(["left_drive".to_string()].into_iter().collect())
-                .excluded(&available()),
-            vec!["right_drive".to_string()]
-        );
-    }
-
     fn record() -> SessionRecord {
         SessionRecord {
             project: PathBuf::from("/tmp/rover"),
@@ -554,8 +594,7 @@ mod tests {
 
         record().write(&paths)?;
         assert_eq!(SessionRecord::read(&paths).as_ref(), Some(&record()));
-        let json: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(record_path(&paths))?)?;
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(record_path(&paths))?)?;
         assert_eq!(json["schema"], "phoxal/cli-session/v0");
         assert_eq!(
             record().log_for("brain"),
@@ -576,7 +615,10 @@ mod tests {
         let project = tempfile::tempdir()?;
         let paths = phoxal_cli_host::paths::RuntimePaths::for_root(project.path());
         std::fs::create_dir_all(paths.volatile_root())?;
-        std::fs::write(record_path(&paths), b"{\"schema\":\"phoxal/cli-session/v9\"}")?;
+        std::fs::write(
+            record_path(&paths),
+            b"{\"schema\":\"phoxal/cli-session/v9\"}",
+        )?;
         assert!(SessionRecord::read(&paths).is_none());
         Ok(())
     }

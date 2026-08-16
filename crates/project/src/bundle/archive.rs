@@ -726,7 +726,10 @@ mod sidecar_tests {
         let error = verify_against_digest_sidecar(&output)
             .expect_err("a rewritten archive must not verify")
             .to_string();
-        assert!(error.contains("does not match its digest sidecar"), "{error}");
+        assert!(
+            error.contains("does not match its digest sidecar"),
+            "{error}"
+        );
 
         fs::write(&sidecar, "not-a-digest\n").unwrap();
         let error = verify_against_digest_sidecar(&output)

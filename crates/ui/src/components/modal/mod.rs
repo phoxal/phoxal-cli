@@ -19,7 +19,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         ModalId::Help => (
             " Help ",
             format!(
-                "Enter descends from tabs to panels to content. Esc restores the previous depth. Panel-local shortcuts work only after entering that panel.\n\nRuntimes: arrows, Enter detail, r restart, l logs\nLogs: filters / f s, stream arrows/End/Space\nBus: / s a and arrows\nInput: arrows, Enter select, e enable, x disable, r rescan\nCtrl+C: stop confirmation; {}",
+                "Enter descends from tabs to panels to content. Esc restores the previous depth. Panel-local shortcuts work only after entering that panel.\n\nRuntimes: arrows, Enter detail, l logs\nLogs: filters / f s, stream arrows/End/Space\nBus: / s a and arrows\nInput: arrows, Enter select, e enable, x disable, r rescan\nCtrl+C: stop confirmation; {}",
                 quit_meaning(model.detachable)
             ),
         ),
@@ -28,10 +28,9 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
                 || "Attachment snapshot not received".to_string(),
                 |snapshot| {
                     format!(
-                        "project: {}\nrobot: {}\nclock: {:?}\nexecution: {}\nrevision: {}",
+                        "project: {}\nrobot: {}\nexecution: {}\nrevision: {}",
                         sanitize(&snapshot.project),
                         sanitize(snapshot.robot.as_str()),
-                        snapshot.clock,
                         snapshot.execution,
                         snapshot.revision
                     )
@@ -40,9 +39,10 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             (" Session info ", info)
         }
         ModalId::ConfirmStop => (
-            " Stop project? ",
+            " Stop session? ",
             format!(
-                "Enter stops the execution and every supervised process. Esc cancels. {}",
+                "Enter stops every runtime this client started and then its supervisor. Esc \
+                 cancels. {}",
                 quit_meaning(model.detachable)
             ),
         ),

@@ -363,9 +363,7 @@ pub fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecution> {
         RunRootKind::Source => {
             prepare_source_run(&execution_root, options, request.reporter.as_ref())?
         }
-        RunRootKind::Release => {
-            prepare_release_run(&execution_root, request.reporter.as_ref())?
-        }
+        RunRootKind::Release => prepare_release_run(&execution_root, request.reporter.as_ref())?,
     };
     Ok(PreparedExecution {
         release,
@@ -465,4 +463,3 @@ fn run_source_check(
     }
     Ok(())
 }
-

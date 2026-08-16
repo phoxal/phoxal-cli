@@ -27,8 +27,8 @@ pub mod registry;
 mod registry_package;
 mod resolve;
 mod run;
-mod runtimes;
 mod runtime_target;
+mod runtimes;
 mod schema;
 mod simulation;
 pub mod source;
@@ -48,11 +48,11 @@ pub use paths::runtime::{
 };
 pub use progress::{PreparationEvent, Reporter, SilentReporter};
 pub use progress_phase::{PhaseId, PhaseOutcome};
+pub use run::{PrepareRunRequest, PreparedExecution, prepare_run};
+pub use runtime_target::{RuntimeAuthority, RuntimeTarget};
 pub use runtimes::{
     BRAIN_ID, RobotRuntime, RuntimeRole, bundle_runtimes, robot_binaries, robot_runtimes,
 };
-pub use run::{PrepareRunRequest, PreparedExecution, prepare_run};
-pub use runtime_target::{RuntimeAuthority, RuntimeTarget};
 pub use simulation::{
     PrepareSimulationRequest, PreparedSimulation, StageWebotsRequest, WebotsHost, WebotsLaunch,
     prepare_simulation, stage_webots,

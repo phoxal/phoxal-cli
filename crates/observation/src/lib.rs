@@ -5,9 +5,9 @@
 //!
 //! Every remote fact an observation carries comes in as a `phoxal_client`
 //! type, so this crate names no wire crate directly.
-//! `phoxal-runtime-contract` stays a direct dependency because identities,
-//! participant kinds, and the clock are shared domain primitives that also
-//! appear in observations this crate composes locally.
+//! `phoxal-runtime-contract` stays a direct dependency because identities and
+//! participant kinds are shared domain primitives that also appear in
+//! observations this crate composes locally.
 
 #![cfg_attr(
     test,
@@ -39,7 +39,9 @@ pub use logs::{
     LogAnchor, LogFilters, LogQuery, LogRead, LogRow, LogSeverity, LogSource, LogWindow,
     WindowDirection, bounded_log_text, sanitize_terminal_text,
 };
-pub use processes::{ProcessObservation, ProcessTable};
+pub use processes::{
+    LocalRuntime, LocalRuntimeState, LocalRuntimes, ProcessObservation, ProcessTable,
+};
 pub use revision::{ObservationQuery, ObservationWindow, QueryToken, StoreChanged, StoreRevision};
 pub use runtimes::{
     RuntimeBufferKind, RuntimeDirection, RuntimeFeedStatus, RuntimePerformanceSample,

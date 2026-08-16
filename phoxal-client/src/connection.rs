@@ -9,8 +9,8 @@ use phoxal_bus::{
     StreamReceiver, Subscribe, Topic,
 };
 use phoxal_protocol::supervisor;
-use phoxal_protocol::supervisor::connect::{ConnectReply, ConnectRequest, PRESENCE_KEY};
 use phoxal_protocol::supervisor::command::{Command, CommandOutcome};
+use phoxal_protocol::supervisor::connect::{ConnectReply, ConnectRequest, PRESENCE_KEY};
 use phoxal_protocol::supervisor::execution::{Lifecycle, Snapshot, SnapshotDocument};
 use phoxal_protocol::supervisor::info::ManualDrive;
 use phoxal_runtime_contract::identity::{ExecutionId, RobotId};
@@ -266,8 +266,7 @@ impl Client {
     /// Ask the host this execution runs on to power off, fenced the same way.
     pub async fn poweroff(&self) -> Result<CommandOutcome, ClientError> {
         let expected_revision = self.fenced_revision().await?;
-        self.command(Command::Poweroff { expected_revision })
-            .await
+        self.command(Command::Poweroff { expected_revision }).await
     }
 
     /// The revision a host command is acknowledged against, read fresh so an
@@ -823,7 +822,8 @@ mod tests {
     #[test]
     fn a_starting_graph_is_pending_and_nothing_is_ever_a_readiness_failure() {
         assert_eq!(
-            classify_readiness(&snapshot(1, Lifecycle::Starting)).expect("starting is not an error"),
+            classify_readiness(&snapshot(1, Lifecycle::Starting))
+                .expect("starting is not an error"),
             Readiness::Pending
         );
         for lifecycle in [Lifecycle::Starting, Lifecycle::Ready, Lifecycle::Degraded] {

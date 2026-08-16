@@ -387,13 +387,12 @@ pub(crate) fn synthesize_host_participant_object(payload: &[u8]) -> Vec<u8> {
     // Mach-O names a section inside a segment; ELF has no segment name and
     // spells the section differently. Both spellings are what the reader looks
     // for, so the fixture has to pick the one its host format uses.
-    let (segment, section_name): (&[u8], &[u8]) = if host_binary_format()
-        == object::BinaryFormat::MachO
-    {
-        (b"__DATA", b"__phoxal_meta")
-    } else {
-        (b"", b".phoxal_meta")
-    };
+    let (segment, section_name): (&[u8], &[u8]) =
+        if host_binary_format() == object::BinaryFormat::MachO {
+            (b"__DATA", b"__phoxal_meta")
+        } else {
+            (b"", b".phoxal_meta")
+        };
     let section = object.add_section(
         segment.to_vec(),
         section_name.to_vec(),

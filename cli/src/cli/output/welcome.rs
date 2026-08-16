@@ -53,14 +53,14 @@ impl Mode {
                 StepId::Project,
                 StepId::PrepareRuntime,
                 StepId::Supervisor,
-                StepId::RobotGraph,
+                StepId::Runtimes,
             ],
             Self::Webots => &[
                 StepId::Project,
                 StepId::PrepareRuntime,
                 StepId::Supervisor,
                 StepId::Webots,
-                StepId::RobotGraph,
+                StepId::Runtimes,
             ],
         }
     }
@@ -73,7 +73,9 @@ pub(crate) enum StepId {
     PrepareRuntime,
     Supervisor,
     Webots,
-    RobotGraph,
+    /// The runtimes this client launched, counted against the presence the
+    /// supervisor reports for them.
+    Runtimes,
 }
 
 impl StepId {
@@ -83,7 +85,7 @@ impl StepId {
             Self::PrepareRuntime => "Prepare runtime",
             Self::Supervisor => "Supervisor",
             Self::Webots => "Webots",
-            Self::RobotGraph => "Robot graph",
+            Self::Runtimes => "Runtimes",
         }
     }
 }

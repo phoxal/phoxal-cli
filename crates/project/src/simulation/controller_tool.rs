@@ -74,7 +74,9 @@ fn install(
         command.arg("--offline");
     }
     let status = crate::build::shell::command_status_captured(&mut command, reporter)
-        .with_context(|| format!("failed to run `cargo install` for {WEBOTS_CONTROLLER_PACKAGE}"))?;
+        .with_context(|| {
+            format!("failed to run `cargo install` for {WEBOTS_CONTROLLER_PACKAGE}")
+        })?;
     ensure!(
         status.success(),
         "cargo install {WEBOTS_CONTROLLER_PACKAGE} failed with status {status}"

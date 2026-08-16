@@ -15,8 +15,11 @@ pub struct Run {
     drivers: DriverSelection,
 }
 
-/// The driver-selection finalization inputs `run` and `start` share: they
-/// decide what the staged manifest contains, before any binary resolution.
+/// The driver-selection inputs `run` and `start` share.
+///
+/// They decide which of the bundle's runtimes this launch starts, and nothing
+/// else: the bundle contains every driver whatever is selected here, so
+/// choosing differently next time costs no rebuild.
 #[derive(Debug, Args)]
 pub(crate) struct DriverSelection {
     #[arg(
@@ -47,10 +50,7 @@ impl DriverSelection {
             bail!("--driver cannot be combined with --drivers off");
         }
         Ok(crate::application::lifecycle::RunOptions {
-            drivers: match self.drivers {
-                DriversMode::On => crate::application::lifecycle::DriversMode::On,
-                DriversMode::Off => crate::application::lifecycle::DriversMode::Off,
-            },
+            drivers_off: self.drivers == DriversMode::Off,
             drivers_subset: self.drivers_subset.clone(),
         })
     }
