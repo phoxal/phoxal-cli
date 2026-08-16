@@ -58,12 +58,12 @@ thiserror = "2.0.18"
 
 # The framework train. Every crate in this workspace speaks one train, so the
 # pins live here and nowhere else.
-phoxal-protocol = "0.62"
-phoxal-bundle = "0.62"
-phoxal-bus = "0.62"
-phoxal-manifest = "0.62"
-phoxal-model = "0.62"
-phoxal-runtime-contract = "0.62"
+phoxal-protocol = "0.63"
+phoxal-bundle = "0.63"
+phoxal-bus = "0.63"
+phoxal-manifest = "0.63"
+phoxal-model = "0.63"
+phoxal-runtime-contract = "0.63"
 
 # The external client boundary. Anything in this workspace that speaks to a
 # running robot depends on this and not on the wire crates above.
@@ -87,17 +87,3 @@ unimplemented = "deny"
 [profile.release]
 lto = false
 codegen-units = 16
-
-# REMOVE BEFORE OPENING THE PULL REQUEST
-#
-# The one-bundle campaign's framework half is not published yet. Until that
-# train is released, every framework crate resolves to the campaign worktree so
-# this workspace builds against the API it is being written for.
-[patch.crates-io]
-phoxal-protocol = { path = "../../../../framework/.claude/worktrees/one-bundle/crates/protocol" }
-phoxal-bundle = { path = "../../../../framework/.claude/worktrees/one-bundle/crates/bundle" }
-phoxal-bus = { path = "../../../../framework/.claude/worktrees/one-bundle/crates/bus" }
-phoxal-manifest = { path = "../../../../framework/.claude/worktrees/one-bundle/crates/manifest" }
-phoxal-model = { path = "../../../../framework/.claude/worktrees/one-bundle/crates/model" }
-phoxal-runtime-contract = { path = "../../../../framework/.claude/worktrees/one-bundle/crates/runtime-contract" }
-phoxal-macros = { path = "../../../../framework/.claude/worktrees/one-bundle/crates/macros" }
