@@ -347,8 +347,8 @@ mod tests {
     fn narration_never_crowds_out_what_the_supervisor_complained_about() {
         let log = concat!(
             "2026-08-15T22:14:55.900000Z ERROR phoxal_supervisor: required startup phase failed\n",
-            "2026-08-15T22:14:55.962631Z  INFO zenoh::api::session: close session zid=bd90\n",
-            "2026-08-15T22:14:55.962764Z  INFO zenoh::api::session: close session zid=5a6a\n",
+            "2026-08-15T22:14:55.962631Z  INFO transport::session: close session zid=bd90\n",
+            "2026-08-15T22:14:55.962764Z  INFO transport::session: close session zid=5a6a\n",
             "phoxal-supervisor: stage 'starting robot graph' stalled: front_camera\n",
         );
         let quoted = last_lines(log, 3);
@@ -357,7 +357,7 @@ mod tests {
         assert!(!quoted.contains("close session"), "{quoted}");
 
         // A supervisor that only ever narrated still says something.
-        let quiet = "2026-08-15T22:14:55.962631Z  INFO zenoh::api::session: close session\n";
+        let quiet = "2026-08-15T22:14:55.962631Z  INFO transport::session: close session\n";
         assert!(last_lines(quiet, 3).contains("close session"));
     }
 
