@@ -1,7 +1,7 @@
 //! Structured connection and operation failures.
 
 use phoxal_bus::{BusError, BusFault, QueryError, SourceLabelError};
-use phoxal_protocol::supervisor::execution::{SnapshotError, SupervisorFailure};
+use phoxal_protocol::supervisor::execution::SnapshotError;
 use phoxal_runtime_contract::identity::ExecutionId;
 use phoxal_runtime_contract::version::FrameworkVersion;
 
@@ -133,14 +133,6 @@ pub enum ClientError {
     /// The established connection reached a terminal state.
     #[error("the connection ended: {reason}")]
     Disconnected { reason: DisconnectReason },
-
-    /// The execution entered a failed lifecycle before becoming ready.
-    #[error("the execution failed before readiness: {failure:?}")]
-    ReadinessFailed { failure: Option<SupervisorFailure> },
-
-    /// The execution stopped before becoming ready.
-    #[error("the execution stopped before it became ready")]
-    StoppedBeforeReady,
 
     /// The underlying typed transport operation failed.
     #[error(transparent)]

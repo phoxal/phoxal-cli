@@ -56,15 +56,11 @@ impl SessionSummary {
 pub(crate) fn attachment_ending(outcome: &AttachmentOutcome) -> String {
     match outcome {
         AttachmentOutcome::Detached => "you detached; the execution keeps running".to_string(),
-        AttachmentOutcome::ExecutionStopped => "the execution stopped".to_string(),
-        AttachmentOutcome::ExecutionFailed {
-            reason: Some(failure),
-        } => format!(
-            "the execution failed: {:?}: {}",
-            failure.reason,
-            failure.detail.as_str()
-        ),
-        AttachmentOutcome::ExecutionFailed { reason: None } => {
+        AttachmentOutcome::SessionStopped => "you stopped the session".to_string(),
+        AttachmentOutcome::ExecutionEnded {
+            reason: Some(reason),
+        } => format!("the execution ended: {reason}"),
+        AttachmentOutcome::ExecutionEnded { reason: None } => {
             "the execution ended without reporting a reason".to_string()
         }
     }
@@ -73,9 +69,6 @@ pub(crate) fn attachment_ending(outcome: &AttachmentOutcome) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_client::supervisor::execution::{
-        Detail, SupervisorFailure, SupervisorFailureReason,
-    };
 
     /// Every ending says something an operator can act on, and none of them
     /// blames the transport for a stop the operator asked for.
@@ -83,25 +76,22 @@ mod tests {
     fn every_attachment_ending_is_explained_without_transport_noise() {
         assert!(attachment_ending(&AttachmentOutcome::Detached).contains("keeps running"));
         assert_eq!(
-            attachment_ending(&AttachmentOutcome::ExecutionStopped),
-            "the execution stopped"
+            attachment_ending(&AttachmentOutcome::SessionStopped),
+            "you stopped the session"
         );
         assert_eq!(
-            attachment_ending(&AttachmentOutcome::ExecutionFailed { reason: None }),
+            attachment_ending(&AttachmentOutcome::ExecutionEnded { reason: None }),
             "the execution ended without reporting a reason"
         );
         assert!(
-            !attachment_ending(&AttachmentOutcome::ExecutionFailed { reason: None })
+            !attachment_ending(&AttachmentOutcome::ExecutionEnded { reason: None })
                 .contains("identity")
         );
         assert_eq!(
-            attachment_ending(&AttachmentOutcome::ExecutionFailed {
-                reason: Some(SupervisorFailure {
-                    reason: SupervisorFailureReason::LaunchFailed,
-                    detail: Detail::new("drive never became ready"),
-                }),
+            attachment_ending(&AttachmentOutcome::ExecutionEnded {
+                reason: Some("phoxal-supervisor exited with exit status: 1".to_string()),
             }),
-            "the execution failed: LaunchFailed: drive never became ready"
+            "the execution ended: phoxal-supervisor exited with exit status: 1"
         );
     }
 
@@ -117,11 +107,11 @@ mod tests {
         let webots = project.join(".phoxal/run/webots.log");
 
         let lines =
-            SessionSummary::new("the execution stopped", vec![supervisor, webots]).lines(project);
+            SessionSummary::new("you stopped the session", vec![supervisor, webots]).lines(project);
         assert_eq!(
             lines,
             vec![
-                "  session ended: the execution stopped".to_string(),
+                "  session ended: you stopped the session".to_string(),
                 "  logs .phoxal/run/supervisor.log".to_string(),
             ]
         );

@@ -9,13 +9,11 @@ use phoxal_bus::{
     StreamReceiver, Subscribe, Topic,
 };
 use phoxal_protocol::supervisor;
+use phoxal_protocol::supervisor::command::{Command, CommandOutcome};
 use phoxal_protocol::supervisor::connect::{ConnectReply, ConnectRequest, PRESENCE_KEY};
-use phoxal_protocol::supervisor::execution::{
-    Command, CommandOutcome, Lifecycle, Snapshot, SnapshotDocument,
-};
+use phoxal_protocol::supervisor::execution::{Lifecycle, Snapshot, SnapshotDocument};
 use phoxal_protocol::supervisor::info::ManualDrive;
-use phoxal_runtime_contract::clock::Clock;
-use phoxal_runtime_contract::identity::{ExecutionId, ParticipantId, ProducerId, RobotId};
+use phoxal_runtime_contract::identity::{ExecutionId, RobotId};
 use phoxal_runtime_contract::version::FrameworkVersion;
 use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -41,11 +39,16 @@ impl ConnectOptions {
 }
 
 /// Immutable facts established while connecting.
+///
+/// The clock is deliberately absent. A bundle records no time domain: real
+/// robot time zero is the host boot and the timeline id is the execution id,
+/// while simulation is a launch decision carried per runtime as `--simulation`.
+/// The supervisor is handed a bundle root and nothing else, so it does not know
+/// how the runtimes around it were started and has no answer to advertise.
 #[derive(Clone, Debug)]
 pub struct Connected {
     pub execution: ExecutionId,
     pub robot: RobotId,
-    pub clock: Clock,
     pub manual_drive: Option<ManualDrive>,
     pub framework: FrameworkVersion,
 }
@@ -246,30 +249,36 @@ impl Client {
             })?)
     }
 
-    pub async fn restart(
-        &self,
-        participant: ParticipantId,
-        expected_producer: ProducerId,
-    ) -> Result<CommandOutcome, ClientError> {
-        self.command(Command::Restart {
-            participant,
-            expected_producer: Some(expected_producer),
-        })
-        .await
+    /// Ask the host this execution runs on to reboot, fenced on a fresh
+    /// authoritative snapshot revision.
+    ///
+    /// There is no `stop` and no `restart` beside it. The supervisor starts
+    /// nothing, so it can stop nothing: whoever launched a runtime stops that
+    /// runtime, and a client that launched none has no business ending a graph
+    /// through a process that never started it. What remains here is the one
+    /// thing only the machine running the supervisor can do for a remote
+    /// operator - cycle its own power.
+    pub async fn reboot(&self) -> Result<CommandOutcome, ClientError> {
+        let expected_revision = self.fenced_revision().await?;
+        self.command(Command::Reboot { expected_revision }).await
     }
 
-    /// End the execution, fenced on a fresh authoritative snapshot revision.
-    pub async fn stop(&self) -> Result<CommandOutcome, ClientError> {
+    /// Ask the host this execution runs on to power off, fenced the same way.
+    pub async fn poweroff(&self) -> Result<CommandOutcome, ClientError> {
+        let expected_revision = self.fenced_revision().await?;
+        self.command(Command::Poweroff { expected_revision }).await
+    }
+
+    /// The revision a host command is acknowledged against, read fresh so an
+    /// operator cannot reboot a robot against a view that has moved on.
+    async fn fenced_revision(&self) -> Result<u64, ClientError> {
         self.ensure_connected()?;
-        let current = self
+        Ok(self
             .current
             .query(supervisor::snapshot::CurrentRequest {})
             .await?
-            .into_snapshot();
-        self.command(Command::Stop {
-            expected_revision: current.revision,
-        })
-        .await
+            .snapshot()
+            .revision)
     }
 
     pub async fn logs(
@@ -503,7 +512,6 @@ async fn initialize(bus: &BusHandle, execution: ExecutionId) -> Result<Initializ
         connected: Arc::new(Connected {
             execution,
             robot: info.robot,
-            clock: info.clock,
             manual_drive: info.manual_drive,
             framework,
         }),
@@ -693,13 +701,16 @@ enum Readiness {
     Pending,
 }
 
-fn classify_readiness(snapshot: &Snapshot) -> Result<Readiness, ClientError> {
+/// A graph is usable once every expected runtime has been seen, and stays
+/// usable when one later goes away.
+///
+/// There is no failed and no stopped answer to give: an absent runtime is what
+/// `Degraded` says, and a supervisor that died is observed as its identity
+/// token disappearing rather than as a lifecycle value it could not have
+/// published.
+const fn classify_readiness(snapshot: &Snapshot) -> Result<Readiness, ClientError> {
     match snapshot.lifecycle {
         Lifecycle::Ready | Lifecycle::Degraded => Ok(Readiness::Ready),
-        Lifecycle::Failed => Err(ClientError::ReadinessFailed {
-            failure: snapshot.failure.clone(),
-        }),
-        Lifecycle::Stopping | Lifecycle::Stopped => Err(ClientError::StoppedBeforeReady),
         Lifecycle::Starting => Ok(Readiness::Pending),
     }
 }
@@ -766,9 +777,7 @@ async fn pump_snapshots(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_protocol::supervisor::execution::{
-        Lifecycle, SupervisorFailure, SupervisorFailureReason,
-    };
+    use phoxal_protocol::supervisor::execution::Lifecycle;
 
     fn snapshot(revision: u64, lifecycle: Lifecycle) -> Snapshot {
         Snapshot {
@@ -776,7 +785,6 @@ mod tests {
             lifecycle,
             startup: Vec::new(),
             processes: Vec::new(),
-            failure: None,
         }
     }
 
@@ -807,20 +815,20 @@ mod tests {
         }
     }
 
+    /// Readiness has exactly three answers because presence has exactly three
+    /// shapes. A runtime that is absent is not a failure to report here - it
+    /// is what `Degraded` already says, and the client that launched it is the
+    /// one that knows why.
     #[test]
-    fn failed_readiness_preserves_structured_failure() {
-        let failure = SupervisorFailure::new(
-            SupervisorFailureReason::LaunchFailed,
-            "participant launch plan was rejected",
+    fn a_starting_graph_is_pending_and_nothing_is_ever_a_readiness_failure() {
+        assert_eq!(
+            classify_readiness(&snapshot(1, Lifecycle::Starting))
+                .expect("starting is not an error"),
+            Readiness::Pending
         );
-        let mut failed = snapshot(1, Lifecycle::Failed);
-        failed.failure = Some(failure.clone());
-
-        assert!(matches!(
-            classify_readiness(&failed),
-            Err(ClientError::ReadinessFailed { failure: Some(actual) })
-                if actual.reason == failure.reason && actual.detail == failure.detail
-        ));
+        for lifecycle in [Lifecycle::Starting, Lifecycle::Ready, Lifecycle::Degraded] {
+            assert!(classify_readiness(&snapshot(1, lifecycle)).is_ok());
+        }
     }
 
     #[test]

@@ -55,16 +55,15 @@ webots-proto = "0.2.0"
 gilrs = "0.11.2"
 jsonschema = { version = "0.46.6", default-features = false }
 thiserror = "2.0.18"
-sysinfo = { version = "0.38.0", default-features = false, features = ["system"] }
 
 # The framework train. Every crate in this workspace speaks one train, so the
 # pins live here and nowhere else.
-phoxal-protocol = "0.61.0"
-phoxal-bundle = "0.61.0"
-phoxal-bus = "0.61.0"
-phoxal-manifest = "0.61.0"
-phoxal-model = "0.61.0"
-phoxal-runtime-contract = "0.61.0"
+phoxal-protocol = "0.63"
+phoxal-bundle = "0.63"
+phoxal-bus = "0.63"
+phoxal-manifest = "0.63"
+phoxal-model = "0.63"
+phoxal-runtime-contract = "0.63"
 
 # The external client boundary. Anything in this workspace that speaks to a
 # running robot depends on this and not on the wire crates above.

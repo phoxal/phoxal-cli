@@ -1,7 +1,6 @@
 //! The execution-level observation, projected from one supervisor snapshot.
 
-use phoxal_client::supervisor::execution::{Lifecycle, StartupStep, SupervisorFailure};
-use phoxal_runtime_contract::clock::Clock;
+use phoxal_client::supervisor::execution::{Lifecycle, StartupStep};
 use phoxal_runtime_contract::identity::{ExecutionId, RobotId};
 
 /// What an attached client knows about the execution as a whole.
@@ -15,12 +14,12 @@ pub struct SupervisorObservation {
     pub revision: u64,
     pub execution: ExecutionId,
     pub robot: RobotId,
-    pub clock: Clock,
     /// Where this client believes the execution's bundle lives, for display.
     pub project: String,
+    /// Derived entirely from presence: `Starting` until every expected runtime
+    /// has been seen, `Ready` while they all are, `Degraded` once one is not.
+    /// There is no failed or stopped value - the supervisor's own death is
+    /// observed as its identity token disappearing.
     pub lifecycle: Lifecycle,
     pub startup: Vec<StartupStep>,
-    /// Why `lifecycle` reached `Failed`, as a typed reason plus its evidence;
-    /// `None` for every other lifecycle.
-    pub failure: Option<SupervisorFailure>,
 }

@@ -7,56 +7,12 @@ use anyhow::{Context, Result};
 
 use crate::cli::context::AppContext;
 
+use super::units::{UNIT_MARKER, supervisor_unit};
+
 const UNIT_PATH: &str = phoxal_cli_host::paths::SYSTEMD_UNIT_PATH;
-const UNIT_MARKER: &str = "# Managed by phoxal";
 
-/// The managed unit.
-///
-/// `ExecStart` is the active release's framework supervisor and bundle root,
-/// and nothing else. Both paths
-/// resolve through the same symlink at spawn, so systemd always starts the
-/// supervisor and bundle of whichever release is active - install and
-/// rollback switch them together by moving that one link. The interactive
-/// client is never run as the supervisor: it builds, and a durable systemd-owned
-/// service must never acquire Cargo, registries, a toolchain, or a terminal.
-/// `Type=notify` because the supervisor owns READY and the watchdog itself.
 fn unit_contents() -> String {
-    format!(
-        r#"# Managed by phoxal
-[Unit]
-Description=Phoxal robot runtime
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=notify
-NotifyAccess=main
-User=phoxal
-Group=phoxal
-WorkingDirectory={active}
-ExecStart={active}/{supervisor} {active}/{bundle}
-Restart=on-failure
-RestartSec=2s
-WatchdogSec=30s
-TimeoutStartSec=300s
-TimeoutStopSec=300s
-KillMode=control-group
-UMask=0007
-RuntimeDirectory=phoxal
-RuntimeDirectoryMode=2775
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths={state} {volatile}
-
-[Install]
-WantedBy=multi-user.target
-"#,
-        supervisor = phoxal_cli_project::SUPERVISOR_FILE,
-        bundle = phoxal_cli_project::BUNDLE_DIR,
-        active = phoxal_cli_project::ACTIVE_RUNTIME_ROOT,
-        state = phoxal_cli_project::INSTALLED_STATE_ROOT,
-        volatile = phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
-    )
+    supervisor_unit()
 }
 
 pub(crate) async fn install(app: &AppContext) -> Result<()> {
@@ -102,17 +58,24 @@ pub(crate) async fn uninstall(app: &AppContext) -> Result<()> {
     Ok(())
 }
 
+/// The whole robot's state, not one unit's.
+///
+/// A robot is a supervisor plus one unit per runtime, and an operator asking
+/// "is it running" is asking about the set. The target is what names that set,
+/// so it is what is inspected - and it is only there once a bundle has been
+/// installed, which is why the supervisor's own unit is inspected either way.
 pub(crate) async fn status(_app: &AppContext) -> Result<()> {
     require_systemd()?;
-    run_status(
-        "systemctl",
-        &[
-            "status",
-            "--no-pager",
-            "--full",
-            phoxal_cli_host::paths::SYSTEMD_UNIT,
-        ],
-    )
+    let mut units = vec![phoxal_cli_host::paths::SYSTEMD_UNIT];
+    if Path::new(phoxal_cli_host::paths::SYSTEMD_UNIT_ROOT)
+        .join(super::units::TARGET_UNIT)
+        .is_file()
+    {
+        units.push(super::units::TARGET_UNIT);
+    }
+    let mut args = vec!["status", "--no-pager", "--full"];
+    args.extend(units);
+    run_status("systemctl", &args)
 }
 
 fn require_root() -> Result<()> {
@@ -322,39 +285,6 @@ mod unit_tests {
     fn write_managed_test_unit(path: &Path) -> Result<()> {
         std::fs::write(path, format!("{UNIT_MARKER}\n[Unit]\n"))?;
         Ok(())
-    }
-
-    /// The unit runs the active release's own supervisor on that release's bundle,
-    /// and nothing else. Both halves resolve through `/var/phoxal` at spawn, so
-    /// an activation or a rollback moves the supervisor and bundle together
-    /// and the unit can never start a host-wide supervisor on someone else's
-    /// bundle. The interactive client is never the supervisor: it builds, and no
-    /// `phoxal` invocation may appear in `ExecStart`.
-    #[test]
-    fn managed_service_executes_the_active_releases_own_supervisor_on_its_own_bundle() {
-        let unit = unit_contents();
-        assert_eq!(unit.matches("ExecStart=").count(), 1);
-        assert!(unit.contains("ExecStart=/var/phoxal/phoxal-supervisor /var/phoxal/bundle"));
-        let exec_start = unit
-            .lines()
-            .find(|line| line.starts_with("ExecStart="))
-            .expect("the unit has an ExecStart");
-        assert!(
-            !exec_start.contains("/phoxal "),
-            "the interactive client must never be run as the supervisor: {exec_start}"
-        );
-        for absent in [" start ", " run ", "--drivers", "--driver"] {
-            assert!(
-                !exec_start.contains(absent),
-                "the supervisor takes a bundle root and nothing else: {exec_start}"
-            );
-        }
-        assert!(unit.contains("Type=notify"));
-        assert!(unit.contains("NotifyAccess=main"));
-        assert!(unit.contains("WatchdogSec=30s"));
-        assert!(unit.contains("User=phoxal\nGroup=phoxal"));
-        assert!(!unit.contains("StateDirectory="));
-        assert!(!unit.contains("participant"));
     }
 
     #[test]

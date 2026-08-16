@@ -371,6 +371,37 @@ pub fn inspect_selected_binary_for_target(
     extract_participant_metadata_from_bytes(&data, &describe)
 }
 
+/// A host-native object file carrying one participant-metadata payload.
+///
+/// Tests elsewhere in this crate need a binary the real reader accepts without
+/// paying for a `cargo build` of a fixture crate, so the synthesizer the
+/// reader's own tests use is shared rather than copied.
+#[cfg(test)]
+pub(crate) fn synthesize_host_participant_object(payload: &[u8]) -> Vec<u8> {
+    use object::write::Object;
+    let mut object = Object::new(
+        host_binary_format(),
+        host_architecture(),
+        object::Endianness::Little,
+    );
+    // Mach-O names a section inside a segment; ELF has no segment name and
+    // spells the section differently. Both spellings are what the reader looks
+    // for, so the fixture has to pick the one its host format uses.
+    let (segment, section_name): (&[u8], &[u8]) =
+        if host_binary_format() == object::BinaryFormat::MachO {
+            (b"__DATA", b"__phoxal_meta")
+        } else {
+            (b"", b".phoxal_meta")
+        };
+    let section = object.add_section(
+        segment.to_vec(),
+        section_name.to_vec(),
+        object::SectionKind::ReadOnlyData,
+    );
+    object.append_section_data(section, payload, 1);
+    object.write().expect("synthesize object file")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,7 +473,6 @@ mod tests {
                     framework: FIXTURE_FRAMEWORK,
                     id,
                     kind: ParticipantKind::Service,
-                    requirement: None,
                     config_schema: serde_json::json!({"type": "null"}),
                 },
             },

@@ -31,6 +31,9 @@ pub(crate) struct FeedContext {
     pub(crate) epoch: AttachmentEpoch,
     /// Where this client believes the execution's bundle lives, for display.
     pub(crate) project: String,
+    /// What this client knows about the runtimes it launched itself. Empty for
+    /// an attachment to an execution somebody else started.
+    pub(crate) local: super::LocalRuntimeFacts,
     pub(crate) stores: Stores,
     pub(crate) events: mpsc::Sender<AttachmentEvent>,
     pub(crate) cancellation: CancellationToken,

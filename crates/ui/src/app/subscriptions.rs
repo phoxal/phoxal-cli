@@ -22,7 +22,7 @@ enum Slot {
     RuntimesChanged = 6,
     LogsReply = 7,
     RuntimesReply = 8,
-    StopProjectCompletion = 9,
+    StopSessionCompletion = 9,
     OwnedSupervisorExit = 10,
 }
 
@@ -52,15 +52,17 @@ impl PendingInputs {
     pub(crate) fn push(&mut self, input: SessionInput) {
         match input {
             SessionInput::Client(AttachmentEvent::EpochChanged(epoch)) => {
+                // A new epoch replaces every projection except the connection
+                // observation, which is about this attachment rather than about
+                // the execution it now describes. The supervisor slot is not
+                // carried over: a snapshot has no terminal value left to
+                // preserve, so keeping the old one would only render the
+                // previous execution's rows under the new epoch.
                 let connection = self.slots[Slot::Connection as usize].take();
-                let terminal_supervisor = self.slots[Slot::Supervisor as usize]
-                    .take()
-                    .filter(is_terminal_supervisor);
                 self.epoch = Some(epoch);
                 self.epoch_pending = true;
                 self.slots.fill(None);
                 self.slots[Slot::Connection as usize] = connection;
-                self.slots[Slot::Supervisor as usize] = terminal_supervisor;
             }
             SessionInput::Diagnostic(message) => {
                 if self.diagnostics.len() == PENDING_CAPACITY {
@@ -127,18 +129,6 @@ impl PendingInputs {
     }
 }
 
-fn is_terminal_supervisor(input: &SessionInput) -> bool {
-    matches!(
-        input,
-        SessionInput::Client(AttachmentEvent::SupervisorChanged(supervisor))
-            if matches!(
-                supervisor.lifecycle,
-                phoxal_client::supervisor::execution::Lifecycle::Stopped
-                    | phoxal_client::supervisor::execution::Lifecycle::Failed
-            )
-    )
-}
-
 fn slot_for(input: &SessionInput) -> Option<Slot> {
     match input {
         SessionInput::Client(AttachmentEvent::ConnectionChanged(_)) => Some(Slot::Connection),
@@ -150,10 +140,10 @@ fn slot_for(input: &SessionInput) -> Option<Slot> {
         SessionInput::Client(AttachmentEvent::RuntimesChanged(_)) => Some(Slot::RuntimesChanged),
         SessionInput::Logs(_) => Some(Slot::LogsReply),
         SessionInput::Runtimes(_) => Some(Slot::RuntimesReply),
-        SessionInput::StopProjectAccepted
-        | SessionInput::StopProjectRejected(_)
-        | SessionInput::StopProjectFailed(_) => Some(Slot::StopProjectCompletion),
-        SessionInput::OwnedSupervisorStopped | SessionInput::OwnedSupervisorFailed => {
+        SessionInput::SessionStopped | SessionInput::StopSessionFailed(_) => {
+            Some(Slot::StopSessionCompletion)
+        }
+        SessionInput::OwnedSupervisorStopped | SessionInput::OwnedSupervisorFailed(_) => {
             Some(Slot::OwnedSupervisorExit)
         }
         SessionInput::Client(AttachmentEvent::EpochChanged(_))
@@ -191,7 +181,6 @@ mod tests {
         SupervisorObservation,
     };
     use phoxal_client::supervisor::execution::Lifecycle;
-    use phoxal_runtime_contract::clock::Clock;
     use phoxal_runtime_contract::identity::ExecutionId;
     use phoxal_runtime_contract::identity::RobotId;
 
@@ -333,8 +322,11 @@ mod tests {
         assert!(matches!(drained.last(), Some(SessionInput::Terminate)));
     }
 
+    /// A burst of diagnostics must never crowd out the one projection the
+    /// operator is actually watching: the latest snapshot always survives,
+    /// whatever it says.
     #[test]
-    fn terminal_supervisor_observation_survives_diagnostic_saturation() {
+    fn the_latest_supervisor_observation_survives_diagnostic_saturation() {
         let mut pending = PendingInputs::default();
         for index in 0..(PENDING_CAPACITY * 2) {
             pending.push(SessionInput::Diagnostic(index.to_string()));
@@ -344,17 +336,15 @@ mod tests {
                 revision: 1,
                 execution: ExecutionId::mint(),
                 robot: RobotId::new("rover").expect("fixture robot id"),
-                clock: Clock::Real,
                 project: "project".into(),
-                lifecycle: Lifecycle::Stopped,
+                lifecycle: Lifecycle::Degraded,
                 startup: Vec::new(),
-                failure: None,
             }),
         )));
         assert!(pending.drain().iter().any(|input| matches!(
             input,
             SessionInput::Client(AttachmentEvent::SupervisorChanged(supervisor))
-                if supervisor.lifecycle == Lifecycle::Stopped
+                if supervisor.lifecycle == Lifecycle::Degraded
         )));
     }
 
@@ -364,11 +354,11 @@ mod tests {
         for index in 0..(PENDING_CAPACITY * 2) {
             pending.push(SessionInput::Diagnostic(index.to_string()));
         }
-        pending.push(SessionInput::StopProjectRejected("busy".to_string()));
+        pending.push(SessionInput::StopSessionFailed("busy".to_string()));
 
         assert!(pending.drain().iter().any(|input| matches!(
             input,
-            SessionInput::StopProjectRejected(reason) if reason == "busy"
+            SessionInput::StopSessionFailed(reason) if reason == "busy"
         )));
     }
 

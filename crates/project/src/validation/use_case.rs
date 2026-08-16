@@ -35,7 +35,7 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
             let bundle = crate::load::layout::validate_runtime_bundle(&release.bundle, expected)
                 .context("runtime archive failed verification")?;
             return Ok(ValidationReport {
-                robot_path: release.bundle.join(phoxal_bundle::RUNTIME_FILE),
+                robot_path: release.bundle.join(phoxal_bundle::MANIFEST_FILE),
                 robot: bundle.robot_id().to_string(),
                 train: String::new(),
                 platform_services: Vec::new(),

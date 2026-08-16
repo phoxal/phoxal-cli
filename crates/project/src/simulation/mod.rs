@@ -1,6 +1,14 @@
-pub(crate) mod participants;
+//! Webots simulation staging.
+//!
+//! Simulation is a *launch* decision, never a bundle fact. The bundle a
+//! simulation runs is byte-identical to the one `phoxal run` and `phoxal build`
+//! produce: one manifest, every driver block intact, every binary staged. What
+//! this module adds is the world Webots opens and the controller that drives
+//! it - a host tool on its own release train, materialized into the CLI's cache
+//! and copied into the disposable Webots project, never into the bundle.
+
+pub(crate) mod controller_tool;
 pub(crate) mod prepare;
-pub(crate) mod resolve;
 mod use_case;
 pub(crate) mod webots;
 pub(crate) mod world;
@@ -10,10 +18,8 @@ pub use use_case::{prepare_simulation, stage_webots};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::RuntimeTarget;
-use phoxal_runtime_contract::identity::ExecutionId;
-
 use crate::Reporter;
+use crate::RuntimeTarget;
 
 pub struct PrepareSimulationRequest {
     pub target: RuntimeTarget,
@@ -34,14 +40,23 @@ pub struct PreparedSimulation {
     pub project_root: PathBuf,
     pub world_source: PathBuf,
     pub webots_executable: PathBuf,
+    /// The materialized Webots controller this session will stage into its
+    /// disposable Webots project. It is a host tool, so it is resolved once
+    /// during preparation and never enters the bundle.
+    pub controller: PathBuf,
 }
 
+/// Everything Webots staging needs. There is no execution id and no participant
+/// id: the controller learns the execution from the router it dials, and it
+/// declares one liveliness token per component instance it simulates rather
+/// than being launched as a named participant. That is also why the world can
+/// be staged before the supervisor exists.
 pub struct StageWebotsRequest {
-    pub staged_root: PathBuf,
+    pub bundle_root: PathBuf,
     pub project_root: PathBuf,
     pub world_source: PathBuf,
     pub webots_executable: PathBuf,
-    pub execution: ExecutionId,
+    pub controller: PathBuf,
     pub endpoint: String,
 }
 
@@ -51,21 +66,4 @@ pub struct WebotsLaunch {
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub world: PathBuf,
-}
-
-pub(crate) use participants::{
-    ensure_exactly_one_simulator, official_simulator_participants, remap_simulator_participant_ids,
-    sim_checked_participants,
-};
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SimulateOptions {
-    pub(crate) world: String,
-    pub(crate) offline: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct ResolvedSimulation {
-    pub(crate) project_root: std::path::PathBuf,
-    pub(crate) world_path: std::path::PathBuf,
-    pub(crate) resolved: crate::source::resolver::BundlePlan,
 }

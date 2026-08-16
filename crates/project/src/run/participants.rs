@@ -4,9 +4,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::check::source::{SourceParticipant, SourceParticipantKind};
-use crate::source::resolver::official_binary_name;
 use anyhow::Result;
-use phoxal_cli_catalog::ArtifactKind;
 
 use crate::build::cargo::SourceArtifacts;
 
@@ -20,15 +18,17 @@ pub(crate) fn stage_complete_bin_store(
 ) -> Result<()> {
     let mut staged_names = BTreeSet::new();
     for participant in source_participants {
+        // A bundle names a binary by the id it is launched under: the brain is
+        // `brain`, a service is its service id, and a driver is its component
+        // *type*, because one driver binary serves every instance of a type.
         let binary_name = match participant.kind {
             SourceParticipantKind::Brain | SourceParticipantKind::UserService => {
-                participant.name.clone()
+                phoxal_cli_catalog::bundle_binary_name(&participant.name)
             }
-            SourceParticipantKind::ComponentDriver => official_binary_name(
-                ArtifactKind::ComponentDriver,
-                &participant.expected_artifact_id,
-            ),
-            SourceParticipantKind::OfficialService | SourceParticipantKind::Simulator => continue,
+            SourceParticipantKind::ComponentDriver => {
+                phoxal_cli_catalog::bundle_binary_name(&participant.expected_artifact_id)
+            }
+            SourceParticipantKind::OfficialService => continue,
         };
         if staged_names.insert(binary_name.clone()) {
             crate::stage::stage_named_binary(

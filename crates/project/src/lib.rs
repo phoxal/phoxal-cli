@@ -28,6 +28,7 @@ mod registry_package;
 mod resolve;
 mod run;
 mod runtime_target;
+mod runtimes;
 mod schema;
 mod simulation;
 pub mod source;
@@ -36,8 +37,12 @@ mod target;
 mod validation;
 
 pub use build::container::ContainerEngine;
+pub use build::overlay::{
+    FRAMEWORK_PATH_VAR, SIMULATOR_WEBOTS_PATH_VAR, framework_path, simulator_webots_path,
+};
 pub use build::shell::shell_quote;
 pub use build::{BuildBackend, BuildBundleRequest, BuiltBundle, build_bundle};
+pub use bundle::archive::{digest_sidecar, verify_against_digest_sidecar};
 pub use deployment::{BUNDLE_DIR, ReleaseLayout, SUPERVISOR_FILE};
 pub use paths::runtime::{
     ACTIVE_RUNTIME_ROOT, INSTALL_ROOT, INSTALLED_BINARY_ROOT, INSTALLED_CLIENT_BINARY,
@@ -46,8 +51,11 @@ pub use paths::runtime::{
 };
 pub use progress::{PreparationEvent, Reporter, SilentReporter};
 pub use progress_phase::{PhaseId, PhaseOutcome};
-pub use run::{DriverMode, DriverRequest, PrepareRunRequest, PreparedExecution, prepare_run};
+pub use run::{PrepareRunRequest, PreparedExecution, prepare_run};
 pub use runtime_target::{RuntimeAuthority, RuntimeTarget};
+pub use runtimes::{
+    BRAIN_ID, RobotRuntime, RuntimeRole, bundle_runtimes, robot_binaries, robot_runtimes,
+};
 pub use simulation::{
     PrepareSimulationRequest, PreparedSimulation, StageWebotsRequest, WebotsHost, WebotsLaunch,
     prepare_simulation, stage_webots,

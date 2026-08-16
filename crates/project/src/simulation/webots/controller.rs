@@ -7,24 +7,23 @@ use anyhow::{Context, Result};
 
 use crate::simulation::webots::root;
 
-/// Copy the verified simulator artifact from the runtime bundle into Webots'
-/// required controller directory.
+/// Copy the materialized controller into Webots' required controller
+/// directory.
 ///
 /// A copy, never a link: Webots patches the controller binary *in place* when
 /// it launches it. On macOS it runs `install_name_tool -add_rpath` to point the
 /// executable at `/Applications/Webots.app/` and then re-signs the Mach-O ad
-/// hoc. Through a symlink that edit lands on the file inside the published
-/// release, whose size and digest are recorded in `runtime.json` - so the very
-/// next `open_verified` of that release fails with a size mismatch on a binary
-/// nothing was supposed to touch. Webots may rewrite its own copy as much as it
-/// likes; the bundle stays byte-identical to the document that describes it.
-pub(crate) fn stage_bundled_controller(project_root: &Path, binary: &Path) -> Result<()> {
+/// hoc. Through a symlink that edit would land on the CLI's cached tool, which
+/// every later simulation and every other project shares. Webots may rewrite
+/// its own copy as much as it likes; the cache stays what `cargo install`
+/// produced.
+pub(crate) fn stage_controller(project_root: &Path, binary: &Path) -> Result<()> {
     anyhow::ensure!(
         binary.is_file(),
-        "simulator controller is missing at {}",
+        "the Webots controller is missing at {}",
         binary.display()
     );
-    let name = crate::simulation::prepare::WEBOTS_CONTROLLER_NAME;
+    let name = phoxal_cli_catalog::WEBOTS_CONTROLLER_PACKAGE;
     let staged_dir = root::controller_dir(project_root, name);
     std::fs::create_dir_all(&staged_dir)
         .with_context(|| format!("failed to create {}", staged_dir.display()))?;
@@ -106,14 +105,14 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     /// Webots rewrites the controller it launches, so what it launches must be
-    /// this staging directory's own file - never a link into the verified
-    /// bundle - and a link left by an older CLI must be replaced by one.
+    /// this staging directory's own file - never a link into the shared tool
+    /// cache - and a link left by an older CLI must be replaced by one.
     #[test]
     fn staging_produces_a_regular_executable_file_and_replaces_a_stale_link() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let bundled = directory.path().join("bin/controller");
         std::fs::create_dir_all(bundled.parent().context("the bin directory")?)?;
-        std::fs::write(&bundled, b"original bundle bytes")?;
+        std::fs::write(&bundled, b"original cached bytes")?;
         std::fs::set_permissions(&bundled, std::fs::Permissions::from_mode(0o755))?;
 
         let staged = directory.path().join("staged/controller");
@@ -125,13 +124,13 @@ mod tests {
         let metadata = std::fs::symlink_metadata(&staged)?;
         assert!(
             metadata.file_type().is_file(),
-            "the staged controller must be a real file, not a link into the bundle"
+            "the staged controller must be a real file, not a link into the cache"
         );
         assert!(metadata.permissions().mode() & 0o111 != 0, "not executable");
 
-        // What Webots does next must not reach the bundle.
+        // What Webots does next must not reach the cached tool.
         std::fs::write(&staged, b"patched by webots")?;
-        assert_eq!(std::fs::read(&bundled)?, b"original bundle bytes");
+        assert_eq!(std::fs::read(&bundled)?, b"original cached bytes");
         Ok(())
     }
 

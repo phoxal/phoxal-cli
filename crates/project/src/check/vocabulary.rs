@@ -17,7 +17,8 @@ pub enum ParticipantKind {
     Brain,
     Service,
     Driver,
-    Simulator,
+    /// A kind this CLI release does not know. It is kept rather than rejected
+    /// so a binary from a newer line still reports what it claims to be.
     Other(String),
 }
 
@@ -28,7 +29,6 @@ impl ParticipantKind {
             "brain" => Self::Brain,
             "service" => Self::Service,
             "driver" => Self::Driver,
-            "simulator" => Self::Simulator,
             other => Self::Other(other.to_string()),
         }
     }

@@ -24,13 +24,6 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     let status_text = model.overview.supervisor.as_ref().map_or_else(
         || Text::from("Waiting for attachment snapshot"),
         |snapshot| {
-            // The clock IS the mode: `clock: simulated` in the finalized
-            // manifest is what selects the simulator, and the supervisor passes it
-            // through untouched.
-            let mode = match snapshot.clock {
-                phoxal_runtime_contract::clock::Clock::Real => "real",
-                phoxal_runtime_contract::clock::Clock::Simulated => "simulated",
-            };
             let timeline = startup_timeline(
                 &snapshot.startup,
                 status.width.saturating_sub(2) as usize,
@@ -39,7 +32,6 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             );
             let mut lines = vec![
                 Line::from(format!("Project: {}", sanitize(&snapshot.project))),
-                Line::from(format!("Mode: {mode}")),
                 Line::from(format!(
                     "Connection: {}",
                     connection_label(model.overview.connection.as_ref())
@@ -129,7 +121,6 @@ fn startup_step_label(kind: StartupStepKind) -> &'static str {
     match kind {
         StartupStepKind::Bundle => "Bundle",
         StartupStepKind::Router => "Router",
-        StartupStepKind::Participants => "Participants",
     }
 }
 
@@ -146,7 +137,6 @@ fn startup_step_style(
     let role = match state {
         Some(StartupStepState::Done) => crate::Role::Success,
         Some(StartupStepState::Active) => crate::Role::Accent,
-        Some(StartupStepState::Failed) => crate::Role::Error,
         Some(StartupStepState::Pending) | None => crate::Role::Muted,
     };
     crate::theme::role::fg(theme, role)
@@ -156,11 +146,9 @@ fn startup_marker(state: StartupStepState, unicode: bool) -> &'static str {
     match (unicode, state) {
         (true, StartupStepState::Done) => "✓",
         (true, StartupStepState::Active) => "◐",
-        (true, StartupStepState::Failed) => "✗",
         (true, StartupStepState::Pending) => "○",
         (false, StartupStepState::Done) => "[x]",
         (false, StartupStepState::Active) => "[>]",
-        (false, StartupStepState::Failed) => "[!]",
         (false, StartupStepState::Pending) => "[ ]",
     }
 }
@@ -274,7 +262,9 @@ mod startup_timeline_tests {
     use super::*;
     use phoxal_client::supervisor::execution::Detail;
 
-    /// The supervisor's own sequence, including one failure and one pending step.
+    /// The supervisor's own sequence. It has no failed state: both steps
+    /// complete before the control plane a client attaches through exists, so
+    /// a step that failed has no supervisor left to publish it.
     fn timeline() -> Vec<StartupStep> {
         vec![
             StartupStep {
@@ -285,15 +275,9 @@ mod startup_timeline_tests {
             },
             StartupStep {
                 kind: StartupStepKind::Router,
-                state: StartupStepState::Failed,
+                state: StartupStepState::Pending,
                 detail: Some(Detail::new("bad\nrouter\u{1b}[31m")),
                 elapsed_ms: Some(2_000),
-            },
-            StartupStep {
-                kind: StartupStepKind::Participants,
-                state: StartupStepState::Pending,
-                detail: None,
-                elapsed_ms: None,
             },
         ]
     }
@@ -309,10 +293,9 @@ mod startup_timeline_tests {
     #[test]
     fn normal_height_renders_all_typed_states_details_and_elapsed_time() {
         let rendered = rendered(&timeline(), 100, 20, true);
-        assert_eq!(rendered.lines().count(), 3);
+        assert_eq!(rendered.lines().count(), 2);
         assert!(rendered.contains("✓ Bundle"), "{rendered}");
-        assert!(rendered.contains("✗ Router"), "{rendered}");
-        assert!(rendered.contains("○ Participants"), "{rendered}");
+        assert!(rendered.contains("○ Router"), "{rendered}");
         assert!(rendered.contains("2.0s"), "{rendered}");
         assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
     }
@@ -320,19 +303,16 @@ mod startup_timeline_tests {
     #[test]
     fn narrow_height_keeps_every_state_and_label_without_detail() {
         let rendered = rendered(&timeline(), 30, 20, true);
-        assert_eq!(rendered, "✓ Bundle\n✗ Router\n○ Participants");
+        assert_eq!(rendered, "✓ Bundle\n○ Router");
     }
 
     #[test]
     fn short_height_falls_back_to_sanitized_active_summary() {
         let mut startup = timeline();
-        startup[2].state = StartupStepState::Active;
-        startup[2].detail = Some(Detail::new("validate\nstep\u{1b}[2J"));
+        startup[1].state = StartupStepState::Active;
+        startup[1].detail = Some(Detail::new("validate\nstep\u{1b}[2J"));
         let rendered = rendered(&startup, 100, 10, true);
-        assert!(
-            rendered.starts_with("active: Participants · "),
-            "{rendered}"
-        );
+        assert!(rendered.starts_with("active: Router · "), "{rendered}");
         assert!(!rendered.contains('\n'), "{rendered:?}");
         assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
     }
@@ -342,7 +322,7 @@ mod startup_timeline_tests {
         // A bordered status panel loses one cell on every edge. The timeline
         // must decide from its drawable inner rect, not the outer layout rect.
         assert_eq!(rendered(&timeline(), 40, 10, true).lines().count(), 1);
-        assert_eq!(rendered(&timeline(), 40, 11, true).lines().count(), 3);
+        assert_eq!(rendered(&timeline(), 40, 11, true).lines().count(), 2);
         let narrow = rendered(&timeline(), 41, 20, true);
         assert_eq!(narrow, rendered(&timeline(), 40, 20, true));
         for line in narrow.lines() {
@@ -353,21 +333,27 @@ mod startup_timeline_tests {
         }
     }
 
+    /// Every rendered line fits inside the panel after the nine-cell prefix
+    /// the caller writes, and a detail too long for that budget is truncated
+    /// rather than allowed to wrap the panel.
     #[test]
     fn compact_and_detailed_timelines_fit_after_the_render_prefix() {
+        let mut long = timeline();
+        long[0].detail = Some(Detail::new(
+            "/very/long/path/to/a/staged/release/bundle/that/cannot/fit",
+        ));
         for width in [20, 42] {
-            let rendered = rendered(&timeline(), width, 20, true);
-            assert!(
-                rendered.contains('…'),
-                "expected truncation at width {width}: {rendered}"
-            );
-            for line in rendered.lines() {
+            for line in rendered(&long, width, 20, true).lines() {
                 assert!(
                     9 + console::measure_text_width(line) <= width,
                     "startup line exceeds inner width {width}: {line:?}"
                 );
             }
         }
+        assert!(
+            rendered(&long, 42, 20, true).contains('…'),
+            "a detail that cannot fit is truncated"
+        );
     }
 
     #[test]
@@ -376,12 +362,12 @@ mod startup_timeline_tests {
         for step in &mut startup {
             step.state = StartupStepState::Done;
         }
-        assert_eq!(rendered(&startup, 100, 10, true), "3 steps complete");
+        assert_eq!(rendered(&startup, 100, 10, true), "2 steps complete");
     }
 
     #[test]
     fn ascii_capability_uses_plain_state_markers_without_changing_labels() {
         let rendered = rendered(&timeline(), 30, 20, false);
-        assert_eq!(rendered, "[x] Bundle\n[!] Router\n[ ] Participants");
+        assert_eq!(rendered, "[x] Bundle\n[ ] Router");
     }
 }

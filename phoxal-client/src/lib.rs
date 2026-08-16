@@ -48,7 +48,6 @@ pub use phoxal_bus::{
 
 /// Framework value types exposed by connection facts and fenced commands.
 pub use phoxal_runtime_contract::{
-    clock::Clock,
     identity::{ExecutionId, ParticipantId, ProducerId, RobotId},
     version::FrameworkVersion,
 };

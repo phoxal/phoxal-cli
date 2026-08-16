@@ -1,154 +1,61 @@
 use anyhow::{Context, Result};
 use phoxal_bundle::RuntimeBundle;
-use phoxal_runtime_contract::metadata::ParticipantKind;
 
 use super::{PrepareSimulationRequest, PreparedSimulation, StageWebotsRequest, WebotsLaunch};
-use crate::run::PreparedExecution;
 
-pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedExecution> {
-    let options = super::SimulateOptions {
-        world: request.world,
-        offline: request.offline,
-    };
+/// Resolve everything a simulation needs that a plain run does not: the world
+/// to open, and the controller that drives it.
+///
+/// The bundle is deliberately not built here. A simulation runs the same
+/// release `phoxal run` does - the same staging pass, the same bytes - so it
+/// goes through the same launcher, and this only supplies the two host-side
+/// pieces that launcher knows nothing about.
+pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedSimulation> {
     crate::progress::ensure_active(request.reporter.as_ref())?;
-    let mut resolved = super::resolve::resolve_project(
-        &request.target.logical_root,
-        options,
-        request.reporter.as_ref(),
-    )?;
-    finalize_simulation_manifest(&mut resolved.resolved.source_manifest);
-    let mut canonical = serde_json::to_value(&resolved.resolved.compiled.robot)?;
-    canonical["clock"] = serde_json::Value::String("simulated".to_string());
-    resolved.resolved.compiled.robot = serde_json::from_value(canonical)
-        .context("failed to derive the simulated canonical robot")?;
-    // Refuse a cold/missing exact-train supervisor before compiling any
-    // simulation participant. Participant builds remain development-profile;
-    // the supervisor materializer is unconditionally release-profile.
-    let target_dir =
-        crate::build::cargo::cargo_target_dir(&resolved.project_root, request.offline)?;
-    let supervisor = crate::build::materialise::materialize_supervisor(
-        resolved.resolved.train.version(),
-        None,
-        request.offline,
-        None,
-        Some(target_dir),
-        request.reporter.as_ref(),
-    )?;
-    crate::progress::ensure_active(request.reporter.as_ref())?;
-    let source_participants =
-        super::participants::sim_source_participants(&resolved.project_root, &resolved.resolved)?;
-    let source_artifacts = {
-        // WEBOTS_HOME is a build-time dependency of the source controller;
-        // keep it out of metadata checking, staging, and spawned processes.
+    let project_root = crate::source::resolver::discover_robot_yaml(&request.target.logical_root)
+        .with_context(|| {
+            format!(
+                "failed to find robot.yaml from {}",
+                request.target.logical_root.display()
+            )
+        })?
+        .parent()
+        .context("robot.yaml did not have a parent directory")?
+        .to_path_buf();
+    // Resolve the world before anything is built: an unresolvable world name is
+    // the operator's typo, and it should not cost a full staging pass to learn.
+    let world_source = super::world::resolve_world(&project_root, &request.world)?;
+
+    // WEBOTS_HOME is a build-time input of the controller's own crate. It is
+    // scoped to this materialization and never reaches a spawned runtime.
+    let controller = {
         let _webots_home = request
             .webots
             .home
             .as_deref()
             .map(super::webots::controller::WebotsHomeEnvGuard::set);
-        crate::build::cargo::build_selected_source_artifacts(
-            &source_participants,
-            None,
-            crate::build::profile::Profile::Debug,
-            None,
-            request.offline,
-            request.reporter.as_ref(),
-        )?
+        super::controller_tool::materialize(request.offline, request.reporter.as_ref())?
     };
-    // A simulation bundle is `clock: simulated` with every driver block
-    // stripped; the supervisor never learns it is a simulation from anything else.
-    let candidate = crate::stage::begin_runtime_layout(&resolved.project_root, &resolved.resolved)
-        .context("failed to stage the simulation bundle")?;
-    crate::progress::run_phase(
-        request.reporter.as_ref(),
-        crate::progress_phase::PhaseId::new("check"),
-        "Checking simulation graph",
-        || {
-            super::resolve::build_checked_sim_launch_plan(
-                super::resolve::CheckedSimulationInput {
-                    project_root: &resolved.project_root,
-                    world: &resolved.world_path,
-                    resolved: &resolved.resolved,
-                    candidate_root: candidate.path(),
-                    source_participants: &source_participants,
-                    source_artifacts: &source_artifacts,
-                    offline: request.offline,
-                },
-                request.reporter.as_ref(),
-            )
-        },
-    )?;
-    crate::progress::ensure_active(request.reporter.as_ref())?;
-    crate::run::participants::stage_complete_bin_store(
-        candidate.path(),
-        &source_participants,
-        &source_artifacts,
-    )?;
-    crate::stage::write_runtime_document(candidate.path(), &resolved.resolved)?;
-    crate::progress::ensure_active(request.reporter.as_ref())?;
-    let release = crate::progress::run_phase(
-        request.reporter.as_ref(),
-        crate::progress_phase::PhaseId::new("publish"),
-        "Publishing the simulation deployment release",
-        || {
-            crate::stage::finalize_release(
-                candidate,
-                supervisor.path(),
-                &crate::check::participant_metadata::expected_target_for_host(),
-            )
-        },
-    )?;
-    Ok(PreparedExecution {
-        release,
-        simulation: Some(PreparedSimulation {
-            project_root: resolved.project_root,
-            world_source: resolved.world_path,
-            webots_executable: request.webots.executable,
-        }),
+
+    Ok(PreparedSimulation {
+        project_root,
+        world_source,
+        webots_executable: request.webots.executable,
+        controller,
     })
 }
 
-fn finalize_simulation_manifest(manifest: &mut phoxal_manifest::source::robot::v0::Manifest) {
-    manifest.clock = phoxal_manifest::source::robot::v0::Clock::Simulated;
-    for component in manifest.robot.components.values_mut() {
-        component.driver = None;
-    }
-}
-
+/// Stage the disposable Webots project: the controller, the meshes, the
+/// generated PROTOs, and the world that names them.
 pub fn stage_webots(request: StageWebotsRequest) -> Result<WebotsLaunch> {
-    let bundle = RuntimeBundle::open_verified(&request.staged_root)
-        .context("failed to open the simulated runtime bundle")?;
-    let simulators = bundle
-        .participants()
-        .iter()
-        .filter(|participant| {
-            bundle
-                .artifacts()
-                .get(participant.artifact())
-                .is_some_and(|artifact| artifact.contract().kind == ParticipantKind::Simulator)
-        })
-        .collect::<Vec<_>>();
-    anyhow::ensure!(
-        simulators.len() == 1,
-        "simulated runtime must contain exactly one simulator participant, found {}",
-        simulators.len()
-    );
-    let simulator = simulators[0];
-    let artifact = bundle
-        .artifacts()
-        .get(simulator.artifact())
-        .context("simulator participant references no artifact")?;
-
+    let bundle = RuntimeBundle::open(&request.bundle_root)
+        .context("failed to read the bundle manifest the simulation runs")?;
     super::webots::root::wipe_and_recreate(&request.project_root)?;
-    super::webots::controller::stage_bundled_controller(
-        &request.project_root,
-        &request.staged_root.join(artifact.path().as_str()),
-    )?;
+    super::webots::controller::stage_controller(&request.project_root, &request.controller)?;
     let staged_world = super::webots::staging::stage_simulation_for_robot(
         &request.project_root,
         &request.world_source,
         &bundle,
-        request.execution,
-        simulator.id().clone(),
         &request.endpoint,
     )?;
     Ok(WebotsLaunch {
@@ -176,60 +83,6 @@ fn webots_launch_args(staged_world_path: &std::path::Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn simulation_finalization_changes_only_clock_and_driver_blocks() -> Result<()> {
-        let mut manifest = crate::source::resolver::parse_robot_from_string(
-            r#"schema: phoxal/robot/v0
-robot:
-  id: testbot
-  motion_limits:
-    max_linear_speed_mps: 0.6
-    max_angular_speed_radps: 2.0
-  kinematic:
-    kind: omnidirectional
-    actuators: [left_drive.motor]
-    encoders: []
-  components:
-    left_drive:
-      component: ddsm115
-      mount_link: base
-      driver:
-        connection:
-          type: serial
-          port: /dev/ttyUSB0
-          baud: 115200
-"#,
-        )?;
-        let authored = manifest.clone();
-        let authored_component = authored
-            .robot
-            .components
-            .get("left_drive")
-            .expect("fixture declares left_drive");
-        assert!(authored_component.driver.is_some());
-        let mut expected = authored.clone();
-        expected.clock = phoxal_manifest::source::robot::v0::Clock::Simulated;
-        expected
-            .robot
-            .components
-            .get_mut("left_drive")
-            .expect("fixture declares left_drive")
-            .driver = None;
-
-        finalize_simulation_manifest(&mut manifest);
-
-        assert_eq!(manifest, expected);
-        let finalized_component = manifest
-            .robot
-            .components
-            .get("left_drive")
-            .expect("finalization preserves left_drive");
-        assert_eq!(finalized_component.component, "ddsm115");
-        assert_eq!(finalized_component.mount_link, "base");
-        assert_eq!(manifest.robot.kinematic, authored.robot.kinematic);
-        Ok(())
-    }
 
     #[test]
     fn webots_host_arguments_are_stable_and_contain_no_runtime_identity() {

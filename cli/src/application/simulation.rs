@@ -1,45 +1,31 @@
 //! The client-owned simulation session.
 //!
-//! `phoxal simulation webots run <PROJECT> <WORLD>` owns the whole session.
-//! The supervisor has no source-level simulation concept: this command compiles a
-//! simulated-clock bundle and stages Webots, while `phoxal-supervisor` validates and
-//! executes the exact participant set already persisted in `runtime.json`.
+//! `phoxal simulation webots run <PROJECT> <WORLD>` runs the same bundle
+//! `phoxal run` does - byte for byte, from the same staging pass - and differs
+//! in exactly two launch decisions: it starts no component driver, and it
+//! passes `--simulation` to every runtime it does start. Webots supplies the
+//! components instead, through a controller that declares one liveliness token
+//! per component instance it simulates.
 //!
 //! What is genuinely different is lifetime coordination: this client owns the
-//! Webots application, so two processes have to end together in either order,
-//! and there is no detach - leaving would strand a simulator with no operator.
+//! Webots application as well as the session, so two things have to end
+//! together in either order, and there is no detach - leaving would strand a
+//! simulator with no operator.
 
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
-use phoxal_client::supervisor::execution::{CommandOutcome, Lifecycle, Snapshot};
-use tokio::sync::oneshot;
+use anyhow::{Context, Result};
 
-use super::lifecycle::Target;
-use super::session::{self, Detachable, OwnedSupervisorExit};
+use super::launcher::OwnedSession;
+use super::lifecycle::{RunOptions, Target, await_session_ready, launch_execution};
+use super::session::{self, Detachable, SessionOwnership};
 use super::startup::Startup;
 use super::summary::SessionSummary;
-use super::supervisor::{self, LaunchedSupervisor};
 use super::webots::Webots;
-use crate::attach::Session;
 use crate::cli::context::AppContext;
 use crate::cli::exit::ReportedExit;
 use crate::cli::output::welcome::{Mode, StepId};
-use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
-
-/// How long the supervisor is given to answer connect after Webots is up.
-const HANDSHAKE_BUDGET: Duration = Duration::from_secs(2 * 60);
-
-/// How long the supervisor is given to reach a terminal state once it has been
-/// asked to stop because Webots went first. It is bounded rather than
-/// open-ended: the world clock is already gone, so waiting forever would only
-/// hold the operator's terminal hostage to a wedged supervisor.
-const TERMINAL_BUDGET: Duration = Duration::from_secs(30);
-
-/// How long a simulation-owned supervisor process group gets to disappear
-/// after the graceful bound before cleanup reports a failure.
-const KILL_BUDGET: Duration = Duration::from_secs(5);
 
 /// How often the Webots process is polled while the session runs.
 const WEBOTS_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -56,56 +42,37 @@ pub(crate) async fn run_command(
         Err(error) => return Err(startup.failed(error)),
     };
     // The dashboard takes the terminal only from here: both processes are up
-    // and the graph is ready.
+    // and the runtimes are present.
     startup.ready();
     drive_simulation(app, &target, started).await
 }
 
 /// Everything one simulation session owns for its whole life.
-///
-/// The build lock is in here on purpose: a simulation holds it until the
-/// session ends, because the bundle it is executing is the one this command
-/// just published.
 struct StartedSimulation {
-    session: Session,
-    launched: LaunchedSupervisor,
+    launched: super::lifecycle::LaunchedSession,
     webots: Webots,
-    lock: ProjectLock,
 }
 
-/// Prepare, launch, attach, stage, and start both halves of a simulation.
+/// Launch the session, stage Webots against the bundle it published, and only
+/// then wait for the runtimes.
+///
+/// The wait has to come last. A simulated runtime follows the world clock the
+/// controller publishes, and the controller is what makes every component
+/// instance present, so nothing appears until Webots is open and stepping.
+/// Staging needs the published bundle and Webots needs the endpoint, both of
+/// which exist the moment the launch returns.
 async fn start_simulation(
     app: &AppContext,
     target: &Target,
     world: String,
     startup: &Startup,
 ) -> Result<StartedSimulation> {
-    phoxal_cli_project::source::train::resolve_locked_train(&target.project, app.offline)
-        .with_context(|| {
-            format!(
-                "simulation requires a buildable source project; {} is not a source project",
-                target.project.display()
-            )
-        })?;
-
-    let lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
-        &target.project,
-        ProjectOperation::Run,
-    ))
-    .context("failed to acquire the project build lock for simulation")?;
-    // A simulation run finalizes and publishes this project's bundle, so it is
-    // refused while a supervisor is executing out of it.
-    crate::lock::refuse_while_execution_is_live(&target.project)?;
-
-    // The client finalizes the simulated bundle: `clock: simulated`, driver
-    // blocks stripped, simulators staged. The supervisor is handed the result and
-    // told nothing about it.
     let webots_host = webots_host()?;
     let runtime_target =
         phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;
     let reporter = startup.reporter();
     let offline = app.offline;
-    let prepared = tokio::task::spawn_blocking(move || {
+    let simulation = tokio::task::spawn_blocking(move || {
         phoxal_cli_project::prepare_simulation(phoxal_cli_project::PrepareSimulationRequest {
             target: runtime_target,
             world,
@@ -115,96 +82,76 @@ async fn start_simulation(
         })
     })
     .await??;
-    let simulation = prepared
-        .simulation
-        .as_ref()
-        .context("simulation preparation returned no simulation data")?;
-    startup.complete(
-        StepId::PrepareRuntime,
-        super::lifecycle::staged_detail(&prepared.release),
-    );
 
-    // The supervisor owns execution identity. Start and attach first, then derive
-    // the Webots controller launch from that exact execution and the verified
-    // runtime bundle. The supervisor may wait for the external simulator's
-    // readiness while its supervisor API remains attachable.
-    startup.step(StepId::Supervisor, "waiting for the supervisor");
-    let paths = phoxal_cli_host::paths::RuntimePaths::for_root(&target.project);
-    let launched = supervisor::spawn(&prepared.release, &paths.supervisor_log())?;
-    let (session, launched) = await_simulated_attachment(target, launched).await?;
-    startup.attached(&session);
+    // Drivers are never started here, and the flags that would ask for them do
+    // not exist on this command: Webots simulates the components instead.
+    let launched = launch_execution(
+        app,
+        target,
+        &RunOptions {
+            drivers_off: false,
+            drivers_subset: Vec::new(),
+        },
+        startup,
+        true,
+    )
+    .await?;
 
     startup.step(StepId::Webots, "staging the world");
     let stage_request = phoxal_cli_project::StageWebotsRequest {
-        staged_root: prepared.release.bundle.clone(),
+        bundle_root: launched.bundle().to_path_buf(),
         project_root: simulation.project_root.clone(),
         world_source: simulation.world_source.clone(),
         webots_executable: simulation.webots_executable.clone(),
-        execution: session.connected().execution,
+        controller: simulation.controller.clone(),
         endpoint: target.endpoint.clone(),
     };
-    let launch =
-        match tokio::task::spawn_blocking(move || phoxal_cli_project::stage_webots(stage_request))
-            .await
-        {
-            Ok(launch) => launch,
-            Err(error) => {
-                let cleanup = stop_failed_simulation_start(session, launched).await;
-                return failed_start(
-                    anyhow::Error::new(error).context("the Webots staging worker failed"),
-                    cleanup,
-                );
-            }
-        };
-    let launch = match launch {
-        Ok(launch) => launch,
-        Err(error) => {
-            let cleanup = stop_failed_simulation_start(session, launched).await;
-            return failed_start(
-                error.context("failed to stage Webots after attaching to the execution"),
-                cleanup,
-            );
-        }
-    };
-    let world_name = launch
-        .world
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("world")
-        .to_string();
-    startup.detail(StepId::Webots, format!("world {world_name}"));
-    let webots = match Webots::launch(&launch, &paths.webots_log()) {
-        Ok(webots) => webots,
-        Err(error) => {
-            let cleanup = stop_failed_simulation_start(session, launched).await;
-            return failed_start(error, cleanup);
-        }
-    };
-    startup.complete(StepId::Webots, format!("world {world_name} · launched"));
-
-    // A simulated graph is only ready once Webots has opened the world, so the
-    // handshake budget - not a shorter readiness one - is what bounds it.
-    if let Err(error) = startup.await_graph(&session, HANDSHAKE_BUDGET).await {
-        let cleanup = stop_failed_simulation_start(session, launched).await;
-        let stopped = webots.stop().await;
-        return failed_start(error, finish_simulation(cleanup, stopped));
+    let started = async {
+        let launch =
+            tokio::task::spawn_blocking(move || phoxal_cli_project::stage_webots(stage_request))
+                .await
+                .context("the Webots staging worker failed")??;
+        let world_name = launch
+            .world
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("world")
+            .to_string();
+        startup.detail(StepId::Webots, format!("world {world_name}"));
+        let webots = Webots::launch(&launch, &target.paths().webots_log())?;
+        startup.complete(StepId::Webots, format!("world {world_name} · launched"));
+        Ok::<_, anyhow::Error>(webots)
     }
+    .await;
+    let webots = match started {
+        Ok(webots) => webots,
+        Err(error) => return Err(end_launched(launched, error).await),
+    };
 
-    Ok(StartedSimulation {
-        session,
-        launched,
-        webots,
-        lock,
-    })
+    match await_session_ready(launched, startup).await {
+        Ok(launched) => Ok(StartedSimulation { launched, webots }),
+        Err(error) => {
+            let stopped = webots.stop().await;
+            Err(match stopped {
+                Ok(()) => error,
+                Err(stopped) => error.context(format!("closing Webots also failed: {stopped:#}")),
+            })
+        }
+    }
 }
 
-/// A start that failed is a failure whatever its cleanup managed to do; this is
-/// [`finish_simulation`]'s failed half, in a form the caller can return.
-fn failed_start<T>(primary: anyhow::Error, cleanup: Result<()>) -> Result<T> {
-    Err(match cleanup {
-        Ok(()) => primary,
-        Err(cleanup) => primary.context(format!("simulation cleanup also failed: {cleanup:#}")),
-    })
+/// End a session that was launched but never became a simulation.
+async fn end_launched(
+    launched: super::lifecycle::LaunchedSession,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let cleanup = launched.owned().stop().await;
+    launched.children.abort();
+    launched.session.shutdown().await;
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup) => error.context(format!("session cleanup also failed: {cleanup:#}")),
+    }
 }
 
 async fn drive_simulation(
@@ -212,134 +159,57 @@ async fn drive_simulation(
     target: &Target,
     started: StartedSimulation,
 ) -> Result<()> {
-    let StartedSimulation {
-        session,
-        launched,
-        webots,
-        lock: _lock,
-    } = started;
+    let StartedSimulation { launched, webots } = started;
+    let owned = launched.owned();
 
-    // Either exit order: if Webots goes first, the execution it was the world
-    // clock for has nothing left to run on, so the supervisor is asked to stop and
-    // the session ends on its terminal snapshot exactly as a confirmed stop
-    // would.
-    let supervisor = session.ports.supervisor.clone();
-    let mut snapshots = session.snapshots();
+    // Either exit order. If Webots goes first, the runtimes it was the world
+    // clock for have nothing left to step on, so the session is ended and the
+    // dashboard leaves exactly as a confirmed stop would end it.
     let webots = std::sync::Arc::new(tokio::sync::Mutex::new(webots));
-    let watched = std::sync::Arc::clone(&webots);
     let webots_exit = std::sync::Arc::new(std::sync::Mutex::new(Option::<String>::None));
-    let observed = std::sync::Arc::clone(&webots_exit);
-    let watcher = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(WEBOTS_POLL_INTERVAL).await;
-            let exited = { watched.lock().await.exited() };
-            match exited {
-                Ok(Some(status)) => {
-                    let status = status.to_string();
-                    tracing::warn!("Webots exited with {status}; stopping the execution");
-                    *observed
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status.clone());
-                    if plan(&SessionEnd::WebotsExited { status }).stop_supervisor {
-                        match supervisor.stop().await {
-                            Ok(CommandOutcome::Accepted { .. }) => {
-                                if await_terminal(&mut snapshots, TERMINAL_BUDGET)
-                                    .await
-                                    .is_err()
-                                {
-                                    tracing::warn!(
-                                        "the execution did not reach a terminal state within {}s \
-                                         of losing its world clock",
-                                        TERMINAL_BUDGET.as_secs()
-                                    );
-                                }
-                            }
-                            Ok(CommandOutcome::Rejected { reason }) => {
-                                tracing::warn!(?reason, "the supervisor rejected the Webots stop");
-                            }
-                            Err(error) => {
-                                tracing::warn!(%error, "the Webots stop request failed");
-                            }
-                        }
-                    }
-                    return;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!("failed to poll the Webots process: {error:#}");
-                    return;
-                }
-            }
-        }
-    });
-
-    let (supervisor_exit_tx, supervisor_exit_rx) = oneshot::channel();
-    let (stop_supervisor_watch, supervisor_watch_stop) = oneshot::channel();
-    let launched = std::sync::Arc::new(tokio::sync::Mutex::new(launched));
-    let supervisor_watcher = tokio::spawn(watch_owned_supervisor(
-        std::sync::Arc::clone(&launched),
-        supervisor_exit_tx,
-        supervisor_watch_stop,
+    let watcher = tokio::spawn(watch_webots(
+        std::sync::Arc::clone(&webots),
+        std::sync::Arc::clone(&webots_exit),
+        owned.clone(),
     ));
-    let outcome = session::drive_with_owned_supervisor_exit(
+
+    let outcome = session::drive(
         app,
         &target.project,
-        session,
+        launched.session,
         Detachable::No,
-        supervisor_exit_rx,
+        SessionOwnership {
+            owned: Some(owned.clone()),
+            supervisor_exit: None,
+        },
     )
     .await;
-    let _ = stop_supervisor_watch.send(());
-    let supervisor_watch = supervisor_watcher
-        .await
-        .context("the locally owned supervisor watcher failed");
-    let mut launched = std::sync::Arc::into_inner(launched)
-        .ok_or_else(|| anyhow::anyhow!("the locally owned supervisor still has a watcher"))?
-        .into_inner();
-    let owned_exit = match supervisor_watch {
-        Ok(()) => await_owned_supervisor_exit(&mut launched, TERMINAL_BUDGET).await,
-        Err(error) => Err(error),
-    };
-    let supervisor_cleanup = launched.terminate_owned(TERMINAL_BUDGET, KILL_BUDGET).await;
-    // Aborting only *requests* cancellation: until the task has actually been
-    // joined it may still be holding its clones of the two Arcs, and
-    // reclaiming them would then yield `None`. Awaiting the aborted handle is
-    // what turns the reclaim below into a real invariant - and it is what
-    // keeps the graceful Webots stop on the path at all.
+    launched.children.abort();
+    let _ = launched.children.await;
     watcher.abort();
     let _ = watcher.await;
+
+    // Whichever way the session ended, both halves are this client's and both
+    // go down: the session first, then Webots, so the controller is not left
+    // publishing a world clock into an execution that has gone.
+    let stopped_session = owned.stop().await;
     let webots = std::sync::Arc::into_inner(webots)
-        .ok_or_else(|| anyhow::anyhow!("Webots process handle still has an owner after shutdown"))?
+        .context("the Webots process handle still has an owner after shutdown")?
         .into_inner();
+    let stopped_webots = webots.stop().await;
     let webots_exit = std::sync::Arc::into_inner(webots_exit)
-        .ok_or_else(|| {
-            anyhow::anyhow!("Webots exit observation still has an owner after shutdown")
-        })?
+        .context("the Webots exit observation still has an owner after shutdown")?
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let owned_exit = finish_owned_supervisor_exit(owned_exit, supervisor_cleanup);
-    let end = observe_session_end(webots_exit, outcome.as_ref(), owned_exit.as_ref());
-    let report = plan(&end).report;
-
-    // Whichever way the session ended, Webots is this client's and goes last:
-    // gracefully, with the explicit kill only if it will not go.
-    let primary = match owned_exit {
-        Ok(exit) => match exit {
-            OwnedSupervisorExit::Stopped => report_clean_owned_exit(outcome),
-            OwnedSupervisorExit::Failed { reason } => Err(anyhow::anyhow!(reason)),
-        },
-        Err(error) => Err(error),
-    };
-    let result = finish_simulation(primary, webots.stop().await);
+    let end = SessionEnd::observe(webots_exit, outcome.as_ref());
+    let result = finish(outcome.map(|_| ()), stopped_session, stopped_webots);
 
     // One account of the ending, printed only now: the dashboard has released
     // the terminal, and both processes are already down.
-    let paths = phoxal_cli_host::paths::RuntimePaths::for_root(&target.project);
+    let paths = target.paths();
     let ending = match &result {
-        Ok(()) => report.unwrap_or_else(|| {
-            "you ended it; the execution was stopped and Webots was closed".to_string()
-        }),
+        Ok(()) => report(&end),
         Err(error) => format!("{error:#}"),
     };
     SessionSummary::new(ending, vec![paths.supervisor_log(), paths.webots_log()])
@@ -347,189 +217,50 @@ async fn drive_simulation(
     result.map_err(|_| ReportedExit(1).into())
 }
 
-fn observe_session_end(
-    webots_exit: Option<String>,
-    outcome: Result<&phoxal_cli_ui::AttachmentOutcome, &anyhow::Error>,
-    owned_exit: Result<&OwnedSupervisorExit, &anyhow::Error>,
-) -> SessionEnd {
-    if webots_exit.is_none()
-        && matches!(owned_exit, Ok(OwnedSupervisorExit::Stopped))
-        && matches!(
-            outcome,
-            Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason: None })
-        )
-    {
-        return SessionEnd::Operator;
-    }
-    SessionEnd::observe(webots_exit, outcome)
-}
-
-/// Classify how the attachment ended when the owned supervisor exited cleanly.
-///
-/// An untyped `ExecutionFailed` after a clean supervisor exit is the lost
-/// identity token of a supervisor that already stopped on request - the
-/// expected consequence of the stop, not a failure - so it is not one here.
-fn report_clean_owned_exit(outcome: Result<phoxal_cli_ui::AttachmentOutcome>) -> Result<()> {
-    match outcome? {
-        phoxal_cli_ui::AttachmentOutcome::ExecutionFailed {
-            reason: Some(failure),
-        } => bail!("{:?}: {}", failure.reason, failure.detail.as_str()),
-        _ => Ok(()),
-    }
-}
-
-fn finish_owned_supervisor_exit(
-    observed: Result<OwnedSupervisorExit>,
-    cleanup: Result<()>,
-) -> Result<OwnedSupervisorExit> {
-    match (observed, cleanup) {
-        (Ok(exit), Ok(())) => Ok(exit),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error.context("owned supervisor cleanup failed")),
-        (Err(error), Err(cleanup)) => {
-            Err(error.context(format!("owned supervisor cleanup also failed: {cleanup:#}")))
-        }
-    }
-}
-
-fn finish_simulation(primary: Result<()>, cleanup: Result<()>) -> Result<()> {
-    match (primary, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error.context("simulation cleanup failed")),
-        (Err(error), Err(cleanup)) => {
-            Err(error.context(format!("simulation cleanup also failed: {cleanup:#}")))
-        }
-    }
-}
-
-async fn stop_failed_simulation_start(
-    session: Session,
-    mut launched: LaunchedSupervisor,
-) -> Result<()> {
-    let accepted = match session.ports.supervisor.stop().await {
-        Ok(CommandOutcome::Accepted { .. }) => true,
-        Ok(CommandOutcome::Rejected { reason }) => {
-            tracing::warn!(?reason, "the supervisor rejected failed-simulation cleanup");
-            false
-        }
-        Err(error) => {
-            tracing::warn!(%error, "failed-simulation cleanup request failed");
-            false
-        }
-    };
-    if tokio::time::timeout(TERMINAL_BUDGET, session.shutdown())
-        .await
-        .is_err()
-    {
-        tracing::warn!("failed-simulation attachment cleanup timed out");
-    }
-    if accepted
-        && let Err(error) = await_owned_supervisor_exit(&mut launched, TERMINAL_BUDGET).await
-    {
-        tracing::warn!(%error, "failed-simulation supervisor cleanup timed out");
-    }
-    launched.terminate_owned(TERMINAL_BUDGET, KILL_BUDGET).await
-}
-
-async fn watch_owned_supervisor(
-    launched: std::sync::Arc<tokio::sync::Mutex<LaunchedSupervisor>>,
-    exit: oneshot::Sender<OwnedSupervisorExit>,
-    mut stop: oneshot::Receiver<()>,
+/// End the session as soon as Webots goes, and remember that it did.
+async fn watch_webots(
+    webots: std::sync::Arc<tokio::sync::Mutex<Webots>>,
+    observed: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    owned: OwnedSession,
 ) {
     loop {
-        tokio::select! {
-            _ = &mut stop => return,
-            _ = tokio::time::sleep(WEBOTS_POLL_INTERVAL) => {
-                let mut launched = launched.lock().await;
-                match launched.exited() {
-                    Ok(Some(status)) => {
-                        let _ = exit.send(classify_owned_supervisor_exit(
-                            status.success(),
-                            status.to_string(),
-                            launched.diagnostics(),
-                        ));
-                        return;
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let _ = exit.send(OwnedSupervisorExit::Failed {
-                            reason: format!("failed to inspect phoxal-supervisor: {error}"),
-                        });
-                        return;
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn await_owned_supervisor_exit(
-    launched: &mut LaunchedSupervisor,
-    budget: Duration,
-) -> Result<OwnedSupervisorExit> {
-    let deadline = tokio::time::Instant::now() + budget;
-    loop {
-        if let Some(status) = launched.exited()? {
-            return Ok(classify_owned_supervisor_exit(
-                status.success(),
-                status.to_string(),
-                launched.diagnostics(),
-            ));
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "phoxal-supervisor did not exit within {}s of the simulation session ending",
-                budget.as_secs()
-            );
-        }
         tokio::time::sleep(WEBOTS_POLL_INTERVAL).await;
-    }
-}
-
-fn classify_owned_supervisor_exit(
-    success: bool,
-    status: String,
-    diagnostics: String,
-) -> OwnedSupervisorExit {
-    if success {
-        return OwnedSupervisorExit::Stopped;
-    }
-    let diagnostics = diagnostics.trim();
-    let reason = if diagnostics.is_empty() {
-        format!("phoxal-supervisor exited with {status}")
-    } else {
-        format!("phoxal-supervisor exited with {status}: {diagnostics}")
-    };
-    OwnedSupervisorExit::Failed { reason }
-}
-
-/// Wait for a terminal snapshot, for the feed to end, or for `budget`.
-///
-/// The feed ending is terminal too: a supervisor whose snapshots stopped arriving
-/// is a supervisor that is no longer executing anything.
-async fn await_terminal(
-    snapshots: &mut tokio::sync::watch::Receiver<Option<Snapshot>>,
-    budget: Duration,
-) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + budget;
-    loop {
-        if let Some(snapshot) = snapshots.borrow_and_update().clone()
-            && matches!(snapshot.lifecycle, Lifecycle::Stopped | Lifecycle::Failed)
-        {
-            return Ok(());
-        }
-        tokio::select! {
-            changed = snapshots.changed() => {
-                if changed.is_err() {
-                    return Ok(());
+        let exited = { webots.lock().await.exited() };
+        match exited {
+            Ok(Some(status)) => {
+                let status = status.to_string();
+                tracing::warn!("Webots exited with {status}; ending the session");
+                *observed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
+                if let Err(error) = owned.stop().await {
+                    tracing::warn!(%error, "ending the session after Webots exited failed");
                 }
+                return;
             }
-            _ = tokio::time::sleep_until(deadline) => {
-                bail!("the execution did not reach a terminal state within the bound")
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!("failed to poll the Webots process: {error:#}");
+                return;
             }
         }
     }
+}
+
+/// Fold the session's outcome and both cleanups into one result.
+fn finish(outcome: Result<()>, session: Result<()>, webots: Result<()>) -> Result<()> {
+    let mut result = outcome;
+    for (label, cleanup) in [("session", session), ("Webots", webots)] {
+        result = match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error.context(format!("{label} cleanup failed"))),
+            (Err(error), Err(cleanup)) => {
+                Err(error.context(format!("{label} cleanup also failed: {cleanup:#}")))
+            }
+        };
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -539,24 +270,24 @@ async fn await_terminal(
 /// What ended a simulation session, in the order it actually happened.
 ///
 /// There is no detach here, so every path ends the whole session; what differs
-/// is which of the two processes went first and therefore what is left to do.
+/// is which of the two halves went first and therefore what the operator is
+/// told.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionEnd {
-    /// The operator ended it: `q`, or a confirmed Ctrl+C stop, or an external
-    /// SIGTERM/SIGHUP - the UI turns all three into the same stop for a
-    /// non-detachable session, and it has already waited for the execution's
-    /// terminal snapshot by the time the session returns.
+    /// The operator ended it: `q`, `S`, a confirmed Ctrl+C, or an external
+    /// SIGTERM/SIGHUP - the UI turns all of them into the same stop for a
+    /// non-detachable session.
     Operator,
-    /// Webots exited before the execution did.
+    /// Webots exited before the session did.
     WebotsExited { status: String },
-    /// The execution ended first: a terminal snapshot, a failure, or a supervisor
-    /// that vanished with its identity token.
-    SupervisorEnded { failure: Option<String> },
+    /// The execution went away first: the supervisor this client launched
+    /// exited, or its identity token disappeared.
+    ExecutionEnded { reason: Option<String> },
 }
 
 impl SessionEnd {
     /// Classify the end from the two facts the session leaves behind: whether
-    /// the watcher saw Webots exit, and how the attachment itself ended.
+    /// the watcher saw Webots exit, and how the dashboard itself ended.
     pub(crate) fn observe(
         webots_exit: Option<String>,
         outcome: Result<&phoxal_cli_ui::AttachmentOutcome, &anyhow::Error>,
@@ -565,54 +296,34 @@ impl SessionEnd {
             return Self::WebotsExited { status };
         }
         match outcome {
-            Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason }) => {
-                Self::SupervisorEnded {
-                    failure: reason.as_ref().map(|failure| {
-                        format!("{:?}: {}", failure.reason, failure.detail.as_str())
-                    }),
+            Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionEnded { reason }) => {
+                Self::ExecutionEnded {
+                    reason: reason.clone(),
                 }
             }
             Ok(_) => Self::Operator,
-            Err(error) => Self::SupervisorEnded {
-                failure: Some(format!("{error:#}")),
+            Err(error) => Self::ExecutionEnded {
+                reason: Some(format!("{error:#}")),
             },
         }
     }
 }
 
-/// What a session end requires of this client.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Shutdown {
-    /// Ask the supervisor to stop and await its terminal state within the bound.
-    /// Only true when the supervisor is still the reachable half.
-    pub(crate) stop_supervisor: bool,
-    /// The unexpected termination to report. An operator-driven end is not
-    /// unexpected and reports nothing.
-    pub(crate) report: Option<String>,
-}
-
-/// The whole shutdown matrix, as one pure decision.
-pub(crate) fn plan(end: &SessionEnd) -> Shutdown {
+/// What an operator is told about a session that ended cleanly.
+pub(crate) fn report(end: &SessionEnd) -> String {
     match end {
-        SessionEnd::Operator => Shutdown {
-            stop_supervisor: false,
-            report: None,
-        },
-        SessionEnd::WebotsExited { status } => Shutdown {
-            stop_supervisor: true,
-            report: Some(format!(
-                "Webots exited with {status} before the execution did; the execution was stopped \
-                 because the world clock it depends on is gone"
-            )),
-        },
-        SessionEnd::SupervisorEnded { failure } => Shutdown {
-            stop_supervisor: false,
-            report: Some(match failure {
-                Some(failure) => {
-                    format!("the execution ended before Webots did ({failure}); stopping Webots")
-                }
-                None => "the execution ended before Webots did; stopping Webots".to_string(),
-            }),
+        SessionEnd::Operator => {
+            "you ended it; the runtimes were stopped and Webots was closed".to_string()
+        }
+        SessionEnd::WebotsExited { status } => format!(
+            "Webots exited with {status} before the session did; the runtimes were stopped \
+             because the world clock they follow is gone"
+        ),
+        SessionEnd::ExecutionEnded { reason } => match reason {
+            Some(reason) => {
+                format!("the execution ended before Webots did ({reason}); Webots was closed")
+            }
+            None => "the execution ended before Webots did; Webots was closed".to_string(),
         },
     }
 }
@@ -632,143 +343,32 @@ fn webots_host() -> Result<phoxal_cli_project::WebotsHost> {
     })
 }
 
-/// Wait for the supervisor while a simulated bundle's graph comes up.
-///
-/// A simulated bundle has a longer road to connect than a real one - Webots
-/// has to open the world before the world clock exists - so the budget is
-/// larger, but the rule is the same: the completed handshake is readiness, and
-/// an early child exit is reported with the supervisor's own diagnostics.
-async fn await_simulated_attachment(
-    target: &Target,
-    mut launched: LaunchedSupervisor,
-) -> Result<(Session, LaunchedSupervisor)> {
-    let deadline = tokio::time::Instant::now() + HANDSHAKE_BUDGET;
-    loop {
-        match launched.exited() {
-            Ok(Some(status)) => {
-                let error = anyhow::anyhow!(launched.early_exit_message(status));
-                return Err(terminate_after_attachment_failure(&mut launched, error).await);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return Err(terminate_after_attachment_failure(&mut launched, error).await);
-            }
-        }
-        if let Ok(session) =
-            Session::open(&target.endpoint, target.project.display().to_string()).await
-        {
-            return Ok((session, launched));
-        }
-        if tokio::time::Instant::now() >= deadline {
-            match launched.exited() {
-                Ok(Some(status)) => {
-                    let error = anyhow::anyhow!(launched.early_exit_message(status));
-                    return Err(terminate_after_attachment_failure(&mut launched, error).await);
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    return Err(terminate_after_attachment_failure(&mut launched, error).await);
-                }
-            }
-            let diagnostics = launched.diagnostics();
-            let diagnostics = diagnostics.trim();
-            let hint = if diagnostics.is_empty() {
-                String::new()
-            } else {
-                format!("; phoxal-supervisor reported: {diagnostics}")
-            };
-            let error = anyhow::anyhow!(
-                "timed out after {}s waiting for the simulated execution to answer at {}{hint}",
-                HANDSHAKE_BUDGET.as_secs(),
-                target.endpoint
-            );
-            return Err(terminate_after_attachment_failure(&mut launched, error).await);
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
-async fn terminate_after_attachment_failure(
-    launched: &mut LaunchedSupervisor,
-    error: anyhow::Error,
-) -> anyhow::Error {
-    match launched.terminate_owned(TERMINAL_BUDGET, KILL_BUDGET).await {
-        Ok(()) => error,
-        Err(cleanup) => error.context(format!(
-            "failed attachment cleanup also failed: {cleanup:#}"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use phoxal_client::supervisor::execution::{
-        Detail, SupervisorFailure, SupervisorFailureReason,
-    };
-
     use super::*;
 
-    /// A simulation session is never detachable: this client owns Webots, so
-    /// leaving would strand a simulator with no operator.
+    /// `q`, `S`, a confirmed Ctrl+C and an external termination all reach this
+    /// client as the same operator-driven end, and the report says so without
+    /// blaming anything.
     #[test]
-    fn a_simulation_session_is_never_detachable() {
-        assert_ne!(Detachable::No, Detachable::Yes);
-        assert!(HANDSHAKE_BUDGET > Duration::ZERO);
-        assert!(TERMINAL_BUDGET > Duration::ZERO);
+    fn an_operator_driven_end_reports_what_the_operator_did() {
+        for outcome in [
+            phoxal_cli_ui::AttachmentOutcome::SessionStopped,
+            phoxal_cli_ui::AttachmentOutcome::Detached,
+        ] {
+            let end = SessionEnd::observe(None, Ok(&outcome));
+            assert_eq!(end, SessionEnd::Operator);
+            assert!(report(&end).contains("you ended it"), "{end:?}");
+        }
     }
 
+    /// Order one: Webots dies first. The runtimes have no world clock left, so
+    /// the session is ended and the operator is told why.
     #[test]
-    fn a_clean_owned_supervisor_exit_is_terminal_stop_evidence() {
-        assert_eq!(
-            classify_owned_supervisor_exit(true, "exit status: 0".to_string(), String::new()),
-            OwnedSupervisorExit::Stopped
-        );
-    }
-
-    #[test]
-    fn an_unsuccessful_owned_supervisor_exit_keeps_its_diagnostics() {
-        let exit = classify_owned_supervisor_exit(
-            false,
-            "signal: 9".to_string(),
-            "bundle admission failed\n".to_string(),
-        );
-        assert_eq!(
-            exit,
-            OwnedSupervisorExit::Failed {
-                reason: "phoxal-supervisor exited with signal: 9: bundle admission failed"
-                    .to_string()
-            }
-        );
-    }
-
-    /// `q`, a confirmed stop, and an external termination all reach this
-    /// client as the same operator-driven end, and the UI has already stopped
-    /// the execution by then: nothing more is asked of the supervisor, and there
-    /// is nothing unexpected to report.
-    #[test]
-    fn an_operator_driven_end_stops_nothing_further_and_reports_nothing() {
-        let end = SessionEnd::observe(
-            None,
-            Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionStopped),
-        );
-        assert_eq!(end, SessionEnd::Operator);
-        assert_eq!(
-            plan(&end),
-            Shutdown {
-                stop_supervisor: false,
-                report: None,
-            }
-        );
-    }
-
-    /// Order one: Webots dies first. Its execution has no world clock left, so
-    /// the supervisor is asked to stop, awaited within a bound, and the operator is
-    /// told why the session ended.
-    #[test]
-    fn webots_exiting_first_stops_the_execution_and_reports_it() {
+    fn webots_exiting_first_ends_the_session_and_reports_it() {
         let end = SessionEnd::observe(
             Some("exit status: 139".to_string()),
-            Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionStopped),
+            Ok(&phoxal_cli_ui::AttachmentOutcome::SessionStopped),
         );
         assert_eq!(
             end,
@@ -776,112 +376,77 @@ mod tests {
                 status: "exit status: 139".to_string()
             }
         );
-        let shutdown = plan(&end);
-        assert!(
-            shutdown.stop_supervisor,
-            "the reachable supervisor is asked to stop"
-        );
-        let report = shutdown
-            .report
-            .expect("an unexpected termination is reported");
+        let report = report(&end);
         assert!(report.contains("exit status: 139"), "{report}");
         assert!(report.contains("world clock"), "{report}");
     }
 
-    /// Order two: the supervisor dies first. There is nothing left to stop over the
-    /// supervisor API, and Webots must not be left behind.
+    /// Order two: the execution goes first. Webots must not be left behind, and
+    /// the supervisor's own account of why survives.
     #[test]
-    fn the_supervisor_ending_first_asks_nothing_of_it_and_still_reports() {
-        let failure = SupervisorFailure {
-            reason: SupervisorFailureReason::ControlPlaneLost,
-            detail: Detail::new("the world clock never became ready"),
-        };
+    fn the_execution_ending_first_still_closes_webots_and_keeps_the_reason() {
         let end = SessionEnd::observe(
             None,
-            Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionFailed {
-                reason: Some(failure),
+            Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionEnded {
+                reason: Some("phoxal-supervisor exited with exit status: 1".to_string()),
             }),
         );
-        let shutdown = plan(&end);
-        assert!(
-            !shutdown.stop_supervisor,
-            "a supervisor that already ended is not asked to stop"
-        );
-        let report = shutdown
-            .report
-            .expect("an unexpected termination is reported");
-        assert!(report.contains("ControlPlaneLost"), "{report}");
-        assert!(report.contains("stopping Webots"), "{report}");
+        let report = report(&end);
+        assert!(report.contains("exit status: 1"), "{report}");
+        assert!(report.contains("Webots was closed"), "{report}");
     }
 
-    /// A session that never produced an outcome at all - the attachment itself
-    /// failed - is still the supervisor-ended half of the matrix, not a silent exit.
+    /// A session that never produced an outcome at all is still classified and
+    /// reported, never silently swallowed.
     #[test]
     fn a_failed_session_is_classified_and_reported_rather_than_swallowed() {
         let error = anyhow::anyhow!("the supervisor's identity token was lost");
         let end = SessionEnd::observe(None, Err(&error));
-        let report = plan(&end).report.expect("a failure is reported");
-        assert!(report.contains("identity token"), "{report}");
+        assert!(report(&end).contains("identity token"), "{end:?}");
     }
 
-    /// Webots exiting wins over whatever the attachment reported: it is the
-    /// earlier fact, and it is what made the execution stoppable at all.
+    /// Webots exiting wins over whatever the dashboard reported: it is the
+    /// earlier fact, and it is what ended the session at all.
     #[test]
-    fn a_webots_exit_is_the_end_even_when_the_attachment_also_reported_a_failure() {
+    fn a_webots_exit_is_the_end_even_when_the_dashboard_also_reported_one() {
         let end = SessionEnd::observe(
             Some("signal: 15".to_string()),
-            Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason: None }),
+            Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionEnded { reason: None }),
         );
         assert!(matches!(end, SessionEnd::WebotsExited { .. }), "{end:?}");
     }
 
+    /// Neither cleanup may hide the session's own failure, and neither may be
+    /// silently dropped when the session itself was fine.
     #[test]
-    fn webots_cleanup_cannot_hide_the_authoritative_session_failure() {
-        let error = finish_simulation(
-            Err(anyhow::anyhow!("supervisor failed")),
+    fn no_cleanup_failure_is_hidden_and_none_hides_the_session_failure() {
+        let error = finish(
+            Err(anyhow::anyhow!("the session failed")),
+            Err(anyhow::anyhow!("a runtime survived SIGKILL")),
             Err(anyhow::anyhow!("Webots cleanup failed")),
         )
-        .expect_err("both failures must remain failures");
+        .expect_err("every failure must remain a failure");
         let report = format!("{error:#}");
-        assert!(report.contains("supervisor failed"), "{report}");
+        assert!(report.contains("the session failed"), "{report}");
+        assert!(report.contains("survived SIGKILL"), "{report}");
         assert!(report.contains("Webots cleanup failed"), "{report}");
+
+        let error = finish(
+            Ok(()),
+            Ok(()),
+            Err(anyhow::anyhow!("Webots cleanup failed")),
+        )
+        .expect_err("a cleanup failure must not become success");
+        let report = format!("{error:#}");
+        assert!(report.contains("Webots cleanup failed"), "{report}");
+
+        assert!(finish(Ok(()), Ok(()), Ok(())).is_ok());
     }
 
+    /// A simulation session is never detachable: this client owns Webots, so
+    /// leaving would strand a simulator with no operator.
     #[test]
-    fn webots_cleanup_failure_is_reported_after_a_clean_session() {
-        let error = finish_simulation(Ok(()), Err(anyhow::anyhow!("Webots cleanup failed")))
-            .expect_err("cleanup failure must not become success");
-        let report = format!("{error:#}");
-        assert!(report.contains("simulation cleanup failed"), "{report}");
-        assert!(report.contains("Webots cleanup failed"), "{report}");
-    }
-
-    #[test]
-    fn clean_owned_exit_wins_over_only_the_untyped_identity_loss_race() {
-        assert!(
-            report_clean_owned_exit(Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed {
-                reason: None
-            }))
-            .is_ok()
-        );
-        assert_eq!(
-            observe_session_end(
-                None,
-                Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionFailed { reason: None }),
-                Ok(&OwnedSupervisorExit::Stopped),
-            ),
-            SessionEnd::Operator
-        );
-
-        let failure = SupervisorFailure {
-            reason: SupervisorFailureReason::ControlPlaneLost,
-            detail: Detail::new("typed failure"),
-        };
-        let error =
-            report_clean_owned_exit(Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionFailed {
-                reason: Some(failure),
-            }))
-            .expect_err("typed failure must remain authoritative");
-        assert!(format!("{error:#}").contains("typed failure"));
+    fn a_simulation_session_is_never_detachable() {
+        assert_ne!(Detachable::No, Detachable::Yes);
     }
 }

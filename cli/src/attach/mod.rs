@@ -19,11 +19,14 @@ pub(crate) mod feeds;
 pub(crate) mod ports;
 pub(crate) mod state;
 
+use std::sync::{Arc, Mutex, PoisonError};
+
 use anyhow::{Context, Result};
-use phoxal_cli_observation::{AttachmentEpoch, AttachmentEvent, ConnectionObservation};
-use phoxal_client::supervisor::{self, execution::CommandOutcome, logs};
+use phoxal_cli_observation::{
+    AttachmentEpoch, AttachmentEvent, ConnectionObservation, LocalRuntimes,
+};
+use phoxal_client::supervisor::{self, logs};
 use phoxal_client::{Client, ConnectOptions, Connection, DisconnectReason, StreamReceiver};
-use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -41,40 +44,34 @@ pub(crate) const CLIENT_PARTICIPANT: &str = "phoxal-cli-attachment";
 const EVENT_CAPACITY: usize = 256;
 const INPUT_CAPACITY: usize = 64;
 
-/// A command channel to the attached supervisor.
+/// What the client that launched a session knows about its own children.
 ///
-/// It is a client over the shared [`Connection`], not a second connection: the
-/// supervisor API is one query topic, so there is nothing to open twice.
-#[derive(Clone)]
-pub(crate) struct SupervisorCommands {
-    client: Client,
-}
+/// The supervisor publishes presence and nothing else, deliberately: it started
+/// no process, so it cannot say why one is absent. This is the other half, and
+/// it is empty for an attachment to an execution this client did not launch.
+#[derive(Clone, Default)]
+pub(crate) struct LocalRuntimeFacts(Arc<Mutex<LocalRuntimes>>);
 
-impl SupervisorCommands {
-    /// Restart one process, fenced on the producer the caller last observed.
-    pub(crate) async fn restart(
-        &self,
-        process: ParticipantId,
-        expected_producer: ProducerId,
-    ) -> Result<CommandOutcome> {
-        Ok(self.client.restart(process, expected_producer).await?)
+impl LocalRuntimeFacts {
+    pub(crate) fn read(&self) -> LocalRuntimes {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
-    /// End the execution.
-    ///
-    /// The one place this client ends an execution: `phoxal stop`, the TUI's
-    /// stop effect, and the simulation session's "the world clock is gone"
-    /// path all go through here, so there is exactly one stop contract to
-    /// reason about.
-    pub(crate) async fn stop(&self) -> Result<CommandOutcome> {
-        Ok(self.client.stop().await?)
+    pub(crate) fn replace(&self, values: LocalRuntimes) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = values;
     }
 }
 
 /// The ports the terminal application drives a session through.
+///
+/// There is no supervisor-command port. The supervisor observes: it has no
+/// `stop` and no `restart` to send, and the only commands it does take -
+/// reboot, power off - are host operations no dashboard key emits.
 pub(crate) struct SessionPorts {
     pub(crate) events: AttachmentEvents,
-    pub(crate) supervisor: SupervisorCommands,
     pub(crate) input_commands: InputCommands,
     pub(crate) logs: LogReader,
     pub(crate) runtimes: RuntimeReader,
@@ -85,6 +82,7 @@ pub(crate) struct Session {
     pub(crate) ports: SessionPorts,
     connection: Connection,
     client: Client,
+    local: LocalRuntimeFacts,
     cancellation: CancellationToken,
     tasks: JoinSet<()>,
 }
@@ -94,12 +92,21 @@ impl Session {
         self.connection.connected()
     }
 
+    /// What this client knows about the runtimes it launched itself.
+    pub(crate) const fn local(&self) -> &LocalRuntimeFacts {
+        &self.local
+    }
+
     /// Attach at `endpoint` and start every feed.
     ///
     /// # Errors
     ///
     /// Any direct handshake or supervisor-contract failure.
-    pub(crate) async fn open(endpoint: &str, project: String) -> Result<Self> {
+    pub(crate) async fn open(
+        endpoint: &str,
+        project: String,
+        local: LocalRuntimeFacts,
+    ) -> Result<Self> {
         let connection =
             Connection::connect(&ConnectOptions::new(endpoint, CLIENT_PARTICIPANT)).await?;
         let client = connection.client();
@@ -129,6 +136,7 @@ impl Session {
             client: client.clone(),
             epoch,
             project,
+            local: local.clone(),
             stores: stores.clone(),
             events: events_tx,
             cancellation: cancellation.clone(),
@@ -139,15 +147,13 @@ impl Session {
         Ok(Self {
             ports: SessionPorts {
                 events: AttachmentEvents::new(events_rx),
-                supervisor: SupervisorCommands {
-                    client: client.clone(),
-                },
                 input_commands: InputCommands::new(input_tx),
                 logs: LogReader::new(stores.logs.clone()),
                 runtimes: RuntimeReader::new(stores.runtimes.clone()),
             },
             connection,
             client,
+            local,
             cancellation,
             tasks,
         })
@@ -168,11 +174,6 @@ impl Session {
     /// Resolve with the first structured cause that ended the connection.
     pub(crate) async fn disconnected(&self) -> DisconnectReason {
         self.client.disconnected().await
-    }
-
-    /// The first structured terminal cause, if one has already been observed.
-    pub(crate) fn disconnect_reason(&self) -> Option<DisconnectReason> {
-        self.client.disconnect_reason()
     }
 
     /// One backward page of the supervisor's bounded log history.

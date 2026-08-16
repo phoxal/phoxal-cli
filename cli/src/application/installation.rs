@@ -18,8 +18,8 @@ use anyhow::{Context, Result, bail};
 
 use phoxal_cli_project::BUNDLE_DIR;
 
+use super::units;
 use crate::cli::context::AppContext;
-use crate::digest::sha256_file;
 use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 
 /// The Zenoh endpoint an installed framework supervisor binds. It is derived from the
@@ -40,6 +40,8 @@ struct InstallRoots {
     releases: PathBuf,
     state: PathBuf,
     volatile: PathBuf,
+    /// Where the per-runtime units this install generates are written.
+    units: PathBuf,
 }
 
 impl InstallRoots {
@@ -49,6 +51,7 @@ impl InstallRoots {
             releases: PathBuf::from(phoxal_cli_project::RELEASES_ROOT),
             state: PathBuf::from(phoxal_cli_project::INSTALLED_STATE_ROOT),
             volatile: PathBuf::from(phoxal_cli_project::INSTALLED_VOLATILE_ROOT),
+            units: PathBuf::from(phoxal_cli_project::SYSTEMD_UNIT_ROOT),
         }
     }
 }
@@ -63,9 +66,17 @@ enum ServiceControl {
 }
 
 impl ServiceControl {
+    /// Stop the whole robot.
+    ///
+    /// Every runtime unit is `PartOf=` the supervisor's, so stopping the
+    /// supervisor stops them with it; the target is stopped too so systemd does
+    /// not consider the robot still wanted.
     fn stop(&self) -> Result<()> {
         match self {
-            Self::Systemd => systemctl(["stop", phoxal_cli_host::paths::SYSTEMD_UNIT]),
+            Self::Systemd => {
+                let _ = systemctl(["stop", crate::application::units::TARGET_UNIT]);
+                systemctl(["stop", phoxal_cli_host::paths::SYSTEMD_UNIT])
+            }
             #[cfg(test)]
             Self::Fake { operations, .. } => {
                 operations.lock().unwrap().push("stop");
@@ -76,9 +87,17 @@ impl ServiceControl {
 
     fn start(&self) -> Result<()> {
         match self {
+            // The supervisor first, then the runtimes the target wants: a
+            // runtime that starts before the router exists would spend its
+            // first seconds failing to connect for no reason.
             Self::Systemd => {
                 systemctl(["reset-failed", phoxal_cli_host::paths::SYSTEMD_UNIT])?;
-                systemctl(["start", "--no-block", phoxal_cli_host::paths::SYSTEMD_UNIT])
+                systemctl(["start", "--no-block", phoxal_cli_host::paths::SYSTEMD_UNIT])?;
+                systemctl([
+                    "start",
+                    "--no-block",
+                    crate::application::units::TARGET_UNIT,
+                ])
             }
             #[cfg(test)]
             Self::Fake { operations, .. } => {
@@ -225,7 +244,11 @@ async fn install_archive(
     offline: bool,
 ) -> Result<PathBuf> {
     require_build_archive(archive)?;
-    let digest = sha256_file(archive)?;
+    // The archive's own sidecar is the only integrity fence in the system: a
+    // bundle records no digest of anything, so an archive nobody attested to
+    // is not installed. A missing sidecar is refused for the same reason a
+    // mismatched one is.
+    let digest = phoxal_cli_project::verify_against_digest_sidecar(archive)?;
     let name = format!(
         "{}-{}",
         sortable_utc_timestamp(SystemTime::now())?,
@@ -258,7 +281,6 @@ async fn install_archive(
             })
         })
         .await??;
-        reject_simulation_bundle(&candidate)?;
         fsync_tree(&candidate)?;
         Ok::<_, anyhow::Error>(())
     }
@@ -300,6 +322,10 @@ async fn install_archive(
         std::fs::rename(&candidate, &release)?;
         fsync_dir(&roots.releases)?;
         atomic_symlink_switch(&roots.active, &release)?;
+        // The robot's process set is a property of the bundle now active, so
+        // the units are regenerated with the symlink rather than left to
+        // describe the release that was there before.
+        regenerate_runtime_units(&release, &roots.units)?;
         Ok(())
     })() {
         drop(_lock);
@@ -342,6 +368,9 @@ async fn rollback_release(
         .context("failed to acquire the installed-runtime lock")?;
     crate::lock::refuse_while_execution_is_live(&roots.active)?;
     atomic_symlink_switch(&roots.active, &selected)?;
+    // A rollback activates a different bundle, which may declare a different
+    // process set - so its units are regenerated exactly as an install's are.
+    regenerate_runtime_units(&selected, &roots.units)?;
     drop(_lock);
     if let Err(error) = service.start().context("failed to start rollback release") {
         restore_after_failed_activation(Some(&active), roots, service).await?;
@@ -367,6 +396,7 @@ async fn restore_after_failed_activation(
     let _ = service.stop();
     if let Some(previous) = previous {
         atomic_symlink_switch(&roots.active, previous)?;
+        regenerate_runtime_units(previous, &roots.units)?;
         service
             .start()
             .context("failed to restart the previous release")?;
@@ -386,33 +416,63 @@ async fn restore_after_failed_activation(
     Ok(())
 }
 
-/// The error a simulation bundle earns at the installer.
-pub(crate) const SIMULATION_BUNDLE_REJECTED: &str = "PHOXAL-E-INSTALL-SIMULATION-BUNDLE";
-
-/// Refuse to install a simulation bundle.
+/// Write one systemd unit per runtime the installed bundle declares, plus the
+/// target that owns them, and remove the ones a previous bundle needed and this
+/// one does not.
 ///
-/// Keeping simulation off systemd is an install-path rule, not a supervisor rule
-///: `phoxal-supervisor` reads `clock` from the manifest like any other
-/// bundle and would come up waiting for a world clock only the client-owned
-/// Webots can produce - forever, on a `Restart=on-failure` unit. So the refusal
-/// is here, where the durable install is being made.
-fn reject_simulation_bundle(release_root: &Path) -> Result<()> {
-    let bundle = phoxal_bundle::RuntimeBundle::open_verified(release_root.join(BUNDLE_DIR))
-        .context("failed to verify the release's runtime bundle before installation")?;
-    ensure_real_clock(bundle.robot().clock())
+/// A robot's process set is a property of its manifest, so it is regenerated
+/// whenever the active release changes - by an install and by a rollback alike.
+/// A stale unit left behind would be systemd faithfully restarting a runtime
+/// the robot no longer has.
+fn regenerate_runtime_units(release: &Path, unit_root: &Path) -> Result<()> {
+    let runtimes = phoxal_cli_project::bundle_runtimes(&release.join(BUNDLE_DIR))?;
+    let generated = units::bundle_units(&runtimes);
+    std::fs::create_dir_all(unit_root)?;
+    for (name, contents) in &generated {
+        let path = unit_root.join(name);
+        write_managed_unit(&path, contents)?;
+    }
+    let keep = generated
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for entry in std::fs::read_dir(unit_root)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !units::is_generated_unit(&name) || keep.contains(&name) {
+            continue;
+        }
+        let path = entry.path();
+        // Only this CLI's own units are removed. A hand-written
+        // `phoxal-something.service` belongs to whoever wrote it.
+        if std::fs::read_to_string(&path)
+            .is_ok_and(|contents| contents.lines().next() == Some(units::UNIT_MARKER))
+        {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    fsync_dir(unit_root)
 }
 
-/// The clock rule alone, so the refusal is testable without a bundle on disk.
-fn ensure_real_clock(clock: phoxal_model::Clock) -> Result<()> {
-    if clock == phoxal_model::Clock::Simulated {
-        bail!(
-            "error[{SIMULATION_BUNDLE_REJECTED}]: this build.phoxal is a simulation bundle \
-             (clock: simulated) and is never installed. A simulated execution needs the \
-             client-owned Webots for its world clock, which a systemd service has no way to \
-             start; run it with `phoxal simulation webots run <ROBOT_YAML> <WORLD>` instead, and \
-             install a real-clock bundle built by `phoxal build`"
+/// Write one unit, refusing to overwrite a file this CLI did not write.
+fn write_managed_unit(path: &Path, contents: &str) -> Result<()> {
+    if path.exists() {
+        let current = std::fs::read_to_string(path)?;
+        anyhow::ensure!(
+            current.lines().next() == Some(units::UNIT_MARKER),
+            "refusing to overwrite foreign unit {}",
+            path.display()
         );
+        if current == contents {
+            return Ok(());
+        }
     }
+    let candidate = path.with_extension(format!("candidate-{}", std::process::id()));
+    std::fs::write(&candidate, contents)?;
+    std::fs::File::open(&candidate)?.sync_all()?;
+    std::fs::rename(&candidate, path)?;
     Ok(())
 }
 
@@ -621,6 +681,7 @@ mod tests {
             releases: temp.path().join("var/lib/phoxal/releases"),
             state: temp.path().join("var/lib/phoxal/state"),
             volatile: temp.path().join("run/phoxal"),
+            units: temp.path().join("etc/systemd/system"),
         }
     }
 
@@ -634,8 +695,25 @@ mod tests {
             release.join(phoxal_cli_project::SUPERVISOR_FILE),
             format!("phoxal-supervisor of {tag}"),
         )?;
-        std::fs::write(release.join(BUNDLE_DIR).join("runtime.json"), tag)?;
+        // A real manifest, because activating a release regenerates the units
+        // its process set implies - and that reads this document.
+        let robot = phoxal_model::builder::RobotBuilder::new(tag)
+            .service("drive", None)
+            .build()
+            .expect("a valid canonical robot");
+        std::fs::write(
+            release.join(BUNDLE_DIR).join(phoxal_bundle::MANIFEST_FILE),
+            serde_json::to_vec_pretty(&phoxal_model::manifest::ManifestDocument::new(robot))?,
+        )?;
         Ok(release)
+    }
+
+    /// Which release the active link resolves to, read off the manifest the
+    /// unit generator also reads.
+    fn active_bundle_tag(roots: &InstallRoots) -> Result<String> {
+        let active = active_release(&roots.active)?.context("nothing is active")?;
+        let bundle = phoxal_bundle::RuntimeBundle::open(active.join(BUNDLE_DIR))?;
+        Ok(bundle.robot_id().to_string())
     }
 
     /// What the active link resolves to right now, read as two independent
@@ -644,13 +722,13 @@ mod tests {
     fn active_halves(roots: &InstallRoots) -> Result<(String, String)> {
         let active = active_release(&roots.active)?.context("nothing is active")?;
         let supervisor = std::fs::read_to_string(active.join(phoxal_cli_project::SUPERVISOR_FILE))?;
-        let bundle = std::fs::read_to_string(active.join(BUNDLE_DIR).join("runtime.json"))?;
+        let _ = &roots.units;
         Ok((
             supervisor
                 .strip_prefix("phoxal-supervisor of ")
                 .unwrap_or(&supervisor)
                 .to_string(),
-            bundle,
+            active_bundle_tag(roots)?,
         ))
     }
 
@@ -705,10 +783,8 @@ mod tests {
         std::fs::create_dir_all(&roots.releases)?;
         std::fs::create_dir_all(&roots.state)?;
         std::fs::create_dir_all(&roots.volatile)?;
-        let previous = roots.releases.join("20260724T010000.000Z-11111111");
-        let failed = roots.releases.join("20260725T010000.000Z-22222222");
-        std::fs::create_dir(&previous)?;
-        std::fs::create_dir(&failed)?;
+        let previous = release_stamped(&roots, "20260724T010000.000Z-11111111", "previous")?;
+        let failed = release_stamped(&roots, "20260725T010000.000Z-22222222", "failed")?;
         atomic_symlink_switch(&roots.active, &failed)?;
         let operations = std::sync::Arc::new(Mutex::new(Vec::new()));
         let service = ServiceControl::Fake {
@@ -720,6 +796,14 @@ mod tests {
 
         assert_eq!(std::fs::read_link(&roots.active)?, previous);
         assert_eq!(*operations.lock().unwrap(), ["stop", "start", "ready"]);
+        // The restored release's own process set is what systemd is left
+        // describing, not the failed one's.
+        assert!(
+            roots
+                .units
+                .join(crate::application::units::runtime_unit_name("drive"))
+                .is_file()
+        );
         Ok(())
     }
 
@@ -761,21 +845,6 @@ mod tests {
         atomic_symlink_switch(&roots.active, &selected)?;
         assert_eq!(std::fs::read_link(&roots.active)?, previous);
         Ok(())
-    }
-
-    /// A simulation bundle is never installed, and the refusal says why and
-    /// what to run instead.
-    #[test]
-    fn a_simulation_bundle_is_rejected_at_the_installer_with_a_named_error() {
-        use phoxal_model::Clock;
-
-        assert!(ensure_real_clock(Clock::Real).is_ok());
-        let error = ensure_real_clock(Clock::Simulated)
-            .expect_err("a simulated bundle is never installable")
-            .to_string();
-        assert!(error.contains(SIMULATION_BUNDLE_REJECTED), "{error}");
-        assert!(error.contains("clock: simulated"), "{error}");
-        assert!(error.contains("phoxal simulation webots run"), "{error}");
     }
 
     /// The invariant this whole design exists for: a supervisor from one release
@@ -880,7 +949,7 @@ mod tests {
         );
         let mut builder = tar::Builder::new(encoder);
         for (name, bytes) in [
-            ("runtime.json", b"{}".as_slice()),
+            ("manifest.json", b"{}".as_slice()),
             ("bin/brain", b"\x7fELF".as_slice()),
         ] {
             let mut header = tar::Header::new_gnu();
@@ -890,6 +959,17 @@ mod tests {
             builder.append_data(&mut header, name, bytes)?;
         }
         builder.into_inner()?.finish()?;
+        // The archive is well-formed and properly attested; what makes it
+        // uninstallable is its shape, and that is what this proves.
+        std::fs::write(
+            phoxal_cli_project::digest_sidecar(&archive),
+            format!(
+                "{}\n",
+                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(std::fs::read(
+                    &archive
+                )?))
+            ),
+        )?;
 
         let operations = std::sync::Arc::new(Mutex::new(Vec::new()));
         let error = install_archive(

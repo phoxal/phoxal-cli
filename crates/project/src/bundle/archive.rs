@@ -18,12 +18,20 @@
 //! release is activated. Plain `tar -xzf build.phoxal` extracts it identically
 //! to [`extract_build_archive`]; the helper here only adds the path-escape
 //! guard.
+//!
+//! Integrity lives here and nowhere else. Nothing inside a bundle records a
+//! digest of anything - the supervisor and every participant trust what is on
+//! disk - so the one fence is the archive's own: `phoxal build` writes
+//! `build.phoxal.sha256` beside `build.phoxal`, `phoxal deploy` ships both, and
+//! `phoxal install` refuses an archive that does not match its sidecar. A
+//! missing sidecar is a refusal too: an archive nobody vouched for is not an
+//! archive that passed.
 
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -33,6 +41,52 @@ use tar::{Archive, EntryType, Header};
 /// The conventional extension of a built release. The default output for
 /// `phoxal build --target <TRIPLE>` is `<project>/.phoxal/<triple>.build.phoxal`.
 pub const BUILD_ARCHIVE_EXTENSION: &str = "build.phoxal";
+
+/// The suffix of the digest sidecar written beside every archive.
+pub const ARCHIVE_DIGEST_SUFFIX: &str = ".sha256";
+
+/// The sidecar path for one archive.
+#[must_use]
+pub fn digest_sidecar(archive: &Path) -> PathBuf {
+    let mut name = archive.as_os_str().to_os_string();
+    name.push(ARCHIVE_DIGEST_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Prove `archive` is the archive its sidecar vouches for.
+///
+/// # Errors
+///
+/// When the sidecar is missing, unreadable, not a hex digest, or does not
+/// match the archive's own bytes. All four are one answer: this is not an
+/// archive anybody attested to, so it is not installed.
+pub fn verify_against_digest_sidecar(archive: &Path) -> Result<String> {
+    let sidecar = digest_sidecar(archive);
+    let recorded = fs::read_to_string(&sidecar).with_context(|| {
+        format!(
+            "{} has no digest sidecar at {}; a build writes one beside every archive and an \
+             archive nobody vouched for is never installed - rebuild it with `phoxal build`, or \
+             copy the sidecar across with it",
+            archive.display(),
+            sidecar.display()
+        )
+    })?;
+    let recorded = recorded.trim();
+    ensure!(
+        recorded.len() == 64 && recorded.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{} does not contain a hex SHA-256 digest",
+        sidecar.display()
+    );
+    let actual = hex::encode(Sha256::digest(
+        fs::read(archive).with_context(|| format!("failed to read {}", archive.display()))?,
+    ));
+    ensure!(
+        actual.eq_ignore_ascii_case(recorded),
+        "{} does not match its digest sidecar: recorded {recorded}, actual {actual}",
+        archive.display()
+    );
+    Ok(actual)
+}
 
 /// A fixed timestamp stamped on every archived entry so mtime never varies the
 /// output. Value is arbitrary but constant (2020-01-01T00:00:00Z); using a
@@ -81,6 +135,9 @@ pub fn write_build_archive(layout_root: &Path, output: &Path) -> Result<String> 
     let digest = hex::encode(Sha256::digest(&bytes));
     fs::write(output, &bytes)
         .with_context(|| format!("failed to write build archive {}", output.display()))?;
+    let sidecar = digest_sidecar(output);
+    fs::write(&sidecar, format!("{digest}\n"))
+        .with_context(|| format!("failed to write digest sidecar {}", sidecar.display()))?;
     Ok(digest)
 }
 
@@ -371,8 +428,8 @@ mod tests {
             b"\x7fELF-ish-supervisor",
         );
         fs::write(
-            bundle.join("runtime.json"),
-            b"{\"schema\":\"phoxal/runtime-bundle/v0\"}\n",
+            bundle.join("manifest.json"),
+            b"{\"schema\":\"phoxal/manifest/v0\"}\n",
         )
         .unwrap();
         write_executable(&bundle.join("bin/mission"), b"\x7fELF-ish-binary");
@@ -620,9 +677,71 @@ mod tests {
             BTreeSet::from([
                 "bundle/assets/fixture.bin".to_string(),
                 "bundle/bin/mission".to_string(),
-                "bundle/runtime.json".to_string(),
+                "bundle/manifest.json".to_string(),
                 crate::deployment::SUPERVISOR_FILE.to_string(),
             ])
         );
+    }
+}
+
+#[cfg(test)]
+mod sidecar_tests {
+    use super::*;
+
+    fn archive(dir: &Path) -> PathBuf {
+        let layout = dir.join("release");
+        fs::create_dir_all(layout.join("bundle")).unwrap();
+        fs::write(layout.join(crate::deployment::SUPERVISOR_FILE), b"sup").unwrap();
+        fs::write(layout.join("bundle/manifest.json"), b"{}").unwrap();
+        let output = dir.join("build.phoxal");
+        write_build_archive(&layout, &output).unwrap();
+        output
+    }
+
+    /// A build writes the sidecar every install reads, and the pair verifies.
+    #[test]
+    fn a_build_writes_the_sidecar_its_install_verifies_against() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = archive(dir.path());
+        let sidecar = digest_sidecar(&output);
+        assert!(sidecar.is_file(), "{}", sidecar.display());
+        let recorded = fs::read_to_string(&sidecar).unwrap();
+        assert_eq!(
+            verify_against_digest_sidecar(&output).unwrap(),
+            recorded.trim()
+        );
+    }
+
+    /// The three ways an archive fails its fence are one answer: it is not the
+    /// archive anybody attested to, so it does not install.
+    #[test]
+    fn a_tampered_archive_a_tampered_sidecar_and_a_missing_sidecar_are_all_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = archive(dir.path());
+        let sidecar = digest_sidecar(&output);
+
+        let mut bytes = fs::read(&output).unwrap();
+        bytes.push(0);
+        fs::write(&output, &bytes).unwrap();
+        let error = verify_against_digest_sidecar(&output)
+            .expect_err("a rewritten archive must not verify")
+            .to_string();
+        assert!(
+            error.contains("does not match its digest sidecar"),
+            "{error}"
+        );
+
+        fs::write(&sidecar, "not-a-digest\n").unwrap();
+        let error = verify_against_digest_sidecar(&output)
+            .expect_err("a malformed sidecar must not verify")
+            .to_string();
+        assert!(error.contains("hex SHA-256"), "{error}");
+
+        fs::remove_file(&sidecar).unwrap();
+        let error = format!(
+            "{:#}",
+            verify_against_digest_sidecar(&output).expect_err("a missing sidecar must not verify")
+        );
+        assert!(error.contains("has no digest sidecar"), "{error}");
     }
 }

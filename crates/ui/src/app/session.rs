@@ -45,6 +45,8 @@ pub struct UiOptions {
     /// not detachable: the client owns Webots, so leaving would strand a
     /// simulator with no operator.
     pub detachable: bool,
+    /// Whether this client launched the session, and can therefore stop it.
+    pub stoppable: bool,
 }
 
 struct InputComponent;
@@ -142,6 +144,7 @@ fn run_blocking(
 
     let model = Rc::new(RefCell::new(AppModel {
         detachable: options.detachable,
+        stoppable: options.stoppable,
         ..AppModel::default()
     }));
     apply_initial_inputs(&model, &effects, initial_inputs)?;
@@ -274,7 +277,7 @@ fn dispatch(model: &Rc<RefCell<AppModel>>, effects: &EffectSenders, message: Msg
 fn is_guaranteed(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::ReadLogs(_) | Effect::ReadRuntimes(_) | Effect::StopProject
+        Effect::ReadLogs(_) | Effect::ReadRuntimes(_) | Effect::StopSession
     )
 }
 
@@ -363,6 +366,7 @@ mod tests {
             commands,
         };
         let model = Rc::new(RefCell::new(AppModel {
+            stoppable: true,
             route: super::super::route::FocusRoute::default()
                 .open_modal(super::super::id::ModalId::ConfirmStop),
             ..AppModel::default()
@@ -373,7 +377,7 @@ mod tests {
             Msg::Navigate(NavigationMsg::Key(tuirealm::event::Key::Enter.into())),
         )
         .expect("route confirmed stop");
-        assert!(matches!(guaranteed_rx.try_recv(), Ok(Effect::StopProject)));
+        assert!(matches!(guaranteed_rx.try_recv(), Ok(Effect::StopSession)));
         assert!(matches!(command_rx.try_recv(), Ok(Effect::InputRescan)));
     }
 

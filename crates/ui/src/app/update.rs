@@ -7,7 +7,6 @@ use phoxal_cli_observation::{
     AttachmentEvent, LogAnchor, LogFilters, LogQuery, LogRead, LogRow, ProcessTable, QueryToken,
     RuntimeQuery, RuntimeRead, RuntimeRow, StoreChanged, StoreRevision, WindowDirection,
 };
-use phoxal_client::supervisor::execution::Lifecycle;
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
 use crate::components::input::InputModel;
@@ -32,15 +31,19 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
         }
         Msg::Client(event) => update_client(model, event),
         Msg::Navigate(message) => update_navigation(model, message),
-        Msg::StopProjectAccepted => Vec::new(),
-        Msg::StopProjectRejected(reason) => complete_stop_failure(model, "rejected", reason),
-        Msg::StopProjectFailed(reason) => complete_stop_failure(model, "failed", reason),
-        Msg::OwnedSupervisorStopped => {
-            model.exit = Some(AttachmentOutcome::ExecutionStopped);
+        Msg::SessionStopped => {
+            model.exit = Some(AttachmentOutcome::SessionStopped);
             Vec::new()
         }
-        Msg::OwnedSupervisorFailed => {
-            model.exit = Some(AttachmentOutcome::ExecutionFailed { reason: None });
+        Msg::StopSessionFailed(reason) => complete_stop_failure(model, reason),
+        Msg::OwnedSupervisorStopped => {
+            model.exit = Some(AttachmentOutcome::SessionStopped);
+            Vec::new()
+        }
+        Msg::OwnedSupervisorFailed(reason) => {
+            model.exit = Some(AttachmentOutcome::ExecutionEnded {
+                reason: Some(reason),
+            });
             Vec::new()
         }
         Msg::Logs(LogsMsg::Window(window)) => accept_logs(model, window),
@@ -50,11 +53,11 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
     effects
 }
 
-fn complete_stop_failure(model: &mut AppModel, outcome: &str, reason: String) -> Vec<Effect> {
+fn complete_stop_failure(model: &mut AppModel, reason: String) -> Vec<Effect> {
     model.stop_requested = false;
     model
         .overview
-        .push_diagnostic(format!("stop {outcome}: {reason}; retry"));
+        .push_diagnostic(format!("stop failed: {reason}; retry"));
     Vec::new()
 }
 
@@ -71,18 +74,29 @@ fn detach(model: &mut AppModel) -> Vec<Effect> {
     Vec::new()
 }
 
-/// Ask the supervisor to end the execution, then keep rendering.
+/// End the session this client launched, then keep rendering.
 ///
-/// The session does NOT exit here. It exits when the supervisor's own terminal
-/// snapshot arrives, or when its identity token is lost - so an operator sees
-/// the graph shutting down rather than a terminal that closed on a hope.
+/// The session does NOT exit here. It exits when the stop reports that
+/// everything is down - so an operator watches the graph go rather than a
+/// terminal that closed on a hope.
+///
+/// A client that launched nothing has nothing to stop, and says so instead of
+/// pretending: there is no stop command on the supervisor to fall back to.
 fn request_stop(model: &mut AppModel) -> Vec<Effect> {
     close_modal(model);
+    if !model.stoppable {
+        model.overview.push_diagnostic(
+            "this client did not launch this execution, so it cannot stop it; stop it where it \
+             was started"
+                .to_string(),
+        );
+        return Vec::new();
+    }
     if model.stop_requested {
         return Vec::new();
     }
     model.stop_requested = true;
-    vec![Effect::StopProject]
+    vec![Effect::StopSession]
 }
 
 /// What Ctrl+C means.
@@ -107,32 +121,33 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
             Vec::new()
         }
         AttachmentEvent::ConnectionChanged(connection) => {
-            // A connection loss never overrides a supervisor-reported failure
-            // or stop that already arrived (see the ordering tests below); it
-            // only fills in an exit when the client never saw a terminal
-            // snapshot at all. `reason` is deliberately `None` here - a
-            // transport loss is not a supervisor-reported cause, so the
-            // caller falls through to its own supervisor.log pointer instead
-            // of surfacing this transport-level text as if the supervisor had
-            // explained itself.
+            // A connection loss only ends the session when nothing better has
+            // explained the ending. Two things are better: an ending that
+            // already arrived, and a stop the operator confirmed - the
+            // supervisor going away is the *consequence* of that stop, and
+            // reporting it as the cause would tell an operator their own
+            // deliberate action was an unexplained failure.
+            //
+            // `reason` is deliberately `None`: a transport loss is not a
+            // supervisor-reported cause, so the caller falls through to its own
+            // supervisor.log pointer instead of surfacing transport text as if
+            // the supervisor had explained itself.
             if matches!(
                 &connection,
                 phoxal_cli_observation::ConnectionObservation::Lost { .. }
             ) && model.exit.is_none()
+                && !model.stop_requested
             {
-                model.exit = Some(AttachmentOutcome::ExecutionFailed { reason: None });
+                model.exit = Some(AttachmentOutcome::ExecutionEnded { reason: None });
             }
             model.overview.connection = Some(connection);
             Vec::new()
         }
         AttachmentEvent::SupervisorChanged(supervisor) => {
-            model.exit = match supervisor.lifecycle {
-                Lifecycle::Stopped => Some(AttachmentOutcome::ExecutionStopped),
-                Lifecycle::Failed => Some(AttachmentOutcome::ExecutionFailed {
-                    reason: supervisor.failure.clone(),
-                }),
-                _ => model.exit.clone(),
-            };
+            // There is no terminal lifecycle to react to any more: a supervisor
+            // that ends is observed as its identity token disappearing, which
+            // arrives as a lost connection above. `Degraded` is a running
+            // robot with something missing, not an ending.
             model.overview.supervisor = Some(supervisor);
             Vec::new()
         }
@@ -515,10 +530,6 @@ fn handle_runtimes_key(model: &mut AppModel, panel: RuntimesPanelId, key: KeyEve
                 };
                 return refresh_runtimes(model);
             }
-            Key::Char('r') => match restart_effect(model) {
-                Ok(effect) => return vec![effect],
-                Err(message) => model.overview.push_diagnostic(message),
-            },
             Key::Char('l') => {
                 if let Some(process) = &model.runtimes.candidate {
                     model.logs.participant = process.to_string();
@@ -560,26 +571,6 @@ fn move_process_candidate(model: &mut AppModel, delta: isize) {
     model.runtimes.candidate = keys
         .get(index.saturating_add_signed(delta).min(keys.len() - 1))
         .cloned();
-}
-
-fn restart_effect(model: &AppModel) -> Result<Effect, String> {
-    let process = model
-        .runtimes
-        .candidate
-        .clone()
-        .ok_or_else(|| "no runtime is selected for restart".to_string())?;
-    let expected_producer = model
-        .overview
-        .processes
-        .get(&process)
-        .ok_or_else(|| format!("selected process `{process}` is no longer present"))?
-        .row
-        .producer
-        .ok_or_else(|| format!("process `{process}` has no restartable producer"))?;
-    Ok(Effect::Restart {
-        process,
-        expected_producer,
-    })
 }
 
 fn handle_logs_key(model: &mut AppModel, panel: LogsPanelId, key: KeyEvent) -> Vec<Effect> {
@@ -807,10 +798,7 @@ mod tests {
         JoypadDevicesSample, LogSeverity, LogSource, LogWindow, ObservationWindow,
         ProcessObservation, SupervisorObservation,
     };
-    use phoxal_client::supervisor::execution::{
-        DesiredState, Detail, Process, ProcessState, SupervisorFailure, SupervisorFailureReason,
-    };
-    use phoxal_runtime_contract::clock::Clock;
+    use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
     use phoxal_runtime_contract::identity::ExecutionId;
     use phoxal_runtime_contract::identity::RobotId;
     use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
@@ -1088,26 +1076,43 @@ mod tests {
         assert!(detach.is_empty());
         assert_eq!(model.exit, Some(AttachmentOutcome::Detached));
 
-        let mut model = AppModel::default();
+        let mut model = launched();
         let first = update(&mut model, control_c());
         assert!(first.is_empty(), "the first interrupt sends nothing");
         assert_eq!(model.route.modal(), Some(ModalId::ConfirmStop));
 
         let second = update(&mut model, control_c());
-        assert_eq!(second, vec![Effect::StopProject]);
+        assert_eq!(second, vec![Effect::StopSession]);
         assert!(model.stop_requested);
         assert_eq!(
             model.exit, None,
-            "the session waits for the supervisor's terminal snapshot"
+            "the session waits until its processes are actually down"
         );
 
         // A third interrupt does not send a second stop.
         assert!(update(&mut model, control_c()).is_empty());
     }
 
+    /// A session this client did not launch has nothing to stop: there is no
+    /// stop command on the supervisor, and this client started no process. The
+    /// operator is told that rather than watching a key do nothing.
+    #[test]
+    fn a_session_this_client_did_not_launch_cannot_be_stopped() {
+        let mut model = AppModel::default();
+        update(&mut model, control_c());
+        assert!(update(&mut model, control_c()).is_empty());
+        assert!(!model.stop_requested);
+        assert_eq!(model.exit, None);
+        assert!(
+            model.overview.diagnostics[0].contains("did not launch"),
+            "{:?}",
+            model.overview.diagnostics
+        );
+    }
+
     #[test]
     fn advertised_stop_shortcut_opens_confirmation_and_enter_sends_stop() {
-        let mut model = AppModel::default();
+        let mut model = launched();
         assert!(
             update(
                 &mut model,
@@ -1122,21 +1127,29 @@ mod tests {
                 &mut model,
                 Msg::Navigate(NavigationMsg::Key(Key::Enter.into())),
             ),
-            vec![Effect::StopProject]
+            vec![Effect::StopSession]
         );
     }
 
     #[test]
     fn owned_supervisor_exit_is_terminal_without_bus_delivery() {
-        let mut stopped = AppModel::default();
+        let mut stopped = launched();
         assert!(update(&mut stopped, Msg::OwnedSupervisorStopped).is_empty());
-        assert_eq!(stopped.exit, Some(AttachmentOutcome::ExecutionStopped));
+        assert_eq!(stopped.exit, Some(AttachmentOutcome::SessionStopped));
 
-        let mut failed = AppModel::default();
-        assert!(update(&mut failed, Msg::OwnedSupervisorFailed).is_empty());
+        let mut failed = launched();
+        assert!(
+            update(
+                &mut failed,
+                Msg::OwnedSupervisorFailed("exit status: 1".to_string()),
+            )
+            .is_empty()
+        );
         assert_eq!(
             failed.exit,
-            Some(AttachmentOutcome::ExecutionFailed { reason: None })
+            Some(AttachmentOutcome::ExecutionEnded {
+                reason: Some("exit status: 1".to_string())
+            })
         );
     }
 
@@ -1171,160 +1184,135 @@ mod tests {
     fn q_in_a_simulation_session_stops_instead_of_detaching() {
         let mut model = AppModel {
             detachable: false,
-            ..AppModel::default()
+            ..launched()
         };
         let stop = update(
             &mut model,
             Msg::Navigate(NavigationMsg::Key(Key::Char('q').into())),
         );
-        assert_eq!(stop, vec![Effect::StopProject]);
+        assert_eq!(stop, vec![Effect::StopSession]);
         assert_eq!(model.exit, None);
         assert!(model.stop_requested);
     }
 
+    /// The session exits when its processes are actually down, not when the
+    /// stop was sent: an operator watches the graph go rather than a terminal
+    /// that closed on a hope.
     #[test]
-    fn accepted_stop_keeps_waiting_for_terminal_supervisor_evidence() {
-        let mut model = AppModel::default();
-        assert_eq!(request_stop(&mut model), vec![Effect::StopProject]);
-
-        let effects = update(&mut model, Msg::StopProjectAccepted);
-
-        assert!(effects.is_empty());
+    fn a_requested_stop_keeps_rendering_until_the_session_is_down() {
+        let mut model = launched();
+        assert_eq!(request_stop(&mut model), vec![Effect::StopSession]);
         assert!(model.stop_requested);
         assert_eq!(model.exit, None);
-        assert!(request_stop(&mut model).is_empty());
+        assert!(
+            request_stop(&mut model).is_empty(),
+            "a second request sends nothing"
+        );
+
+        assert!(update(&mut model, Msg::SessionStopped).is_empty());
+        assert_eq!(model.exit, Some(AttachmentOutcome::SessionStopped));
     }
 
     #[test]
-    fn rejected_or_failed_stop_clears_the_guard_and_can_be_retried() {
-        for completion in [
-            Msg::StopProjectRejected("revision moved on".to_string()),
-            Msg::StopProjectFailed("connection closed".to_string()),
-        ] {
-            let mut model = AppModel::default();
-            assert_eq!(request_stop(&mut model), vec![Effect::StopProject]);
+    fn a_failed_stop_clears_the_guard_and_can_be_retried() {
+        let mut model = launched();
+        assert_eq!(request_stop(&mut model), vec![Effect::StopSession]);
 
-            assert!(update(&mut model, completion).is_empty());
+        assert!(
+            update(
+                &mut model,
+                Msg::StopSessionFailed("a runtime survived SIGKILL".to_string()),
+            )
+            .is_empty()
+        );
 
-            assert!(!model.stop_requested);
-            assert_eq!(model.exit, None);
-            assert!(model.overview.diagnostics[0].contains("retry"));
-            assert_eq!(request_stop(&mut model), vec![Effect::StopProject]);
-        }
+        assert!(!model.stop_requested);
+        assert_eq!(model.exit, None);
+        assert!(model.overview.diagnostics[0].contains("retry"));
+        assert_eq!(request_stop(&mut model), vec![Effect::StopSession]);
     }
 
+    /// A confirmed stop takes the execution away, so the connection loss that
+    /// follows is the stop working - not an unexplained ending. Reporting the
+    /// loss would tell an operator their own deliberate action failed.
     #[test]
-    fn failed_execution_is_distinct_from_a_clean_stop() {
+    fn the_connection_loss_a_confirmed_stop_causes_is_not_the_ending() {
+        let mut model = launched();
+        assert_eq!(request_stop(&mut model), vec![Effect::StopSession]);
+
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::ConnectionChanged(
+                phoxal_cli_observation::ConnectionObservation::Lost {
+                    reason: "the supervisor identity token was lost".into(),
+                },
+            )),
+        );
+        assert_eq!(
+            model.exit, None,
+            "the stop this client asked for is still the ending"
+        );
+
+        update(&mut model, Msg::SessionStopped);
+        assert_eq!(model.exit, Some(AttachmentOutcome::SessionStopped));
+    }
+
+    /// A degraded graph is a running robot with something missing, so it never
+    /// ends the session. Only losing the execution does.
+    #[test]
+    fn a_degraded_snapshot_is_not_an_ending_but_a_lost_execution_is() {
         let mut model = AppModel::default();
         update(
             &mut model,
             Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(supervisor(
-                Lifecycle::Failed,
+                Lifecycle::Degraded,
             )))),
         );
-        assert_eq!(
-            model.exit,
-            Some(AttachmentOutcome::ExecutionFailed { reason: None })
-        );
-    }
+        assert_eq!(model.exit, None);
 
-    #[test]
-    fn supervisor_failure_reason_flows_into_the_exit_outcome() {
-        let mut model = AppModel::default();
         update(
             &mut model,
-            Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(
-                supervisor_with_failure(
-                    Lifecycle::Failed,
-                    Some("catalog train floor not supported: 0.41.2 < 0.42.0"),
-                ),
-            ))),
+            Msg::Client(AttachmentEvent::ConnectionChanged(
+                phoxal_cli_observation::ConnectionObservation::Lost {
+                    reason: "the supervisor identity token was lost".into(),
+                },
+            )),
         );
+        // The transport-level reason is deliberately NOT carried into the
+        // outcome: an attachment that lost its execution has no account of why,
+        // so the caller falls through to the log it points at instead.
         assert_eq!(
             model.exit,
-            model.exit.clone().filter(|exit| matches!(
-                exit,
-                AttachmentOutcome::ExecutionFailed { reason: Some(failure) }
-                    if failure.detail.as_str()
-                        == "catalog train floor not supported: 0.41.2 < 0.42.0"
-            ))
+            Some(AttachmentOutcome::ExecutionEnded { reason: None })
         );
     }
 
+    /// The client that launched the session knows why it ended, and that
+    /// answer is not overwritten by the connection loss it causes.
     #[test]
-    fn a_supervisor_failure_reason_wins_over_a_connection_loss_in_either_ordering() {
-        for lost_first in [false, true] {
-            let mut model = AppModel::default();
+    fn an_owned_supervisors_own_exit_survives_the_connection_loss_it_causes() {
+        for owned_first in [false, true] {
+            let mut model = launched();
             let lost = Msg::Client(AttachmentEvent::ConnectionChanged(
                 phoxal_cli_observation::ConnectionObservation::Lost {
                     reason: "stream closed".into(),
                 },
             ));
-            let failed = Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(
-                supervisor_with_failure(Lifecycle::Failed, Some("prepare failed")),
-            )));
-            if lost_first {
+            let owned = Msg::OwnedSupervisorFailed("exit status: 1".to_string());
+            if owned_first {
+                update(&mut model, owned);
                 update(&mut model, lost);
-                update(&mut model, failed);
             } else {
-                update(&mut model, failed);
                 update(&mut model, lost);
+                update(&mut model, owned);
             }
-            assert!(
-                matches!(
-                    &model.exit,
-                    Some(AttachmentOutcome::ExecutionFailed { reason: Some(failure) })
-                        if failure.detail.as_str() == "prepare failed"
-                ),
-                "lost_first={lost_first}: {:?}",
-                model.exit
+            assert_eq!(
+                model.exit,
+                Some(AttachmentOutcome::ExecutionEnded {
+                    reason: Some("exit status: 1".to_string())
+                }),
+                "owned_first={owned_first}"
             );
-        }
-    }
-
-    #[test]
-    fn permanently_lost_execution_is_a_failed_outcome_with_no_supervisor_reason() {
-        let mut model = AppModel::default();
-        update(
-            &mut model,
-            Msg::Client(AttachmentEvent::ConnectionChanged(
-                phoxal_cli_observation::ConnectionObservation::Lost {
-                    reason: "protocol mismatch".into(),
-                },
-            )),
-        );
-        // The transport-level reason ("protocol mismatch") is deliberately
-        // NOT carried into the outcome: a connection loss is never a
-        // supervisor-reported cause, so the caller must fall through to its
-        // own supervisor.log pointer instead.
-        assert_eq!(
-            model.exit,
-            Some(AttachmentOutcome::ExecutionFailed { reason: None })
-        );
-    }
-
-    #[test]
-    fn terminal_stop_wins_every_connection_closure_ordering() {
-        for lost_first in [false, true] {
-            for _ in 0..50 {
-                let mut model = AppModel::default();
-                let lost = Msg::Client(AttachmentEvent::ConnectionChanged(
-                    phoxal_cli_observation::ConnectionObservation::Lost {
-                        reason: "stream closed".into(),
-                    },
-                ));
-                let stopped = Msg::Client(AttachmentEvent::SupervisorChanged(Arc::new(
-                    supervisor(Lifecycle::Stopped),
-                )));
-                if lost_first {
-                    update(&mut model, lost);
-                    update(&mut model, stopped);
-                } else {
-                    update(&mut model, stopped);
-                    update(&mut model, lost);
-                }
-                assert_eq!(model.exit, Some(AttachmentOutcome::ExecutionStopped));
-            }
         }
     }
 
@@ -1395,25 +1383,27 @@ mod tests {
     }
 
     #[test]
-    fn restart_without_a_live_producer_is_a_visible_diagnostic() {
+    fn there_is_no_restart_key_because_nothing_can_restart_a_runtime() {
         let key = ParticipantId::new("drive").expect("fixture participant");
-        let mut process = process(key.clone());
-        process.row.producer = None;
         let mut model = AppModel {
             epoch: Some(epoch()),
             route: FocusRoute::Content {
                 panel: PanelId::Runtimes(RuntimesPanelId::Processes),
             },
-            ..AppModel::default()
+            ..launched()
         };
-        model.overview.processes = Arc::new(BTreeMap::from([(key.clone(), process)]));
+        model.overview.processes = Arc::new(BTreeMap::from([(key.clone(), process(key.clone()))]));
         model.runtimes.candidate = Some(key);
+
+        // The supervisor observes; it starts nothing and therefore restarts
+        // nothing, and this client cannot restart one runtime of a graph it
+        // launched as a whole either. `r` is an ordinary unbound key now.
         let effects = update(
             &mut model,
             Msg::Navigate(NavigationMsg::Key(Key::Char('r').into())),
         );
         assert!(effects.is_empty());
-        assert!(model.overview.diagnostics[0].contains("no restartable producer"));
+        assert!(model.overview.diagnostics.is_empty());
     }
 
     #[test]
@@ -1586,26 +1576,22 @@ mod tests {
         assert!(model.clear_requested);
     }
 
-    fn supervisor(lifecycle: Lifecycle) -> SupervisorObservation {
-        supervisor_with_failure(lifecycle, None)
+    /// A model for a session this client launched, and can therefore stop.
+    fn launched() -> AppModel {
+        AppModel {
+            stoppable: true,
+            ..AppModel::default()
+        }
     }
 
-    fn supervisor_with_failure(
-        lifecycle: Lifecycle,
-        failure: Option<&str>,
-    ) -> SupervisorObservation {
+    fn supervisor(lifecycle: Lifecycle) -> SupervisorObservation {
         SupervisorObservation {
             revision: 1,
             execution: epoch().execution,
             robot: RobotId::new("testbot").expect("fixture robot id"),
-            clock: Clock::Real,
             project: "/tmp/robot".to_string(),
             lifecycle,
             startup: Vec::new(),
-            failure: failure.map(|detail| SupervisorFailure {
-                reason: SupervisorFailureReason::LaunchFailed,
-                detail: Detail::new(detail),
-            }),
         }
     }
 
@@ -1637,19 +1623,13 @@ mod tests {
             row: Process {
                 participant,
                 kind: phoxal_runtime_contract::metadata::ParticipantKind::Service,
-                component: None,
-                desired: DesiredState::Running,
-                state: ProcessState::Ready,
-                pid: Some(42),
+                state: ProcessState::Present,
                 producer: Some(
                     ProducerId::try_from((1_u128 << 124) | 43).expect("fixture producer"),
                 ),
-                restarts: 0,
-                failure: None,
             },
-            observed_started_at: Instant::now(),
-            observed_ended_at: None,
-            observed_first_ready_at: Some(Instant::now()),
+            observed_present_at: Some(Instant::now()),
+            local: None,
         }
     }
 }

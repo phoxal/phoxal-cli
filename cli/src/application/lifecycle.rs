@@ -1,33 +1,39 @@
 //! The execution lifecycle commands.
 //!
 //! ```text
-//! run     build a fresh bundle, launch its framework supervisor, attach
-//! start   the same, but wait for readiness and exit
-//! attach  existing execution only: no build, no mutation
-//! stop    existing execution only
+//! run     build a fresh bundle, launch the supervisor and every runtime, attach
+//! start   the same, but return once the graph is up and leave it running
+//! attach  existing execution only: no build, no launch, no mutation
+//! stop    end the session this project's `.phoxal/run/session.json` records
 //! status  existing execution only
 //! logs    existing execution only
 //! ```
 //!
 //! `run` creates a fresh execution and never silently attaches to one that is
-//! already live; `attach` is the explicit existing-execution path. Nothing
-//! here can supervise a graph: the supervisor is a separate executable and the
-//! only channel to it is the supervisor API.
+//! already live; `attach` is the explicit existing-execution path.
+//!
+//! The supervisor observes and starts nothing, so the process that launches the
+//! robot's runtimes is this one. That is what makes `stop` a local operation:
+//! there is no stop command on the supervisor, and there could not be - it
+//! never started anything to stop. What ends a session is signalling the pids
+//! this client wrote down when it started them.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal_client::supervisor::execution::{Lifecycle, Snapshot};
-use phoxal_client::{
-    BusError, ClientError, ConnectError, ConnectOptions, Connection, DisconnectReason,
-};
+use phoxal_client::supervisor::execution::{ProcessState, Snapshot};
+use phoxal_client::{BusError, ConnectError, ConnectOptions, Connection};
 
-use super::session::{self, Detachable};
+use super::launcher::{
+    self, LaunchedRuntime, OwnedSession, RecordedProcess, RecordedRuntime, Selection, SessionRecord,
+};
+use super::session::{self, Detachable, SessionOwnership};
 use super::startup::Startup;
 use super::summary::{SessionSummary, attachment_ending};
 use super::supervisor::{self, LaunchedSupervisor};
-use crate::attach::{CLIENT_PARTICIPANT, Session};
+use crate::attach::{CLIENT_PARTICIPANT, LocalRuntimeFacts, Session};
 use crate::cli::context::AppContext;
 use crate::cli::exit::ReportedExit;
 use crate::cli::output::welcome::{Mode, StepId};
@@ -36,33 +42,19 @@ use crate::lock::{ProjectLock, ProjectLockIdentity, ProjectOperation};
 /// How long a client waits for a freshly launched supervisor to answer connect.
 const HANDSHAKE_BUDGET: Duration = Duration::from_secs(60);
 
-/// How long `start` waits for the graph to reach readiness after it answers.
+/// How long `run`/`start` wait for the launched runtimes to appear.
 const READINESS_BUDGET: Duration = Duration::from_secs(5 * 60);
-
-/// A stopped execution must not leave the one-shot CLI blocked forever while
-/// a broken transport tears down its local session.
-const SESSION_CLOSE_BUDGET: Duration = Duration::from_secs(5);
-
-/// A lost final bus observation must not leave the one-shot stop command
-/// waiting forever after the supervisor accepted the command.
-const STOP_TERMINAL_BUDGET: Duration = Duration::from_secs(5);
 
 /// How often a launch is re-probed while waiting for the supervisor to come up.
 const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
-/// How long a supervisor that just dropped its identity is given to actually
-/// exit, so its own account of why can be quoted instead of the transport's.
-const SUPERVISOR_EXIT_EVIDENCE_BUDGET: Duration = Duration::from_secs(5);
+/// How often this client re-reads its own children while a session runs.
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DriversMode {
-    On,
-    Off,
-}
-
+/// Which runtimes a launch starts, as the command line states it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RunOptions {
-    pub(crate) drivers: DriversMode,
+    pub(crate) drivers_off: bool,
     pub(crate) drivers_subset: Vec<String>,
 }
 
@@ -91,6 +83,10 @@ impl Target {
     pub(crate) fn at_endpoint(endpoint: String, project: PathBuf) -> Self {
         Self { project, endpoint }
     }
+
+    pub(crate) fn paths(&self) -> phoxal_cli_host::paths::RuntimePaths {
+        phoxal_cli_host::paths::RuntimePaths::for_root(&self.project)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -104,15 +100,15 @@ pub(crate) async fn run_command(
 ) -> Result<()> {
     let target = Target::resolve(requested_target, app.project.root())?;
     let startup = Startup::begin(app, &target.project, Mode::Native);
-    let session = match open_fresh_execution(app, &target, options, &startup).await {
-        Ok(session) => session,
+    let launched = match open_fresh_execution(app, &target, &options, &startup, false).await {
+        Ok(launched) => launched,
         Err(error) => return Err(startup.failed(error)),
     };
     // The dashboard takes the terminal only from here: the graph is up, and
     // the checklist has already given the terminal back.
     startup.ready();
-    let outcome = session::drive(app, &target.project, session, Detachable::Yes).await?;
-    report_outcome(app, &target, outcome)
+    let outcome = drive_launched_session(app, &target, launched).await?;
+    report_outcome(app, &target, &outcome)
 }
 
 pub(crate) async fn start_command(
@@ -122,90 +118,218 @@ pub(crate) async fn start_command(
 ) -> Result<()> {
     let target = Target::resolve(requested_target, app.project.root())?;
     let startup = Startup::begin(app, &target.project, Mode::Native);
-    let session = match open_fresh_execution(app, &target, options, &startup).await {
-        Ok(session) => session,
+    let launched = match open_fresh_execution(app, &target, &options, &startup, false).await {
+        Ok(launched) => launched,
         Err(error) => return Err(startup.failed(error)),
     };
     startup.ready();
+    let absent = launched.absent_runtimes();
+    // Detach the session's client half only. The children are in their own
+    // process groups with no inherited pipes, so they survive this process
+    // exiting - which is the whole point of `start`.
+    launched.session.shutdown().await;
     let display = target.project.display();
-    session.shutdown().await;
+    if !absent.is_empty() {
+        app.ui.warn(format!(
+            "started degraded; not present: {}",
+            absent.join(", ")
+        ));
+    }
     app.ui.info(format!(
-        "robot instance ready; attach with `phoxal attach {display}` or stop with `phoxal stop {display}`"
+        "robot instance ready; attach with `phoxal attach {display}` or stop with `phoxal stop \
+         {display}`"
     ));
     Ok(())
 }
 
-/// Build, launch, attach, and wait for the graph - the whole road from a
-/// project to an execution an operator can be shown.
+/// One launched session: everything this client started, plus its attachment.
+pub(crate) struct LaunchedSession {
+    pub(crate) session: Session,
+    supervisor: LaunchedSupervisor,
+    /// Re-reads this client's own children so the dashboard and the startup
+    /// checklist can say why an absent runtime is absent.
+    pub(crate) children: tokio::task::JoinHandle<()>,
+    record: SessionRecord,
+    paths: phoxal_cli_host::paths::RuntimePaths,
+    /// Held for the whole session: the bundle being executed is the one this
+    /// command just published, and a concurrent build would replace it.
+    _lock: ProjectLock,
+}
+
+impl LaunchedSession {
+    /// The runtimes the supervisor does not see, named for the operator.
+    fn absent_runtimes(&self) -> Vec<String> {
+        self.session.snapshot().map_or_else(Vec::new, |snapshot| {
+            snapshot
+                .processes
+                .iter()
+                .filter(|process| process.state != ProcessState::Present)
+                .map(|process| process.participant.to_string())
+                .collect()
+        })
+    }
+
+    pub(crate) fn owned(&self) -> OwnedSession {
+        OwnedSession::new(self.record.clone(), self.paths.clone())
+    }
+
+    /// The bundle every recorded process was launched against.
+    pub(crate) fn bundle(&self) -> &Path {
+        &self.record.bundle
+    }
+}
+
+/// Build, launch, attach, and wait - the whole road from a project to a running
+/// robot an operator can be shown.
 async fn open_fresh_execution(
     app: &AppContext,
     target: &Target,
-    options: RunOptions,
+    options: &RunOptions,
     startup: &Startup,
-) -> Result<Session> {
-    let launched = build_publish_and_launch(app, target, options, startup).await?;
-    startup.step(StepId::Supervisor, "waiting for the supervisor");
-    let (session, mut launched) = await_attachment(target, launched, HANDSHAKE_BUDGET).await?;
-    if let Err(error) = startup.await_graph(&session, READINESS_BUDGET).await {
-        let error = explain_with_supervisor_exit(error, &mut launched).await;
-        // Close the attachment before reporting. An abandoned session tears its
-        // transport down during process shutdown instead, which is where the
-        // "subscriber closed" noise and a lost graceful detach come from.
-        session.shutdown().await;
-        return Err(error);
-    }
-    Ok(session)
+    simulation: bool,
+) -> Result<LaunchedSession> {
+    let launched = launch_execution(app, target, options, startup, simulation).await?;
+    await_session_ready(launched, startup).await
 }
 
-/// Prefer the supervisor's own account when the graph wait ended because the
-/// supervisor went away.
+/// Everything up to and including the attachment: build, publish, start the
+/// supervisor, start the runtimes, record them, attach.
 ///
-/// What the client observes in that moment is its transport losing the
-/// supervisor's identity token - true, and useless: it names the consequence.
-/// The supervisor writes the cause to its log on the way out, so the exit is
-/// awaited briefly first: the identity is dropped as the supervisor begins
-/// unwinding, and the process itself is a moment behind. A supervisor that is
-/// still running after the bound did not cause this, and the original evidence
-/// stands.
-async fn explain_with_supervisor_exit(
-    error: anyhow::Error,
-    launched: &mut LaunchedSupervisor,
-) -> anyhow::Error {
-    let deadline = tokio::time::Instant::now() + SUPERVISOR_EXIT_EVIDENCE_BUDGET;
-    loop {
-        match launched.exited() {
-            Ok(Some(status)) => return anyhow!(launched.startup_exit_message(status)),
-            Ok(None) => {}
-            Err(_) => return error,
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return error;
-        }
-        tokio::time::sleep(PROBE_INTERVAL).await;
-    }
-}
-
-/// The shared front half of `run` and `start`.
-///
-/// The framework train selects and materializes the supervisor. The project
-/// selects the framework it builds against, and the installed CLI product
-/// version says nothing about that, so a product-version difference is not a
-/// reason to refuse a robot's work. Launch resolves the supervisor staged with
-/// the robot release, and a release without one fails there, naming the binary
-/// it could not run.
-///
-/// The live check is a real handshake, not a socket-file probe: an execution
-/// that answers connect is live, and `run` refuses rather than silently
-/// attaching to it. Only then is the build lock taken, so a refused run never
-/// blocks the running execution's own operations.
-async fn build_publish_and_launch(
+/// It stops short of waiting for the runtimes so a caller that has to put
+/// something between the launch and the wait can. A simulation is exactly that
+/// caller: nothing becomes present until Webots is stepping, and Webots is
+/// staged against the bundle this function just published.
+pub(crate) async fn launch_execution(
     app: &AppContext,
     target: &Target,
-    options: RunOptions,
+    options: &RunOptions,
     startup: &Startup,
-) -> Result<LaunchedSupervisor> {
+    simulation: bool,
+) -> Result<LaunchedSession> {
+    let (release, lock) = build_and_publish(app, target, startup).await?;
+    let selection = resolve_selection(&release.bundle, options, simulation)?;
+
+    startup.step(StepId::Supervisor, "waiting for the supervisor");
+    let paths = target.paths();
+    let mut supervisor = supervisor::spawn(&release, &paths.supervisor_log())?;
+    // The supervisor has to be answering before a runtime is started: it runs
+    // the router every runtime dials, and a runtime that starts first would
+    // only spend its first seconds failing to connect.
+    await_supervisor(target, &mut supervisor, HANDSHAKE_BUDGET).await?;
+    startup.complete(StepId::Supervisor, format!("router on {}", target.endpoint));
+
+    let runtimes = launcher::launch(
+        &release.bundle,
+        &target.endpoint,
+        simulation,
+        &selection,
+        &paths,
+    )?;
+    let record = SessionRecord {
+        project: target.project.clone(),
+        endpoint: target.endpoint.clone(),
+        bundle: release.bundle.clone(),
+        simulation,
+        supervisor: RecordedProcess {
+            pid: supervisor.pid(),
+            log: paths.supervisor_log(),
+        },
+        runtimes: runtimes
+            .iter()
+            .map(|runtime| RecordedRuntime {
+                participant: runtime.participant.clone(),
+                pid: runtime.pid(),
+                log: runtime.log.clone(),
+            })
+            .collect(),
+    };
+    // Written before the wait, not after: a startup that times out or is
+    // interrupted has still left processes running, and `phoxal stop` has to
+    // be able to end them.
+    record.write(&paths)?;
+
+    // The child watcher starts before the wait, so the checklist and every
+    // later frame read live facts about this client's own processes rather
+    // than a snapshot taken once.
+    let local = LocalRuntimeFacts::default();
+    let children = tokio::spawn(watch_children(runtimes, local.clone()));
+    let launched = LaunchedSession {
+        session: Session::open(
+            &target.endpoint,
+            target.project.display().to_string(),
+            local,
+        )
+        .await?,
+        supervisor,
+        children,
+        record,
+        paths,
+        _lock: lock,
+    };
+
+    Ok(launched)
+}
+
+/// Wait for the launched runtimes to appear, ending the session if they do not.
+///
+/// Everything this client started is running by here and its record is on
+/// disk, so a failed wait stops it rather than leaving the operator to find a
+/// half-started robot.
+pub(crate) async fn await_session_ready(
+    launched: LaunchedSession,
+    startup: &Startup,
+) -> Result<LaunchedSession> {
+    if let Err(error) = startup
+        .await_graph(
+            &launched.session,
+            launched.session.local(),
+            READINESS_BUDGET,
+        )
+        .await
+    {
+        let cleanup = launched.owned().stop().await;
+        launched.children.abort();
+        launched.session.shutdown().await;
+        return Err(match cleanup {
+            Ok(()) => error,
+            Err(cleanup) => error.context(format!("session cleanup also failed: {cleanup:#}")),
+        });
+    }
+    Ok(launched)
+}
+
+/// Which runtimes this launch starts, validated against the bundle's own set.
+fn resolve_selection(bundle: &Path, options: &RunOptions, simulation: bool) -> Result<Selection> {
+    let available = phoxal_cli_project::bundle_runtimes(bundle)?
+        .into_iter()
+        .filter(|runtime| runtime.role == phoxal_cli_project::RuntimeRole::Driver)
+        .map(|runtime| runtime.participant_id)
+        .collect::<BTreeSet<_>>();
+    if simulation {
+        // Webots simulates the components, so a physical driver beside it would
+        // be a second thing driving the same hardware model.
+        anyhow::ensure!(
+            !options.drivers_off && options.drivers_subset.is_empty(),
+            "a simulation never starts component drivers; --drivers/--driver do not apply"
+        );
+        return Ok(Selection::DriversOff);
+    }
+    Selection::resolve(
+        options.drivers_off,
+        options.drivers_subset.clone(),
+        &available,
+    )
+}
+
+/// The shared front half of `run` and `start`: refuse a live execution, take
+/// the lock, and publish the release this session will execute.
+async fn build_and_publish(
+    app: &AppContext,
+    target: &Target,
+    startup: &Startup,
+) -> Result<(phoxal_cli_project::ReleaseLayout, ProjectLock)> {
     refuse_if_live(target).await?;
-    let _lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
+    let lock = ProjectLock::acquire(ProjectLockIdentity::resolve(
         &target.project,
         ProjectOperation::Run,
     ))
@@ -225,24 +349,13 @@ async fn build_publish_and_launch(
     let prepared = tokio::task::spawn_blocking(move || {
         phoxal_cli_project::prepare_run(phoxal_cli_project::PrepareRunRequest {
             target: runtime_target,
-            drivers: phoxal_cli_project::DriverRequest {
-                mode: match options.drivers {
-                    DriversMode::On => phoxal_cli_project::DriverMode::On,
-                    DriversMode::Off => phoxal_cli_project::DriverMode::Off,
-                },
-                subset: options.drivers_subset,
-            },
             offline,
             reporter,
         })
     })
     .await??;
-
     startup.complete(StepId::PrepareRuntime, staged_detail(&prepared.release));
-    supervisor::spawn(
-        &prepared.release,
-        &phoxal_cli_host::paths::RuntimePaths::for_root(&target.project).supervisor_log(),
-    )
+    Ok((prepared.release, lock))
 }
 
 /// What the prepared release actually contains, counted from the release
@@ -252,6 +365,88 @@ pub(crate) fn staged_detail(release: &phoxal_cli_project::ReleaseLayout) -> Stri
     match std::fs::read_dir(release.bundle.join("bin")) {
         Ok(entries) => format!("{} binaries staged", entries.count()),
         Err(_) => "release ready".to_string(),
+    }
+}
+
+/// Drive a launched session's dashboard, watching its own supervisor as it
+/// goes, and end whatever is still running when it returns.
+async fn drive_launched_session(
+    app: &AppContext,
+    target: &Target,
+    launched: LaunchedSession,
+) -> Result<phoxal_cli_ui::AttachmentOutcome> {
+    let LaunchedSession {
+        session,
+        supervisor,
+        children,
+        record,
+        paths,
+        _lock,
+    } = launched;
+    let owned = OwnedSession::new(record, paths.clone());
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    let (stop_watch_tx, stop_watch_rx) = tokio::sync::oneshot::channel();
+    let supervisor = std::sync::Arc::new(tokio::sync::Mutex::new(supervisor));
+    let watcher = tokio::spawn(supervisor::watch_owned(
+        std::sync::Arc::clone(&supervisor),
+        exit_tx,
+        stop_watch_rx,
+    ));
+
+    let outcome = session::drive(
+        app,
+        &target.project,
+        session,
+        Detachable::Yes,
+        SessionOwnership {
+            owned: Some(owned.clone()),
+            supervisor_exit: Some(exit_rx),
+        },
+    )
+    .await;
+    let _ = stop_watch_tx.send(());
+    let _ = watcher.await;
+    children.abort();
+    let _ = children.await;
+
+    let outcome = outcome?;
+    // Detaching leaves everything running - that is what detaching means. Every
+    // other ending means the session is over, so nothing of it is left behind.
+    if outcome != phoxal_cli_ui::AttachmentOutcome::Detached {
+        owned.stop().await.context("failed to end the session")?;
+    }
+    Ok(outcome)
+}
+
+/// Keep this client's view of its own children fresh while the dashboard runs.
+async fn watch_children(mut runtimes: Vec<LaunchedRuntime>, local: LocalRuntimeFacts) {
+    loop {
+        let mut values = phoxal_cli_observation::LocalRuntimes::new();
+        for runtime in &mut runtimes {
+            let state = match runtime.exited() {
+                Ok(None) => phoxal_cli_observation::LocalRuntimeState::Running,
+                Ok(Some(status)) => phoxal_cli_observation::LocalRuntimeState::Exited {
+                    status: status.to_string(),
+                },
+                Err(error) => phoxal_cli_observation::LocalRuntimeState::Exited {
+                    status: format!("could not be inspected: {error}"),
+                },
+            };
+            let Ok(participant) =
+                phoxal_runtime_contract::identity::ParticipantId::new(runtime.participant.clone())
+            else {
+                continue;
+            };
+            values.insert(
+                participant,
+                phoxal_cli_observation::LocalRuntime {
+                    state,
+                    log: runtime.log.clone(),
+                },
+            );
+        }
+        local.replace(values);
+        tokio::time::sleep(CHILD_POLL_INTERVAL).await;
     }
 }
 
@@ -393,31 +588,30 @@ const fn classify_launch_failure(error: &ConnectError) -> ConnectFailure {
 
 /// Watch the launched supervisor until it answers connect, or until it exits.
 ///
-/// Before the handshake completes there is nothing but process facts and
-/// stderr to go on, so an early exit is reported with the supervisor's own
-/// diagnostics rather than as a timeout.
-async fn await_attachment(
+/// Nothing else has been started yet, so the only evidence available is process
+/// facts and the supervisor's own log: an early exit is reported with those
+/// rather than as a timeout.
+pub(crate) async fn await_supervisor(
     target: &Target,
-    mut launched: LaunchedSupervisor,
+    launched: &mut LaunchedSupervisor,
     budget: Duration,
-) -> Result<(Session, LaunchedSupervisor)> {
+) -> Result<()> {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
         if let Some(status) = launched.exited()? {
             bail!(launched.early_exit_message(status));
         }
-        match Session::open(&target.endpoint, target.project.display().to_string()).await {
-            Ok(session) => return Ok((session, launched)),
+        match Connection::connect(&ConnectOptions::new(&target.endpoint, CLIENT_PARTICIPANT)).await
+        {
+            Ok(connection) => {
+                // This probe exists to learn that the supervisor is answering;
+                // the session opens its own attachment.
+                let _ = connection.close().await;
+                return Ok(());
+            }
             Err(error) => {
-                // The child is alive, so "not answering yet" is latency; only a
-                // permanent fact about a discovered execution is already an
-                // answer.
-                if error
-                    .downcast_ref::<ConnectError>()
-                    .map_or(ConnectFailure::Fatal, classify_launch_failure)
-                    == ConnectFailure::Fatal
-                {
-                    return Err(error);
+                if classify_launch_failure(&error) == ConnectFailure::Fatal {
+                    return Err(error.into());
                 }
                 if tokio::time::Instant::now() >= deadline {
                     if let Some(status) = launched.exited()? {
@@ -430,13 +624,11 @@ async fn await_attachment(
                     } else {
                         format!("; phoxal-supervisor reported: {diagnostics}")
                     };
-                    return Err(error).with_context(|| {
-                        format!(
-                            "timed out after {}s waiting for phoxal-supervisor to answer at {}{hint}",
-                            budget.as_secs(),
-                            target.endpoint
-                        )
-                    });
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "timed out after {}s waiting for phoxal-supervisor to answer at {}{hint}",
+                        budget.as_secs(),
+                        target.endpoint
+                    )));
                 }
                 tokio::time::sleep(PROBE_INTERVAL).await;
             }
@@ -462,9 +654,13 @@ async fn open_existing(
         ),
         None => Target::resolve(requested_target, app.project.root())?,
     };
-    let session = Session::open(&target.endpoint, target.project.display().to_string())
-        .await
-        .map_err(|error| describe_missing_execution(error, &target))?;
+    let session = Session::open(
+        &target.endpoint,
+        target.project.display().to_string(),
+        LocalRuntimeFacts::default(),
+    )
+    .await
+    .map_err(|error| describe_missing_execution(error, &target))?;
     Ok((target, session))
 }
 
@@ -497,130 +693,39 @@ pub(crate) async fn attach_command(
     endpoint: Option<String>,
 ) -> Result<()> {
     let (target, session) = open_existing(app, requested_target, endpoint).await?;
-    let outcome = session::drive(app, &target.project, session, Detachable::Yes).await?;
-    report_outcome(app, &target, outcome)
+    // An attachment owns nothing: it launched no process, so it cannot stop
+    // one, and the dashboard does not offer a key that would only refuse.
+    let outcome = session::drive(
+        app,
+        &target.project,
+        session,
+        Detachable::Yes,
+        SessionOwnership::default(),
+    )
+    .await?;
+    report_outcome(app, &target, &outcome)
 }
 
-pub(crate) async fn stop_command(
-    app: &AppContext,
-    requested_target: Option<&Path>,
-    endpoint: Option<String>,
-) -> Result<()> {
-    let (target, session) = open_existing(app, requested_target, endpoint).await?;
-    let outcome = match session.ports.supervisor.stop().await {
-        Ok(phoxal_client::supervisor::execution::CommandOutcome::Accepted { .. }) => {
-            match tokio::time::timeout(STOP_TERMINAL_BUDGET, await_terminal(&session)).await {
-                Ok(outcome) => outcome,
-                Err(_) => confirm_accepted_stop(&target).await,
-            }
-        }
-        Ok(phoxal_client::supervisor::execution::CommandOutcome::Rejected { reason }) => {
-            Err(anyhow!("the supervisor rejected the stop: {reason:?}"))
-        }
-        Err(error) => stop_command_failure(error, session.disconnect_reason()),
+/// End the session this project recorded, from any terminal.
+///
+/// There is no remote stop to fall back on: the supervisor starts nothing and
+/// therefore stops nothing. A project with no session record has nothing this
+/// CLI started, and says so rather than pretending to have ended something.
+pub(crate) async fn stop_command(app: &AppContext, requested_target: Option<&Path>) -> Result<()> {
+    let target = Target::resolve(requested_target, app.project.root())?;
+    let paths = target.paths();
+    let Some(record) = SessionRecord::read(&paths) else {
+        bail!(
+            "no session record at {}; this CLI did not start anything here. `stop` ends the \
+             processes `phoxal run`/`phoxal start` recorded - a robot started some other way is \
+             stopped the same way it was started",
+            launcher::record_path(&paths).display()
+        )
     };
-    let close = match tokio::time::timeout(SESSION_CLOSE_BUDGET, session.close()).await {
-        Ok(close) => close,
-        Err(_) => Err(anyhow!(
-            "the execution stopped, but the local client connection did not close within {}s",
-            SESSION_CLOSE_BUDGET.as_secs()
-        )),
-    };
-    finish_stop(outcome, close)?;
+    launcher::stop_session(&record, &paths).await?;
     app.ui
-        .info(format!("execution stopped at {}", target.endpoint));
+        .info(format!("session stopped at {}", record.endpoint));
     Ok(())
-}
-
-/// Confirm an accepted stop when the dying transport loses its final
-/// liveliness notification. A fresh connection attempt is independent of the
-/// original session: only an absent supervisor proves that the execution is
-/// gone, while every other result remains an error.
-async fn confirm_accepted_stop(target: &Target) -> Result<()> {
-    let options = ConnectOptions::new(&target.endpoint, CLIENT_PARTICIPANT);
-    match tokio::time::timeout(STOP_TERMINAL_BUDGET, Connection::connect(&options)).await {
-        Ok(Err(ConnectError::NoExecution { .. } | ConnectError::SupervisorUnavailable)) => Ok(()),
-        Ok(Err(error)) => Err(error).context(
-            "the supervisor accepted the stop, but a fresh connection could not confirm its exit",
-        ),
-        Ok(Ok(connection)) => {
-            let _ = tokio::time::timeout(SESSION_CLOSE_BUDGET, connection.close()).await;
-            bail!("the supervisor accepted the stop, but the execution still answers")
-        }
-        Err(_) => bail!(
-            "the supervisor accepted the stop, but a fresh connection did not finish within {}s",
-            STOP_TERMINAL_BUDGET.as_secs()
-        ),
-    }
-}
-
-/// Interpret a command failure using the connection's structured terminal
-/// evidence. A closed query or transport alone proves only that the command
-/// failed; only the supervisor identity disappearing proves the execution the
-/// command addressed is gone.
-fn stop_command_failure(error: anyhow::Error, observed: Option<DisconnectReason>) -> Result<()> {
-    let reported = error
-        .downcast_ref::<ClientError>()
-        .and_then(|error| match error {
-            ClientError::Disconnected { reason } => Some(reason.clone()),
-            _ => None,
-        });
-    match reported.or(observed) {
-        Some(reason) => stop_disconnect_outcome(reason),
-        None => Err(error),
-    }
-}
-
-fn stop_disconnect_outcome(reason: DisconnectReason) -> Result<()> {
-    match reason {
-        DisconnectReason::SupervisorIdentityLost => Ok(()),
-        reason => Err(ClientError::Disconnected { reason }.into()),
-    }
-}
-
-fn stop_snapshot_outcome(snapshot: &Snapshot) -> Result<bool> {
-    match snapshot.lifecycle {
-        Lifecycle::Stopped => Ok(true),
-        Lifecycle::Failed => bail!(failure_message(snapshot)),
-        _ => Ok(false),
-    }
-}
-
-fn finish_stop(outcome: Result<()>, close: Result<()>) -> Result<()> {
-    match (outcome, close) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error.context(
-            "the execution stopped, but the local client connection did not close cleanly",
-        )),
-        (Err(error), Err(close)) => Err(error.context(format!(
-            "the stop failed and the local client connection also failed to close: {close:#}"
-        ))),
-    }
-}
-
-/// Wait for the execution to publish `Stopped`, or for its execution-scoped
-/// supervisor identity to disappear. Every other terminal cause is a failure.
-async fn await_terminal(session: &Session) -> Result<()> {
-    let mut snapshots = session.snapshots();
-    loop {
-        let installed = snapshots.borrow_and_update().clone();
-        if let Some(snapshot) = installed
-            && stop_snapshot_outcome(&snapshot)?
-        {
-            return Ok(());
-        }
-        tokio::select! {
-            reason = session.disconnected() => return stop_disconnect_outcome(reason),
-            changed = snapshots.changed() => {
-                if changed.is_err() {
-                    return stop_disconnect_outcome(
-                        session.disconnect_reason().unwrap_or(DisconnectReason::LifecycleEnded)
-                    );
-                }
-            }
-        }
-    }
 }
 
 pub(crate) async fn status_command(
@@ -628,11 +733,12 @@ pub(crate) async fn status_command(
     requested_target: Option<&Path>,
     endpoint: Option<String>,
 ) -> Result<()> {
-    let (_, session) = open_existing(app, requested_target, endpoint).await?;
+    let (target, session) = open_existing(app, requested_target, endpoint).await?;
     let snapshot = session
         .snapshot()
         .context("the supervisor answered connect but published no snapshot")?;
-    for line in render_status(&snapshot, session.connected()) {
+    let record = SessionRecord::read(&target.paths());
+    for line in render_status(&snapshot, session.connected(), record.as_ref()) {
         println!("{line}");
     }
     session.shutdown().await;
@@ -641,37 +747,25 @@ pub(crate) async fn status_command(
 
 /// Render one snapshot as the plain status report.
 ///
-/// It is a pure function of the snapshot on purpose: the whole status surface
-/// is the authoritative document, so there is nothing to fetch and nothing to
-/// derive from local state.
+/// The snapshot half is a pure function of the authoritative document. The
+/// local half - which of these runtimes this machine started, and where their
+/// logs are - comes from the session record, and is simply absent for a robot
+/// this CLI did not launch.
 pub(crate) fn render_status(
     snapshot: &Snapshot,
     connected: &phoxal_client::Connected,
+    record: Option<&SessionRecord>,
 ) -> Vec<String> {
     let mut lines = vec![
         format!("robot:     {}", connected.robot),
-        format!("clock:     {:?}", connected.clock).to_lowercase(),
         format!("lifecycle: {:?}", snapshot.lifecycle).to_lowercase(),
         format!("revision:  {}", snapshot.revision),
     ];
-    if let Some(failure) = &snapshot.failure {
-        lines.push(format!(
-            "failure:   {:?}: {}",
-            failure.reason,
-            failure.detail.as_str()
-        ));
-    }
     lines.push(format!("processes: {}", snapshot.processes.len()));
     for process in &snapshot.processes {
         let mut row = format!("  {:<24} {:?}", process.participant, process.state).to_lowercase();
-        if let Some(pid) = process.pid {
-            row.push_str(&format!(" pid={pid}"));
-        }
-        if process.restarts > 0 {
-            row.push_str(&format!(" restarts={}", process.restarts));
-        }
-        if let Some(failure) = &process.failure {
-            row.push_str(&format!(" failure={}", failure.detail.as_str()));
+        if let Some(log) = record.and_then(|record| record.log_for(process.participant.as_str())) {
+            row.push_str(&format!(" log={}", log.display()));
         }
         lines.push(row);
     }
@@ -755,31 +849,17 @@ fn render_log(record: &phoxal_client::supervisor::logs::Record) -> String {
 // shared outcome reporting
 // ---------------------------------------------------------------------------
 
-fn failure_message(snapshot: &Snapshot) -> String {
-    snapshot.failure.as_ref().map_or_else(
-        || "the execution failed without reporting a reason".to_string(),
-        |failure| format!("{:?}: {}", failure.reason, failure.detail.as_str()),
-    )
-}
-
 /// Close a dashboard session with the one block that says what happened.
-///
-/// The failure is reported *in* the block rather than as a second, separate
-/// error line: the operator has just watched a terminal application vanish, and
-/// one plain account of the ending - with the log that holds the rest - is the
-/// whole answer.
 pub(crate) fn report_outcome(
     app: &AppContext,
     target: &Target,
-    outcome: phoxal_cli_ui::AttachmentOutcome,
+    outcome: &phoxal_cli_ui::AttachmentOutcome,
 ) -> Result<()> {
     use phoxal_cli_ui::AttachmentOutcome;
-    let failed = matches!(outcome, AttachmentOutcome::ExecutionFailed { .. });
-    SessionSummary::new(
-        attachment_ending(&outcome),
-        vec![phoxal_cli_host::paths::RuntimePaths::for_root(&target.project).supervisor_log()],
-    )
-    .print(&target.project, app.output.theme);
+    let failed = matches!(outcome, AttachmentOutcome::ExecutionEnded { .. });
+    let paths = target.paths();
+    SessionSummary::new(attachment_ending(outcome), vec![paths.supervisor_log()])
+        .print(&target.project, app.output.theme);
     if failed {
         return Err(ReportedExit(1).into());
     }
@@ -788,11 +868,8 @@ pub(crate) fn report_outcome(
 
 #[cfg(test)]
 mod tests {
-    use phoxal_client::supervisor::execution::{
-        DesiredState, Detail, Process, ProcessState, SupervisorFailure, SupervisorFailureReason,
-    };
-    use phoxal_client::{BusError, BusFault, QueryError};
-    use phoxal_runtime_contract::clock::Clock;
+    use phoxal_client::supervisor::execution::{Lifecycle, Process};
+    use phoxal_client::{BusError, QueryError};
     use phoxal_runtime_contract::identity::{ParticipantId, ProducerId, RobotId};
     use phoxal_runtime_contract::metadata::ParticipantKind;
 
@@ -806,17 +883,11 @@ mod tests {
             processes: vec![Process {
                 participant: ParticipantId::new("base").expect("fixture participant"),
                 kind: ParticipantKind::Service,
-                component: None,
-                desired: DesiredState::Running,
-                state: ProcessState::Ready,
-                pid: Some(4_242),
+                state: ProcessState::Present,
                 producer: Some(
                     ProducerId::try_from((1_u128 << 124) | 43).expect("fixture producer"),
                 ),
-                restarts: 2,
-                failure: None,
             }],
-            failure: None,
         }
     }
 
@@ -824,25 +895,53 @@ mod tests {
         phoxal_client::Connected {
             execution: phoxal_runtime_contract::identity::ExecutionId::mint(),
             robot: RobotId::new("rover").expect("fixture robot"),
-            clock: Clock::Simulated,
             manual_drive: None,
             framework: phoxal_runtime_contract::version::FrameworkVersion::CURRENT,
         }
     }
 
-    /// `status` renders the authoritative snapshot and nothing else - there is
-    /// no second source to reconcile it against.
+    fn record() -> SessionRecord {
+        SessionRecord {
+            project: PathBuf::from("/tmp/rover"),
+            endpoint: "unixsock-stream//tmp/rover/.phoxal/run/supervisor.sock".to_string(),
+            bundle: PathBuf::from("/tmp/rover/.phoxal/release/bundle"),
+            simulation: false,
+            supervisor: RecordedProcess {
+                pid: 1,
+                log: PathBuf::from("/tmp/rover/.phoxal/run/supervisor.log"),
+            },
+            runtimes: vec![RecordedRuntime {
+                participant: "base".to_string(),
+                pid: 2,
+                log: PathBuf::from("/tmp/rover/.phoxal/run/log/base.log"),
+            }],
+        }
+    }
+
+    /// `status` renders the authoritative snapshot, and adds the log path only
+    /// when this machine is the one that started the runtime.
     #[test]
-    fn status_renders_the_snapshot_including_every_process_row() {
-        let rendered = render_status(&snapshot(Lifecycle::Ready), &connected()).join("\n");
-        assert!(rendered.contains("robot:     rover"), "{rendered}");
-        assert!(rendered.contains("clock:     simulated"), "{rendered}");
-        assert!(rendered.contains("lifecycle: ready"), "{rendered}");
-        assert!(rendered.contains("revision:  7"), "{rendered}");
-        assert!(rendered.contains("processes: 1"), "{rendered}");
-        assert!(rendered.contains("base"), "{rendered}");
-        assert!(rendered.contains("pid=4242"), "{rendered}");
-        assert!(rendered.contains("restarts=2"), "{rendered}");
+    fn status_renders_the_snapshot_and_only_locally_launched_logs() {
+        let remote = render_status(&snapshot(Lifecycle::Ready), &connected(), None).join("\n");
+        assert!(remote.contains("robot:     rover"), "{remote}");
+        assert!(remote.contains("lifecycle: ready"), "{remote}");
+        assert!(remote.contains("revision:  7"), "{remote}");
+        assert!(remote.contains("processes: 1"), "{remote}");
+        assert!(remote.contains("base"), "{remote}");
+        assert!(remote.contains("present"), "{remote}");
+        assert!(!remote.contains("log="), "{remote}");
+
+        let local = render_status(
+            &snapshot(Lifecycle::Degraded),
+            &connected(),
+            Some(&record()),
+        )
+        .join("\n");
+        assert!(local.contains("lifecycle: degraded"), "{local}");
+        assert!(
+            local.contains("log=/tmp/rover/.phoxal/run/log/base.log"),
+            "{local}"
+        );
     }
 
     fn target() -> Target {
@@ -885,9 +984,6 @@ mod tests {
             ConnectError::UnreadableBootstrap {
                 detail: "phoxal/supervisor-connect/v1".to_string(),
             },
-            ConnectError::Snapshot(
-                phoxal_client::supervisor::execution::SnapshotError::MissingSupervisorFailure,
-            ),
             ConnectError::Query(QueryError::Unavailable),
             ConnectError::Bus(BusError::Closed),
         ] {
@@ -1050,9 +1146,10 @@ mod tests {
             .split_once("// shared outcome reporting")
             .map_or(after, |(before, _)| before);
         for forbidden in [
-            "build_publish_and_launch",
+            "build_and_publish",
             "prepare_run",
             "supervisor::spawn",
+            "launcher::launch",
             "ProjectLock::acquire",
         ] {
             assert!(
@@ -1063,123 +1160,6 @@ mod tests {
         assert!(
             existing_half.contains("Session::open"),
             "the existing-execution commands attach and nothing else"
-        );
-    }
-
-    /// Project work never gates on the two installed halves reporting the same
-    /// product version: the project selects its framework, and the CLI product
-    /// version is not a compatibility identity for it. `run` and `start` go
-    /// straight from the requested target to resolving the project.
-    #[test]
-    fn run_and_start_do_not_gate_project_work_on_the_cli_product_version() {
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/application/lifecycle.rs"),
-        )
-        .expect("this module is readable");
-        for command in [
-            "pub(crate) async fn run_command(",
-            "pub(crate) async fn start_command(",
-        ] {
-            let (_, body) = source.split_once(command).expect("the command exists");
-            let (opening, _) = body
-                .split_once("Target::resolve")
-                .expect("it resolves a target");
-            assert!(
-                !opening.contains("crate::pair::"),
-                "{command} must not consult the installed pair before doing project work"
-            );
-        }
-    }
-
-    /// Identity loss and an observed `Stopped` snapshot are the only two facts
-    /// that prove the requested execution ended.
-    #[test]
-    fn stop_classification_preserves_every_disconnect_reason() {
-        assert!(
-            stop_disconnect_outcome(DisconnectReason::SupervisorIdentityLost).is_ok(),
-            "the execution-scoped identity disappearing proves the execution ended"
-        );
-
-        for failure in [
-            DisconnectReason::ConnectionClosed,
-            DisconnectReason::SnapshotStreamFailed {
-                detail: "snapshot subscriber closed".to_string(),
-            },
-            DisconnectReason::TransportFault {
-                fault: BusFault::WorkerExited {
-                    worker: "outbound-drain".to_string(),
-                },
-            },
-            DisconnectReason::LifecycleEnded,
-        ] {
-            let expected = failure.clone();
-            let error = stop_disconnect_outcome(failure)
-                .expect_err("a non-identity disconnect does not prove a successful stop");
-            assert!(
-                matches!(
-                    error.downcast_ref::<ClientError>(),
-                    Some(ClientError::Disconnected { reason }) if reason == &expected
-                ),
-                "the structured disconnect cause must survive: {error:#}"
-            );
-        }
-
-        assert!(stop_snapshot_outcome(&snapshot(Lifecycle::Stopped)).unwrap());
-        assert!(!stop_snapshot_outcome(&snapshot(Lifecycle::Ready)).unwrap());
-        assert!(stop_snapshot_outcome(&snapshot(Lifecycle::Failed)).is_err());
-    }
-
-    #[test]
-    fn command_transport_failures_are_not_rewritten_as_successful_stops() {
-        for error in [
-            ClientError::Query(QueryError::Unavailable),
-            ClientError::Bus(BusError::Closed),
-        ] {
-            let rendered = error.to_string();
-            let surfaced = stop_command_failure(anyhow::Error::new(error), None)
-                .expect_err("a transport closure does not prove the execution stopped");
-            assert_eq!(surfaced.to_string(), rendered);
-        }
-
-        assert!(
-            stop_command_failure(
-                anyhow::Error::new(ClientError::Query(QueryError::Unavailable)),
-                Some(DisconnectReason::SupervisorIdentityLost),
-            )
-            .is_ok(),
-            "separately observed identity loss is authoritative"
-        );
-    }
-
-    #[test]
-    fn local_close_failures_cannot_be_reported_as_a_successful_stop() {
-        let error = finish_stop(
-            Ok(()),
-            Err(anyhow::anyhow!("transport close report retained a failure")),
-        )
-        .expect_err("local close evidence must surface");
-        assert!(
-            format!("{error:#}").contains("local client connection did not close cleanly"),
-            "{error:#}"
-        );
-    }
-
-    #[test]
-    fn a_failed_snapshot_renders_its_typed_reason_and_evidence() {
-        let mut failed = snapshot(Lifecycle::Failed);
-        failed.failure = Some(SupervisorFailure {
-            reason: SupervisorFailureReason::ControlPlaneLost,
-            detail: Detail::new("the world clock never became ready"),
-        });
-        let rendered = render_status(&failed, &connected()).join("\n");
-        assert!(rendered.contains("ControlPlaneLost"), "{rendered}");
-        assert!(
-            rendered.contains("the world clock never became ready"),
-            "{rendered}"
-        );
-        assert_eq!(
-            failure_message(&failed),
-            "ControlPlaneLost: the world clock never became ready"
         );
     }
 }

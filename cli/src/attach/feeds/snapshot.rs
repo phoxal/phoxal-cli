@@ -59,7 +59,12 @@ fn lost_observation(reason: DisconnectReason) -> ConnectionObservation {
 }
 
 async fn publish(context: &FeedContext, snapshot: &Snapshot) -> Result<(), ()> {
-    let processes = context.stores.processes.write().await.replace(snapshot);
+    let processes = context
+        .stores
+        .processes
+        .write()
+        .await
+        .replace(snapshot, &context.local.read());
     context
         .events
         .send(AttachmentEvent::SupervisorChanged(Arc::new(observation(
@@ -82,11 +87,9 @@ fn observation(context: &FeedContext, snapshot: &Snapshot) -> SupervisorObservat
         revision: snapshot.revision,
         execution: context.epoch.execution,
         robot: context.client.connected().robot.clone(),
-        clock: context.client.connected().clock,
         project: context.project.clone(),
         lifecycle: snapshot.lifecycle,
         startup: snapshot.startup.clone(),
-        failure: snapshot.failure.clone(),
     }
 }
 

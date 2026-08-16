@@ -4,8 +4,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub mod intent;
-pub mod requirements;
 pub mod resolver;
 pub mod tooling;
 pub mod train;
