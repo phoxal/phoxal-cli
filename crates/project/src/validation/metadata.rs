@@ -2,7 +2,7 @@
 
 use super::{RawArtifact, RawParticipantReport};
 use crate::check::participant_metadata;
-use crate::source::resolver::{ResolvedPlatformRuntime, official_binary_name};
+use crate::source::resolver::ResolvedPlatformRuntime;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -10,9 +10,14 @@ use phoxal_runtime_contract::version::FrameworkVersion;
 use std::path::Path;
 
 /// Extract one official runtime's participant report straight from its
-/// already-materialized binary at `bin_dir/<canonical name>`. Materialization
-/// (`cargo install`, or a source override build) is the caller's
-/// responsibility - this never fetches or builds anything itself.
+/// already-staged binary. Materialization (`cargo install`, or a source
+/// override build) is the caller's responsibility - this never fetches or
+/// builds anything itself.
+///
+/// The binary is read under the name the *bundle* stages it as - the id it will
+/// be launched under - not the Cargo package name it was installed as. Those
+/// differ (`drive` versus `phoxal-service-drive`), and the bundle's name is the
+/// one that exists on disk by the time anything checks it.
 ///
 /// `project_framework` is the framework the project selected in its lockfile,
 /// which is what the binary's own train has to agree with.
@@ -21,7 +26,7 @@ pub(crate) fn extract_participant_report_from_staged_runtime(
     runtime: &ResolvedPlatformRuntime,
     project_framework: FrameworkVersion,
 ) -> Result<RawParticipantReport> {
-    let binary = bin_dir.join(official_binary_name(runtime.kind, &runtime.name));
+    let binary = bin_dir.join(phoxal_cli_catalog::bundle_binary_name(&runtime.name));
     let meta =
         participant_metadata::extract_participant_metadata_for_project(&binary, project_framework)
             .with_context(|| {

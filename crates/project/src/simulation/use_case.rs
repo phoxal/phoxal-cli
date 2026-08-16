@@ -2,17 +2,15 @@ use anyhow::{Context, Result};
 use phoxal_bundle::RuntimeBundle;
 
 use super::{PrepareSimulationRequest, PreparedSimulation, StageWebotsRequest, WebotsLaunch};
-use crate::run::PreparedExecution;
 
-/// Prepare a simulation: the ordinary release, plus the world and the
-/// controller Webots needs.
+/// Resolve everything a simulation needs that a plain run does not: the world
+/// to open, and the controller that drives it.
 ///
-/// The release is built by the same staging path `phoxal run` uses, from the
-/// same inputs, producing the same bytes. Nothing here rewrites the authored
-/// document, strips a driver block, or adds a participant - simulation is a
-/// launch decision the CLI makes when it starts the runtimes, not a different
-/// bundle.
-pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedExecution> {
+/// The bundle is deliberately not built here. A simulation runs the same
+/// release `phoxal run` does - the same staging pass, the same bytes - so it
+/// goes through the same launcher, and this only supplies the two host-side
+/// pieces that launcher knows nothing about.
+pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedSimulation> {
     crate::progress::ensure_active(request.reporter.as_ref())?;
     let project_root = crate::source::resolver::discover_robot_yaml(&request.target.logical_root)
         .with_context(|| {
@@ -28,14 +26,6 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
     // the operator's typo, and it should not cost a full staging pass to learn.
     let world_source = super::world::resolve_world(&project_root, &request.world)?;
 
-    let release = crate::run::prepare::prepare_source_run(
-        &project_root,
-        crate::run::RunOptions {
-            offline: request.offline,
-        },
-        request.reporter.as_ref(),
-    )?;
-
     // WEBOTS_HOME is a build-time input of the controller's own crate. It is
     // scoped to this materialization and never reaches a spawned runtime.
     let controller = {
@@ -47,14 +37,11 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedE
         super::controller_tool::materialize(request.offline, request.reporter.as_ref())?
     };
 
-    Ok(PreparedExecution {
-        release,
-        simulation: Some(PreparedSimulation {
-            project_root,
-            world_source,
-            webots_executable: request.webots.executable,
-            controller,
-        }),
+    Ok(PreparedSimulation {
+        project_root,
+        world_source,
+        webots_executable: request.webots.executable,
+        controller,
     })
 }
 

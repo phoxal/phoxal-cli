@@ -365,10 +365,7 @@ pub fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecution> {
         }
         RunRootKind::Release => prepare_release_run(&execution_root, request.reporter.as_ref())?,
     };
-    Ok(PreparedExecution {
-        release,
-        simulation: None,
-    })
+    Ok(PreparedExecution { release })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,12 +417,15 @@ fn run_source_check(
     let bin_dir = staged_root.join("bin");
     let project_framework = resolved.train.framework();
     let platform_refs = check_artifact_refs_from_resolved(resolved);
+    // Keyed by the name the binary is *staged* under, which is the id it is
+    // launched by: `cargo install` produced `phoxal-service-drive` and staging
+    // renamed it to `drive`, so that is what is on disk to inspect.
     let mut official_by_name = resolved
         .platform_runtimes
         .iter()
         .map(|runtime| {
             (
-                crate::source::resolver::official_binary_name(runtime.kind, &runtime.name),
+                phoxal_cli_catalog::bundle_binary_name(&runtime.name),
                 runtime,
             )
         })

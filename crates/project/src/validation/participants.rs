@@ -4,15 +4,14 @@ use crate::check::source::SourceParticipant;
 use crate::source::resolver::BundlePlan;
 use crate::source::resolver::ResolvedComponentDriver;
 use crate::source::resolver::ResolvedPlatformRuntime;
-use crate::source::resolver::official_binary_name;
 use crate::source::tooling::resolve_project_path;
 use anyhow::Result;
 use phoxal_cli_catalog::ArtifactKind;
 use std::path::Path;
 
 /// One resolved official artifact `run_check_with_context` needs a
-/// participant report for: its canonical `bin/` file name (the key its
-/// materialized binary is looked up under, post-`cargo install`) plus the
+/// participant report for: its staged `bin/` file name - the id it is launched
+/// under, which is what staging renamed the installed package to - plus the
 /// caller-known identity (`name`/`kind`) that the fetched report's own
 /// declared id is checked against before its schema is trusted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +50,7 @@ pub(crate) fn platform_artifact_refs_from_resolved(
         .map(|runtime| PlatformArtifactRef {
             name: runtime.name.clone(),
             kind: runtime.kind,
-            binary_name: official_binary_name(runtime.kind, &runtime.name),
+            binary_name: phoxal_cli_catalog::bundle_binary_name(&runtime.name),
             instances: Vec::new(),
         })
         .collect()
@@ -87,7 +86,7 @@ pub(crate) fn component_driver_platform_refs_from_resolved(
             .entry(runtime.package.clone())
             .or_insert_with(|| RegistryDriverRef {
                 name: runtime.name.clone(),
-                binary_name: official_binary_name(runtime.kind, &runtime.name),
+                binary_name: phoxal_cli_catalog::bundle_binary_name(&runtime.name),
                 instances: Vec::new(),
             })
             .instances
@@ -119,7 +118,12 @@ pub(crate) fn component_driver_runtimes_by_ref(
         .iter()
         .filter_map(|component| component.driver.as_ref())
         .filter_map(ResolvedComponentDriver::registry_runtime)
-        .map(|runtime| (official_binary_name(runtime.kind, &runtime.name), runtime))
+        .map(|runtime| {
+            (
+                phoxal_cli_catalog::bundle_binary_name(&runtime.name),
+                runtime,
+            )
+        })
         .collect()
 }
 
@@ -463,7 +467,7 @@ robot:
             CheckGraphContext { robot: None },
             |artifact_ref| {
                 fetch_calls += 1;
-                assert_eq!(artifact_ref, "phoxal-component-ddsm115");
+                assert_eq!(artifact_ref, "ddsm115");
                 Ok(raw_kind("driver", "ddsm115"))
             },
             |participant| {

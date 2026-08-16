@@ -121,18 +121,22 @@ fn update_client(model: &mut AppModel, event: AttachmentEvent) -> Vec<Effect> {
             Vec::new()
         }
         AttachmentEvent::ConnectionChanged(connection) => {
-            // A connection loss never overrides a supervisor-reported failure
-            // or stop that already arrived (see the ordering tests below); it
-            // only fills in an exit when the client never saw a terminal
-            // snapshot at all. `reason` is deliberately `None` here - a
-            // transport loss is not a supervisor-reported cause, so the
-            // caller falls through to its own supervisor.log pointer instead
-            // of surfacing this transport-level text as if the supervisor had
-            // explained itself.
+            // A connection loss only ends the session when nothing better has
+            // explained the ending. Two things are better: an ending that
+            // already arrived, and a stop the operator confirmed - the
+            // supervisor going away is the *consequence* of that stop, and
+            // reporting it as the cause would tell an operator their own
+            // deliberate action was an unexplained failure.
+            //
+            // `reason` is deliberately `None`: a transport loss is not a
+            // supervisor-reported cause, so the caller falls through to its own
+            // supervisor.log pointer instead of surfacing transport text as if
+            // the supervisor had explained itself.
             if matches!(
                 &connection,
                 phoxal_cli_observation::ConnectionObservation::Lost { .. }
             ) && model.exit.is_none()
+                && !model.stop_requested
             {
                 model.exit = Some(AttachmentOutcome::ExecutionEnded { reason: None });
             }
@@ -1226,6 +1230,31 @@ mod tests {
         assert_eq!(model.exit, None);
         assert!(model.overview.diagnostics[0].contains("retry"));
         assert_eq!(request_stop(&mut model), vec![Effect::StopSession]);
+    }
+
+    /// A confirmed stop takes the execution away, so the connection loss that
+    /// follows is the stop working - not an unexplained ending. Reporting the
+    /// loss would tell an operator their own deliberate action failed.
+    #[test]
+    fn the_connection_loss_a_confirmed_stop_causes_is_not_the_ending() {
+        let mut model = launched();
+        assert_eq!(request_stop(&mut model), vec![Effect::StopSession]);
+
+        update(
+            &mut model,
+            Msg::Client(AttachmentEvent::ConnectionChanged(
+                phoxal_cli_observation::ConnectionObservation::Lost {
+                    reason: "the supervisor identity token was lost".into(),
+                },
+            )),
+        );
+        assert_eq!(
+            model.exit, None,
+            "the stop this client asked for is still the ending"
+        );
+
+        update(&mut model, Msg::SessionStopped);
+        assert_eq!(model.exit, Some(AttachmentOutcome::SessionStopped));
     }
 
     /// A degraded graph is a running robot with something missing, so it never

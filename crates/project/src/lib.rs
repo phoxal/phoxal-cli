@@ -37,6 +37,9 @@ mod target;
 mod validation;
 
 pub use build::container::ContainerEngine;
+pub use build::overlay::{
+    FRAMEWORK_PATH_VAR, SIMULATOR_WEBOTS_PATH_VAR, framework_path, simulator_webots_path,
+};
 pub use build::shell::shell_quote;
 pub use build::{BuildBackend, BuildBundleRequest, BuiltBundle, build_bundle};
 pub use bundle::archive::{digest_sidecar, verify_against_digest_sidecar};

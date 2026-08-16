@@ -43,7 +43,6 @@ const DIAGNOSTIC_CAPACITY: usize = 64;
 
 pub(crate) struct Startup {
     welcome: Arc<Mutex<Welcome>>,
-    mode: Mode,
     /// Cancelled by Ctrl+C. Preparation polls it through the reporter, and the
     /// graph wait selects on it.
     cancellation: CancellationToken,
@@ -108,7 +107,6 @@ impl Startup {
 
         Self {
             welcome,
-            mode,
             cancellation,
             stop,
             tasks,
@@ -225,10 +223,11 @@ impl Startup {
     /// Fold one published snapshot into the checklist.
     fn observe(&self, snapshot: &Snapshot, local: &LocalRuntimes) -> Progress {
         let mut welcome = self.welcome();
-        // A simulation's supervisor step is already settled by the attach
-        // handshake: its router waits for the world clock, which only exists
-        // once Webots - the step after it - is up.
-        if self.mode == Mode::Native && !welcome.settled(StepId::Supervisor) {
+        // The supervisor's own bootstrap is the same in every mode now: it
+        // reads the manifest and opens its router, and it waits for nothing
+        // else - not for a world clock, not for a participant. So there is no
+        // mode-specific settling here.
+        if !welcome.settled(StepId::Supervisor) {
             if step_state(snapshot, StartupStepKind::Bundle) == Some(StartupStepState::Done)
                 && step_state(snapshot, StartupStepKind::Router) == Some(StartupStepState::Done)
             {
@@ -245,13 +244,11 @@ impl Startup {
                 welcome.begin(StepId::Runtimes, detail);
             }
         }
-        match snapshot.lifecycle {
-            Lifecycle::Ready | Lifecycle::Degraded => {
-                welcome.complete(StepId::Runtimes, graph_detail(snapshot, local));
-                Progress::Ready
-            }
-            Lifecycle::Starting => Progress::Waiting,
+        if launch_is_up(snapshot, local) {
+            welcome.complete(StepId::Runtimes, graph_detail(snapshot, local));
+            return Progress::Ready;
         }
+        Progress::Waiting
     }
 
     /// Hand the terminal over: the graph is up and the dashboard takes it from
@@ -398,9 +395,38 @@ fn supervisor_detail(snapshot: &Snapshot) -> String {
     format!("bundle · {router}")
 }
 
+/// Whether what this session started is up.
+///
+/// The supervisor's lifecycle answers a different question - is the *robot*
+/// whole - and the two diverge exactly where they should: `--drivers off`
+/// launches no driver, so the robot is permanently incomplete and `Starting`
+/// is the supervisor's honest answer forever. What the operator is waiting for
+/// is the runtimes this client actually started, so that is what is waited on;
+/// an attachment that started nothing has only the supervisor's answer and
+/// uses it.
+fn launch_is_up(snapshot: &Snapshot, local: &LocalRuntimes) -> bool {
+    if matches!(snapshot.lifecycle, Lifecycle::Ready | Lifecycle::Degraded) {
+        return true;
+    }
+    if local.is_empty() {
+        return false;
+    }
+    snapshot
+        .processes
+        .iter()
+        .filter(|process| local.contains_key(&process.participant))
+        .all(|process| process.state == ProcessState::Present)
+        && local.keys().all(|launched| {
+            snapshot
+                .processes
+                .iter()
+                .any(|process| &process.participant == launched)
+        })
+}
+
 /// The runtimes line: how many of the robot's expected runtimes are present,
-/// and - when this client launched them - what happened to the ones that are
-/// not.
+/// how many of them this session started, and what happened to the ones that
+/// are not there.
 fn graph_detail(snapshot: &Snapshot, local: &LocalRuntimes) -> String {
     let total = snapshot.processes.len();
     if total == 0 {
@@ -412,6 +438,17 @@ fn graph_detail(snapshot: &Snapshot, local: &LocalRuntimes) -> String {
         .filter(|process| process.state == ProcessState::Present)
         .count();
     let mut detail = format!("{present}/{total} present");
+    // A launch that deliberately started a subset says so, because otherwise
+    // "12/20" reads as eight runtimes that failed rather than eight nobody
+    // asked for.
+    let not_started = snapshot
+        .processes
+        .iter()
+        .filter(|process| !local.contains_key(&process.participant))
+        .count();
+    if !local.is_empty() && not_started > 0 {
+        detail.push_str(&format!(" · {not_started} not started"));
+    }
     // An exited child is the one thing worth the width: it is the difference
     // between "still coming up" and "will never come up".
     let exited = snapshot
@@ -572,6 +609,16 @@ mod tests {
         }
     }
 
+    fn running(participant: &str) -> LocalRuntimes {
+        LocalRuntimes::from([(
+            ParticipantId::new(participant).expect("fixture participant"),
+            LocalRuntime {
+                state: LocalRuntimeState::Running,
+                log: PathBuf::from(format!("/tmp/rover/.phoxal/run/log/{participant}.log")),
+            },
+        )])
+    }
+
     fn exited(participant: &str, status: &str) -> LocalRuntimes {
         LocalRuntimes::from([(
             ParticipantId::new(participant).expect("fixture participant"),
@@ -632,7 +679,7 @@ mod tests {
                 &snapshot(Lifecycle::Starting),
                 &exited("drive", "exit status: 1")
             ),
-            "1/2 present · drive exit status: 1"
+            "1/2 present · 1 not started · drive exit status: 1"
         );
 
         let mut empty = snapshot(Lifecycle::Starting);
@@ -641,6 +688,46 @@ mod tests {
             graph_detail(&empty, &LocalRuntimes::new()),
             "waiting for the runtime set"
         );
+    }
+
+    /// A launch that started a subset is up when its own subset is up.
+    ///
+    /// `--drivers off` leaves the robot permanently incomplete, so the
+    /// supervisor's lifecycle stays `Starting` forever - correctly, because it
+    /// answers "is the robot whole". Gating the dashboard on that would make
+    /// the mode unusable, so the gate is what this client started.
+    #[test]
+    fn a_partial_launch_is_up_when_its_own_runtimes_are_present() {
+        let mut snapshot = snapshot(Lifecycle::Starting);
+        snapshot.processes = vec![
+            process("base", ProcessState::Present),
+            process("left_drive", ProcessState::Absent),
+        ];
+        let launched = running("base");
+
+        assert!(
+            launch_is_up(&snapshot, &launched),
+            "the one runtime this session started is present"
+        );
+        assert_eq!(
+            graph_detail(&snapshot, &launched),
+            "1/2 present · 1 not started"
+        );
+
+        // A runtime this session *did* start and that is not there keeps it
+        // waiting, whatever the rest of the robot looks like.
+        let both = running("base")
+            .into_iter()
+            .chain(running("left_drive"))
+            .collect();
+        assert!(!launch_is_up(&snapshot, &both));
+
+        // An attachment started nothing, so it has only the supervisor's
+        // answer and waits for it.
+        assert!(!launch_is_up(&snapshot, &LocalRuntimes::new()));
+        let mut ready = snapshot.clone();
+        ready.lifecycle = Lifecycle::Degraded;
+        assert!(launch_is_up(&ready, &LocalRuntimes::new()));
     }
 
     /// A timeout from the process that started the runtimes must say which of
@@ -658,7 +745,6 @@ mod tests {
         );
         let startup = Startup {
             welcome: Arc::new(Mutex::new(welcome)),
-            mode: Mode::Native,
             cancellation: CancellationToken::new(),
             stop: CancellationToken::new(),
             tasks: Vec::new(),

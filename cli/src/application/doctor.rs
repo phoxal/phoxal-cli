@@ -22,6 +22,9 @@ impl Doctor {
                 }
             }
         }
+        for line in development_overrides() {
+            app.ui.warn(line);
+        }
         let train = phoxal_cli_project::source::train::resolve_locked_train(
             app.project.root(),
             app.offline,
@@ -55,6 +58,33 @@ impl Doctor {
     }
 }
 
+/// The development overrides in effect, each named with what it replaces.
+///
+/// They are reported as warnings rather than as facts: an operator running
+/// binaries built from a local checkout instead of the published train is in a
+/// state they must be able to see at a glance, and a `doctor` that stayed quiet
+/// about it would be the one place they would expect to find out.
+fn development_overrides() -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(checkout) = phoxal_cli_project::framework_path() {
+        lines.push(format!(
+            "{}={} is set: every official service, component driver, and the supervisor are built \
+             from that checkout instead of the phoxal registry",
+            phoxal_cli_project::FRAMEWORK_PATH_VAR,
+            checkout.display()
+        ));
+    }
+    if let Some(checkout) = phoxal_cli_project::simulator_webots_path() {
+        lines.push(format!(
+            "{}={} is set: the Webots controller is built from that checkout instead of the \
+             phoxal registry",
+            phoxal_cli_project::SIMULATOR_WEBOTS_PATH_VAR,
+            checkout.display()
+        ));
+    }
+    lines
+}
+
 async fn inspect_registry_train(version: String) -> Result<RegistryStatus> {
     run_registry_probe(move || phoxal_cli_project::registry::inspect_registry_train(&version)).await
 }
@@ -79,6 +109,26 @@ pub(crate) async fn doctor_command(app: &AppContext) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two overrides are named by the variable that sets them and by what
+    /// they replace, so an operator reading `doctor` output knows exactly which
+    /// binaries they are about to run.
+    #[test]
+    fn every_development_override_names_its_variable_and_what_it_replaces() {
+        assert_eq!(
+            phoxal_cli_project::FRAMEWORK_PATH_VAR,
+            "PHOXAL_FRAMEWORK_PATH"
+        );
+        assert_eq!(
+            phoxal_cli_project::SIMULATOR_WEBOTS_PATH_VAR,
+            "PHOXAL_SIMULATOR_WEBOTS_PATH"
+        );
+        // The reporter reads the process environment, which this test does not
+        // mutate: an unset override reports nothing at all.
+        for line in development_overrides() {
+            assert!(line.contains("instead of the phoxal registry"), "{line}");
+        }
+    }
 
     #[tokio::test]
     async fn blocking_http_client_is_dropped_outside_the_async_runtime() {

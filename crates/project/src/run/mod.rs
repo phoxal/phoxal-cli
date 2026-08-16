@@ -20,12 +20,11 @@ pub struct PrepareRunRequest {
     pub reporter: Arc<dyn Reporter>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedExecution {
     /// The verified deployment release to launch: the supervisor and the bundle
     /// it runs, which always come from the same release.
     pub release: crate::deployment::ReleaseLayout,
-    pub simulation: Option<super::simulation::PreparedSimulation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

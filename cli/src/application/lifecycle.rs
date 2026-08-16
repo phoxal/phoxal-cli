@@ -172,11 +172,34 @@ impl LaunchedSession {
     pub(crate) fn owned(&self) -> OwnedSession {
         OwnedSession::new(self.record.clone(), self.paths.clone())
     }
+
+    /// The bundle every recorded process was launched against.
+    pub(crate) fn bundle(&self) -> &Path {
+        &self.record.bundle
+    }
 }
 
 /// Build, launch, attach, and wait - the whole road from a project to a running
 /// robot an operator can be shown.
-pub(crate) async fn open_fresh_execution(
+async fn open_fresh_execution(
+    app: &AppContext,
+    target: &Target,
+    options: &RunOptions,
+    startup: &Startup,
+    simulation: bool,
+) -> Result<LaunchedSession> {
+    let launched = launch_execution(app, target, options, startup, simulation).await?;
+    await_session_ready(launched, startup).await
+}
+
+/// Everything up to and including the attachment: build, publish, start the
+/// supervisor, start the runtimes, record them, attach.
+///
+/// It stops short of waiting for the runtimes so a caller that has to put
+/// something between the launch and the wait can. A simulation is exactly that
+/// caller: nothing becomes present until Webots is stepping, and Webots is
+/// staged against the bundle this function just published.
+pub(crate) async fn launch_execution(
     app: &AppContext,
     target: &Target,
     options: &RunOptions,
@@ -193,6 +216,7 @@ pub(crate) async fn open_fresh_execution(
     // the router every runtime dials, and a runtime that starts first would
     // only spend its first seconds failing to connect.
     await_supervisor(target, &mut supervisor, HANDSHAKE_BUDGET).await?;
+    startup.complete(StepId::Supervisor, format!("router on {}", target.endpoint));
 
     let runtimes = launcher::launch(
         &release.bundle,
@@ -243,6 +267,18 @@ pub(crate) async fn open_fresh_execution(
         _lock: lock,
     };
 
+    Ok(launched)
+}
+
+/// Wait for the launched runtimes to appear, ending the session if they do not.
+///
+/// Everything this client started is running by here and its record is on
+/// disk, so a failed wait stops it rather than leaving the operator to find a
+/// half-started robot.
+pub(crate) async fn await_session_ready(
+    launched: LaunchedSession,
+    startup: &Startup,
+) -> Result<LaunchedSession> {
     if let Err(error) = startup
         .await_graph(
             &launched.session,
@@ -251,8 +287,6 @@ pub(crate) async fn open_fresh_execution(
         )
         .await
     {
-        // Everything this client started is still running, and the record is on
-        // disk, so it is stopped here rather than left for the operator to find.
         let cleanup = launched.owned().stop().await;
         launched.children.abort();
         launched.session.shutdown().await;

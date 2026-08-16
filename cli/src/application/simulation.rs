@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use super::launcher::OwnedSession;
-use super::lifecycle::{RunOptions, Target, open_fresh_execution};
+use super::lifecycle::{RunOptions, Target, await_session_ready, launch_execution};
 use super::session::{self, Detachable, SessionOwnership};
 use super::startup::Startup;
 use super::summary::SessionSummary;
@@ -53,13 +53,14 @@ struct StartedSimulation {
     webots: Webots,
 }
 
-/// Stage Webots, then launch the session against it.
+/// Launch the session, stage Webots against the bundle it published, and only
+/// then wait for the runtimes.
 ///
-/// The world is staged *before* the supervisor exists, and can be: the
-/// controller's whole launch contract is the bundle root and the endpoint, and
-/// it learns the execution from the router it dials. That ordering is what lets
-/// Webots be up and stepping by the time the runtimes look for their world
-/// clock, instead of the two waiting on each other.
+/// The wait has to come last. A simulated runtime follows the world clock the
+/// controller publishes, and the controller is what makes every component
+/// instance present, so nothing appears until Webots is open and stepping.
+/// Staging needs the published bundle and Webots needs the endpoint, both of
+/// which exist the moment the launch returns.
 async fn start_simulation(
     app: &AppContext,
     target: &Target,
@@ -71,7 +72,7 @@ async fn start_simulation(
         phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;
     let reporter = startup.reporter();
     let offline = app.offline;
-    let prepared = tokio::task::spawn_blocking(move || {
+    let simulation = tokio::task::spawn_blocking(move || {
         phoxal_cli_project::prepare_simulation(phoxal_cli_project::PrepareSimulationRequest {
             target: runtime_target,
             world,
@@ -81,41 +82,10 @@ async fn start_simulation(
         })
     })
     .await??;
-    let simulation = prepared
-        .simulation
-        .as_ref()
-        .context("simulation preparation returned no simulation data")?;
 
-    startup.step(StepId::Webots, "staging the world");
-    let stage_request = phoxal_cli_project::StageWebotsRequest {
-        bundle_root: prepared.release.bundle.clone(),
-        project_root: simulation.project_root.clone(),
-        world_source: simulation.world_source.clone(),
-        webots_executable: simulation.webots_executable.clone(),
-        controller: simulation.controller.clone(),
-        endpoint: target.endpoint.clone(),
-    };
-    let launch =
-        tokio::task::spawn_blocking(move || phoxal_cli_project::stage_webots(stage_request))
-            .await
-            .context("the Webots staging worker failed")??;
-    let world_name = launch
-        .world
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("world")
-        .to_string();
-    startup.detail(StepId::Webots, format!("world {world_name}"));
-    let paths = target.paths();
-    let webots = Webots::launch(&launch, &paths.webots_log())?;
-    startup.complete(StepId::Webots, format!("world {world_name} · launched"));
-
-    // The release is already staged and published, so this second pass through
-    // the shared launcher does no work beyond starting processes. Ordering it
-    // after Webots is deliberate: the runtimes follow the world clock the
-    // controller publishes, and there is nothing for them to follow until the
-    // world is open.
-    let launched = match open_fresh_execution(
+    // Drivers are never started here, and the flags that would ask for them do
+    // not exist on this command: Webots simulates the components instead.
+    let launched = launch_execution(
         app,
         target,
         &RunOptions {
@@ -125,18 +95,63 @@ async fn start_simulation(
         startup,
         true,
     )
-    .await
-    {
-        Ok(launched) => launched,
+    .await?;
+
+    startup.step(StepId::Webots, "staging the world");
+    let stage_request = phoxal_cli_project::StageWebotsRequest {
+        bundle_root: launched.bundle().to_path_buf(),
+        project_root: simulation.project_root.clone(),
+        world_source: simulation.world_source.clone(),
+        webots_executable: simulation.webots_executable.clone(),
+        controller: simulation.controller.clone(),
+        endpoint: target.endpoint.clone(),
+    };
+    let started = async {
+        let launch =
+            tokio::task::spawn_blocking(move || phoxal_cli_project::stage_webots(stage_request))
+                .await
+                .context("the Webots staging worker failed")??;
+        let world_name = launch
+            .world
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("world")
+            .to_string();
+        startup.detail(StepId::Webots, format!("world {world_name}"));
+        let webots = Webots::launch(&launch, &target.paths().webots_log())?;
+        startup.complete(StepId::Webots, format!("world {world_name} · launched"));
+        Ok::<_, anyhow::Error>(webots)
+    }
+    .await;
+    let webots = match started {
+        Ok(webots) => webots,
+        Err(error) => return Err(end_launched(launched, error).await),
+    };
+
+    match await_session_ready(launched, startup).await {
+        Ok(launched) => Ok(StartedSimulation { launched, webots }),
         Err(error) => {
             let stopped = webots.stop().await;
-            return Err(match stopped {
+            Err(match stopped {
                 Ok(()) => error,
                 Err(stopped) => error.context(format!("closing Webots also failed: {stopped:#}")),
-            });
+            })
         }
-    };
-    Ok(StartedSimulation { launched, webots })
+    }
+}
+
+/// End a session that was launched but never became a simulation.
+async fn end_launched(
+    launched: super::lifecycle::LaunchedSession,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let cleanup = launched.owned().stop().await;
+    launched.children.abort();
+    launched.session.shutdown().await;
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup) => error.context(format!("session cleanup also failed: {cleanup:#}")),
+    }
 }
 
 async fn drive_simulation(
