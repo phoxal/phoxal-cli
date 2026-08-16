@@ -8,13 +8,13 @@
 //! before it: a source root resolves, checks, stages, and packages the
 //! supervisor; a release has nothing to build and is executed as it stands.
 
-use super::{DriverPolicy, RunOptions};
+use super::RunOptions;
 use super::{PrepareRunRequest, PreparedExecution};
 use crate::build::cargo::{SourceArtifacts, build_selected_source_artifacts};
 use crate::build::profile::StagingBuild;
 use crate::resolve::project::resolve_with_train;
 use crate::run::participants::stage_complete_bin_store;
-use crate::run::report::{driven_instances, report_excluded_drivers, report_undeclared_runtimes};
+use crate::run::report::report_undeclared_runtimes;
 use crate::source::resolver::BundlePlan;
 use crate::source::resolver::ResolveOptions;
 use crate::source::resolver::discover_robot_yaml;
@@ -44,8 +44,6 @@ use std::path::PathBuf;
 /// `loader::validate_layout_plan`, which would be a second, redundant
 /// validation pass over already-validated bytes.
 pub(crate) struct StagedProject {
-    pub(crate) resolved: BundlePlan,
-    pub(crate) driver_policy: DriverPolicy,
     /// The published deployment release - `.phoxal/release/`.
     pub(crate) release: crate::deployment::ReleaseLayout,
 }
@@ -63,7 +61,6 @@ pub(crate) struct StagedProject {
 pub(crate) struct ResolvedStagingInput {
     project_root: PathBuf,
     resolved: BundlePlan,
-    driver_policy: DriverPolicy,
     options: RunOptions,
     build: StagingBuild,
 }
@@ -78,9 +75,8 @@ impl ResolvedStagingInput {
     /// and simulator choices must remain identical.
     pub(crate) fn set_materialization_build(&mut self, build: StagingBuild) -> Result<()> {
         anyhow::ensure!(
-            self.build.target() == build.target()
-                && self.build.include_simulators() == build.include_simulators(),
-            "prebuilt staging profile does not match the resolved target and simulator selection"
+            self.build.target() == build.target(),
+            "prebuilt staging profile does not match the resolved target"
         );
         self.build = build;
         Ok(())
@@ -115,11 +111,6 @@ pub(crate) fn resolve_staging_with_registry_cache(
         .context("robot.yaml did not have a parent directory")?;
     let robot = load_robot(&robot_path)?;
 
-    // The driver policy is resolved from the parsed robot BEFORE resolution
-    // and must gate resolution itself, so an excluded driver
-    // is never resolved, materialized, staged, required, inspected, or planned.
-    let driver_policy = DriverPolicy::from_options(&options, &driven_instances(&robot))?;
-
     // A cross `--target` resolves official packages for that target (the same
     // per-target resolution `phoxal build --target` performs); a host pass
     // leaves both targets unset so resolution uses the host triple.
@@ -131,8 +122,6 @@ pub(crate) fn resolve_staging_with_registry_cache(
         || {
             let options = ResolveOptions {
                 official_target_triple: official_target.clone(),
-                drivers: driver_policy.selection(),
-                include_simulators: build.include_simulators(),
                 offline: options.offline,
             };
             if let Some(registry_cache_root) = registry_cache_root {
@@ -160,7 +149,6 @@ pub(crate) fn resolve_staging_with_registry_cache(
     Ok(ResolvedStagingInput {
         project_root: project_root.to_path_buf(),
         resolved,
-        driver_policy,
         options,
         build,
     })
@@ -198,7 +186,6 @@ pub(crate) fn refresh_staging_resolved(
     let ResolvedStagingInput {
         project_root,
         resolved,
-        driver_policy,
         options,
         build,
     } = input;
@@ -227,16 +214,11 @@ pub(crate) fn refresh_staging_resolved(
     crate::progress::ensure_active(ui)?;
 
     let source_participants = source_participants_from_resolved(&project_root, &resolved)?;
-    // Driver selection is resolution-visible: an excluded source driver must
-    // be absent from the Cargo command as well as the staged layout. Keep the
-    // full list for source cwd provenance, but plan only selected artifacts.
-    let selected_source_participants =
-        selected_native_source_participants(&source_participants, driver_policy.selection());
 
-    // Compile the complete selected source subset before either checking or
-    // staging sees it. Cargo's JSON artifact path is authoritative.
+    // Compile the complete source set before either checking or staging sees
+    // it. Cargo's JSON artifact path is authoritative.
     let source_artifacts = build_selected_source_artifacts(
-        &selected_source_participants,
+        &source_participants,
         build.target(),
         build.source_profile(),
         build.prebuilt_target_dir(),
@@ -249,11 +231,6 @@ pub(crate) fn refresh_staging_resolved(
     let extra_registry_runtimes = resolved
         .components
         .iter()
-        .filter(|component| {
-            driver_policy
-                .selection()
-                .includes_instance(&component.instance)
-        })
         .filter_map(|component| component.driver.as_ref())
         .filter_map(|driver| driver.registry_runtime())
         .collect::<Vec<_>>();
@@ -289,9 +266,8 @@ pub(crate) fn refresh_staging_resolved(
                     candidate.path(),
                     &resolved.source_manifest,
                     &resolved,
-                    &selected_source_participants,
+                    &source_participants,
                     &source_artifacts,
-                    driver_policy.selection(),
                     ui,
                 )
             },
@@ -301,12 +277,8 @@ pub(crate) fn refresh_staging_resolved(
     // Complete the candidate `bin/` store so the loader can inspect every
     // required runtime off-disk. This is the last step that consumes the
     // resolved graph; everything after it reads only the candidate layout.
-    stage_complete_bin_store(
-        candidate.path(),
-        &selected_source_participants,
-        &source_artifacts,
-    )?;
-    crate::stage::write_runtime_document(candidate.path(), &resolved)?;
+    stage_complete_bin_store(candidate.path(), &source_participants, &source_artifacts)?;
+    crate::stage::write_manifest_document(candidate.path(), &resolved)?;
     crate::progress::ensure_active(ui)?;
 
     // Declaration drift is warned from this shared path, so run,
@@ -332,11 +304,7 @@ pub(crate) fn refresh_staging_resolved(
         },
     )?;
 
-    Ok(StagedProject {
-        resolved,
-        driver_policy,
-        release,
-    })
+    Ok(StagedProject { release })
 }
 
 /// Prepare a run from a buildable source project: refresh the staged deployment
@@ -355,16 +323,6 @@ pub(crate) fn prepare_source_run(
         true,
         ui,
     )?;
-
-    // Explain any policy-excluded drivers as a session-level advisory: they are
-    // never plan participants, so this summary is the only signal an operator
-    // gets for why hardware rows are absent.
-    report_excluded_drivers(
-        &staged.driver_policy,
-        &driven_instances(&staged.resolved.source_manifest),
-        ui,
-    );
-
     Ok(staged.release)
 }
 
@@ -377,18 +335,8 @@ pub(crate) fn prepare_source_run(
 /// written into the release itself.
 pub(crate) fn prepare_release_run(
     release_root: &Path,
-    options: RunOptions,
     reporter: &dyn crate::Reporter,
 ) -> Result<crate::deployment::ReleaseLayout> {
-    // Driver selection was applied at finalization, by stripping the excluded
-    // `driver:` blocks out of this bundle's own document. There is nothing left
-    // to select here, so a driver flag against an existing bundle is refused
-    // rather than silently ignored.
-    anyhow::ensure!(
-        matches!(options.drivers, super::DriverMode::On) && options.drivers_subset.is_empty(),
-        "driver selection is written into the bundle at build time; run the source project to \
-         change it, or run this bundle as it was finalized"
-    );
     let release = crate::progress::run_phase(
         reporter,
         crate::progress_phase::PhaseId::new("validate"),
@@ -407,8 +355,6 @@ pub(crate) fn prepare_release_run(
 pub fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecution> {
     crate::progress::ensure_active(request.reporter.as_ref())?;
     let options = RunOptions {
-        drivers: request.drivers.mode,
-        drivers_subset: request.drivers.subset,
         offline: request.offline,
     };
     let execution_root =
@@ -418,7 +364,7 @@ pub fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecution> {
             prepare_source_run(&execution_root, options, request.reporter.as_ref())?
         }
         RunRootKind::Release => {
-            prepare_release_run(&execution_root, options, request.reporter.as_ref())?
+            prepare_release_run(&execution_root, request.reporter.as_ref())?
         }
     };
     Ok(PreparedExecution {
@@ -471,12 +417,11 @@ fn run_source_check(
     resolved: &BundlePlan,
     source_participants: &[crate::check::source::SourceParticipant],
     source_artifacts: &SourceArtifacts,
-    drivers: crate::source::intent::DriverSelection,
     reporter: &dyn crate::Reporter,
 ) -> Result<()> {
     let bin_dir = staged_root.join("bin");
     let project_framework = resolved.train.framework();
-    let platform_refs = check_artifact_refs_from_resolved(resolved, drivers);
+    let platform_refs = check_artifact_refs_from_resolved(resolved);
     let mut official_by_name = resolved
         .platform_runtimes
         .iter()
@@ -521,19 +466,3 @@ fn run_source_check(
     Ok(())
 }
 
-fn selected_native_source_participants(
-    participants: &[crate::check::source::SourceParticipant],
-    drivers: crate::source::intent::DriverSelection,
-) -> Vec<crate::check::source::SourceParticipant> {
-    use crate::check::source::SourceParticipantKind;
-    participants
-        .iter()
-        .filter(|participant| match participant.kind {
-            // A simulator override belongs only to the Webots command.
-            SourceParticipantKind::Simulator => false,
-            SourceParticipantKind::ComponentDriver => drivers.includes_instance(&participant.name),
-            _ => true,
-        })
-        .cloned()
-        .collect()
-}

@@ -12,49 +12,27 @@ use phoxal_cli_catalog::ArtifactKind;
 
 const ROBOT_FILE: &str = "robot.yaml";
 
+/// The executable name `cargo install` produces for one official package.
+///
+/// This is the *Cargo* name, not the name the binary is staged under in a
+/// bundle: staging renames it to the id it is launched by.
+#[must_use]
 pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
-    match kind {
-        ArtifactKind::ComponentDriver => format!("phoxal-component-{name}"),
-        ArtifactKind::Service | ArtifactKind::Simulator => {
-            format!("phoxal-{kind}-{name}")
-        }
-    }
+    kind.cargo_binary_name(name)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolveOptions {
     /// Override the official service/driver target triple. `build --target`
     /// materializes for that triple instead of the host, so a robot graph can
     /// be cross-compiled from a non-Linux host.
     pub official_target_triple: Option<String>,
-    /// The component-driver instances resolution may resolve driver binaries
-    /// for. `run`'s driver policy threads through here so an excluded driver is
-    /// never resolved - not even to select its target artifact.
-    /// Everything except driver-filtered supervisor staging resolves `All`.
-    pub drivers: super::intent::DriverSelection,
-    /// Whether simulator-only artifacts belong to this resolution.
-    ///
-    /// Host run/check/simulation paths keep them. A native runtime bundle does
-    /// not: simulators execute beside Webots on an operator host and are never
-    /// installed on the robot target.
-    pub include_simulators: bool,
     /// Pass `--offline` to every Cargo/registry operation resolution makes.
     /// `PHOXAL_OFFLINE` is a Phoxal-only env var Cargo does not
     /// recognize, so this must be threaded explicitly from the caller's own
     /// `--offline`/`AppContext::offline`, not read back from the
     /// environment.
     pub offline: bool,
-}
-
-impl Default for ResolveOptions {
-    fn default() -> Self {
-        Self {
-            official_target_triple: None,
-            drivers: super::intent::DriverSelection::default(),
-            include_simulators: true,
-            offline: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +53,6 @@ pub struct BundlePlan {
     /// supported source project has exactly one.
     pub brain: ResolvedBrain,
     pub platform_runtimes: Vec<ResolvedPlatformRuntime>,
-    pub simulators: Vec<ResolvedPlatformRuntime>,
     pub user_runtimes: Vec<ResolvedUserRuntime>,
     /// Workspace runtime crates present under `services/` but not declared in
     /// robot.yaml (and not official-identity overrides). They are
@@ -88,28 +65,23 @@ pub struct BundlePlan {
 
 /// The compiler output the CLI keeps in memory while it finalizes a bundle.
 ///
-/// The canonical model is deliberately NOT persisted: a finalized bundle
-/// carries exactly one robot definition, the finalized `robot.yaml`, and the
-/// canonical [`phoxal_model::Robot`] is rebuilt from it in memory by the
-/// framework's own bundle loader. There is no `robot.json`.
+/// There is nothing beside the robot and its assets. The service list, the
+/// driver list and the router configuration that used to sit here are all
+/// inside the robot now - a service is a `services` entry, a driver is a
+/// `components` entry whose `driver` block is present - so staging reads the
+/// process set off the one document it is about to write.
 #[derive(Debug, Clone)]
 pub struct CompiledBundle {
     pub robot: phoxal_model::Robot,
-    pub services: Vec<phoxal_manifest::CompiledService>,
-    pub drivers: Vec<phoxal_manifest::CompiledDriver>,
-    pub router: Option<phoxal_manifest::CompiledRouter>,
     pub assets: BTreeMap<AssetId, Vec<u8>>,
 }
 
 impl CompiledBundle {
     #[must_use]
     pub fn from_project(project: CompiledProject) -> Self {
-        let (robot, services, drivers, router, assets) = project.into_parts();
+        let (robot, assets) = project.into_parts();
         Self {
             robot,
-            services,
-            drivers,
-            router,
             assets: assets.into_map(),
         }
     }
@@ -222,7 +194,6 @@ impl ResolvedComponentDriver {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedPathOverrideKind {
     Service,
-    Simulator,
 }
 
 impl ResolvedPathOverrideKind {
@@ -230,7 +201,6 @@ impl ResolvedPathOverrideKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Service => "service",
-            Self::Simulator => "simulator",
         }
     }
 }
@@ -374,10 +344,6 @@ mod tests {
         assert_eq!(
             official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
             "phoxal-component-ddsm115"
-        );
-        assert_eq!(
-            official_binary_name(ArtifactKind::Simulator, "webots-controller"),
-            "phoxal-simulator-webots-controller"
         );
     }
 }

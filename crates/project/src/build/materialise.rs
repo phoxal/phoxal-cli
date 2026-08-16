@@ -58,6 +58,20 @@ pub struct MaterializeSpec {
     pub profile: MaterializeProfile,
     pub target_dir: Option<PathBuf>,
     pub destination: MaterializationDestination,
+    pub source: MaterializeSource,
+}
+
+/// Where one package's source comes from.
+///
+/// The registry at the exact locked train is the only shipping answer. A local
+/// checkout is the development override for a train that is not published yet -
+/// see [`crate::build::overlay`] - and it changes nothing else about the
+/// install.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Ord, PartialOrd)]
+pub enum MaterializeSource {
+    #[default]
+    Registry,
+    Path(PathBuf),
 }
 
 /// The owner boundary a registry package materializes into.
@@ -96,7 +110,15 @@ impl MaterializeSpec {
             profile: MaterializeProfile::Release,
             target_dir: None,
             destination: MaterializationDestination::BundleBin,
+            source: MaterializeSource::Registry,
         }
+    }
+
+    /// Build this package from `source` instead of the registry.
+    #[must_use]
+    pub fn with_source(mut self, source: MaterializeSource) -> Self {
+        self.source = source;
+        self
     }
 
     /// Materialize for an explicit target triple. A triple equal to the
@@ -147,7 +169,8 @@ pub(crate) fn supervisor_spec(
 ) -> MaterializeSpec {
     let mut spec = MaterializeSpec::new(SUPERVISOR_PACKAGE, train)
         .with_target(target)
-        .with_profile(MaterializeProfile::Release);
+        .with_profile(MaterializeProfile::Release)
+        .with_source(crate::build::overlay::supervisor_source());
     spec.destination = MaterializationDestination::ReleaseRoot;
     if let Some(target_dir) = target_dir {
         spec = spec.with_target_dir(target_dir);
@@ -184,12 +207,17 @@ pub fn cargo_install_batch(
     let mut packages = BTreeMap::new();
     for spec in specs {
         let package = spec.cargo_package_name().to_string();
-        if let Some(previous) = packages.insert(package.clone(), spec.train.clone()) {
+        let selection = (spec.train.clone(), spec.source.clone());
+        if let Some(previous) = packages.insert(package.clone(), selection.clone())
+            && previous != selection
+        {
             ensure!(
-                previous == spec.train,
-                "registry batch selects {package} at conflicting trains {previous} and {}",
+                previous.0 == selection.0,
+                "registry batch selects {package} at conflicting trains {} and {}",
+                previous.0,
                 spec.train
             );
+            anyhow::bail!("registry batch selects {package} from conflicting sources");
         }
     }
     crate::progress::run_phase(
@@ -197,13 +225,14 @@ pub fn cargo_install_batch(
         crate::progress_phase::PhaseId::new("materialize-registry-batch"),
         format!("Materializing registry batch ({} packages)", packages.len()),
         || {
-            for (package, train) in &packages {
+            for (package, (train, source)) in &packages {
                 let args = build_install_args(
                     package,
                     train,
                     first.target.as_deref(),
                     first.profile,
                     offline,
+                    source,
                 );
                 let mut command = Command::new("cargo");
                 command.arg("install").args(&args);
@@ -238,15 +267,26 @@ pub fn build_install_args(
     target: Option<&str>,
     profile: MaterializeProfile,
     offline: bool,
+    source: &MaterializeSource,
 ) -> Vec<String> {
-    let mut args = vec![format!("{package}@{train}")];
-    args.extend([
-        "--registry".to_string(),
-        REGISTRY_NAME.to_string(),
-        "--locked".to_string(),
-        "--config".to_string(),
-        registry_config_arg(),
-    ]);
+    let mut args = match source {
+        MaterializeSource::Registry => {
+            let mut args = vec![format!("{package}@{train}")];
+            args.extend([
+                "--registry".to_string(),
+                REGISTRY_NAME.to_string(),
+                "--config".to_string(),
+                registry_config_arg(),
+            ]);
+            args
+        }
+        // A development checkout has no published version to pin and no
+        // registry to reach it through: the path IS the selection.
+        MaterializeSource::Path(path) => {
+            vec!["--path".to_string(), path.display().to_string()]
+        }
+    };
+    args.push("--locked".to_string());
     let cross = target.filter(|triple| *triple != crate::source::host_target_triple());
     if let Some(triple) = cross {
         args.push("--target".to_string());
@@ -413,6 +453,7 @@ mod tests {
             spec.target.as_deref(),
             spec.profile,
             offline,
+            &spec.source,
         );
         let mut command = Command::new("cargo");
         command.arg("install").args(&install_args);
@@ -429,6 +470,7 @@ mod tests {
     fn cargo_package_name_matches_official_binary_name_for_every_kind() {
         use crate::source::resolver::official_binary_name;
         use phoxal_cli_catalog::ArtifactKind;
+
 
         let cases = [
             ("phoxal/service-drive", ArtifactKind::Service, "drive"),
@@ -479,6 +521,7 @@ mod tests {
             None,
             MaterializeProfile::Release,
             false,
+            &MaterializeSource::Registry,
         );
         assert_eq!(&args[..1], ["phoxal-component-ddsm115@0.41.7"]);
         assert_eq!(args.iter().filter(|arg| *arg == "--registry").count(), 1);
@@ -594,14 +637,10 @@ mod tests {
         assert!(!spec.destination.enters_runtime_document());
         assert_eq!(spec.target.as_deref(), Some("aarch64-unknown-linux-gnu"));
         assert_eq!(spec.target_dir, Some(PathBuf::from("/workspace/target")));
-        let catalog = phoxal_cli_catalog::Catalog::official();
         assert!(
-            catalog
-                .native()
-                .chain(catalog.simulation())
-                .all(|official| {
-                    phoxal_cli_catalog::cargo_package_name(official.package) != SUPERVISOR_PACKAGE
-                }),
+            phoxal_cli_catalog::Catalog::official().native().all(|official| {
+                phoxal_cli_catalog::cargo_package_name(official.package) != SUPERVISOR_PACKAGE
+            }),
             "the supervisor must never become a participant catalog entry"
         );
     }
@@ -622,5 +661,27 @@ mod tests {
         ] {
             assert!(diagnostic.contains(expected), "{diagnostic}");
         }
+    }
+
+    /// A development checkout replaces the registry selection outright: there
+    /// is no version to pin and no index to reach, and everything else about
+    /// the install - lockfile, profile, cross target, offline - is unchanged.
+    #[test]
+    fn a_path_source_replaces_the_registry_selection_and_nothing_else() {
+        let argv = build_install_args(
+            "phoxal-service-drive",
+            "0.62.1",
+            None,
+            MaterializeProfile::Debug,
+            true,
+            &MaterializeSource::Path(PathBuf::from("/checkout/services/drive")),
+        );
+        assert_eq!(&argv[..2], ["--path", "/checkout/services/drive"]);
+        assert!(!argv.iter().any(|arg| arg.contains('@')), "{argv:?}");
+        assert!(!argv.contains(&"--registry".to_string()), "{argv:?}");
+        assert!(!argv.contains(&"--config".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--locked".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--debug".to_string()), "{argv:?}");
+        assert!(argv.contains(&"--offline".to_string()), "{argv:?}");
     }
 }

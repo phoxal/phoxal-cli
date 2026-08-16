@@ -81,28 +81,12 @@ impl SourceParticipant {
         }
     }
 
-    #[must_use]
-    pub fn simulator(
-        name: impl Into<String>,
-        expected_artifact_id: impl Into<String>,
-        crate_dir: PathBuf,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            expected_artifact_id: expected_artifact_id.into(),
-            crate_dir,
-            kind: SourceParticipantKind::Simulator,
-            bin_target: None,
-        }
-    }
-
     pub fn kind_label(&self) -> &'static str {
         match self.kind {
             SourceParticipantKind::Brain => "root brain",
             SourceParticipantKind::UserService => "user service",
             SourceParticipantKind::OfficialService => "path-overridden official service",
             SourceParticipantKind::ComponentDriver => "component driver",
-            SourceParticipantKind::Simulator => "path-overridden simulator",
         }
     }
 }
@@ -119,9 +103,7 @@ impl SourceParticipant {
 /// `UserService` has no registry counterpart
 /// at all (a robot developer's own service); `OfficialService` is a known
 /// official service whose source the robot developer is locally overriding;
-/// `Simulator` is always the latter shape (a source override of a known
-/// official artifact - see `kind_label`); `ComponentDriver` has no such
-/// axis. Use [`Self::shared_kind`] to bridge into the shared enum for call
+/// `ComponentDriver` has no such axis. Use [`Self::shared_kind`] to bridge into the shared enum for call
 /// sites that only care about the role split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceParticipantKind {
@@ -129,7 +111,6 @@ pub enum SourceParticipantKind {
     UserService,
     OfficialService,
     ComponentDriver,
-    Simulator,
 }
 
 impl SourceParticipantKind {
@@ -139,7 +120,6 @@ impl SourceParticipantKind {
             Self::Brain => ParticipantKind::Brain,
             Self::UserService | Self::OfficialService => ParticipantKind::Service,
             Self::ComponentDriver => ParticipantKind::Driver,
-            Self::Simulator => ParticipantKind::Simulator,
         }
     }
 }

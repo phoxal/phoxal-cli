@@ -7,17 +7,18 @@
 //! halfway through must never leave a robot with no runtime, and a published
 //! release always has both halves.
 //!
-//! The candidate's `bundle/` is exactly the shape the framework's
-//! finalized-bundle loader reads. Authored documents are never staged: the
-//! compiled `runtime.json` absorbs them, and only compiled assets ride along.
+//! The candidate's `bundle/` is exactly the shape the framework's bundle
+//! reader reads. Authored documents are never staged: the compiled
+//! `manifest.json` absorbs them, and only compiled assets ride along.
 //!
 //! ```text
 //! phoxal-supervisor                       written last, by the release step
-//! bundle/runtime.json                     phoxal/runtime-bundle/v0
+//! bundle/manifest.json                    phoxal/manifest/v0
 //! bundle/assets/robot/meshes/...
 //! bundle/assets/components/<type>/meshes/...
-//! bundle/assets/router/config.json5       when the robot declares one
-//! bundle/bin/...
+//! bundle/bin/brain
+//! bundle/bin/<service-id>
+//! bundle/bin/<component-type>
 //! ```
 
 use std::fs;
@@ -198,7 +199,6 @@ robot:
     let mut fixture = crate::source::resolver::parse_robot_from_string(&fs::read_to_string(
         source.path().join("robot.yaml"),
     )?)?;
-    fixture.clock = source_manifest.clock;
     fixture.services = source_manifest.services.clone();
     phoxal_manifest::source::robot::Manifest::V0(fixture).write_to_dir(source.path())?;
     let bundle = crate::source::resolver::CompiledBundle::from_project(
@@ -207,7 +207,7 @@ robot:
             robot_manifest: source.path().join("robot.yaml"),
             component_roots: std::collections::BTreeMap::from([("wheel".to_string(), component)]),
         }
-        .compile()?,
+        .compile(std::iter::empty())?,
     );
     Ok(bundle)
 }

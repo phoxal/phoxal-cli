@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use phoxal_model::Robot;
 use phoxal_model::component::capability::{Capability as PhysicalCapability, StructuralTarget};
 use phoxal_model::simulation::Capability as SimulationCapability;
@@ -48,9 +48,7 @@ impl WebotsSceneDescription {
             .components()
             .map(|model_component| {
                 let component_id = model_component.id();
-                let component = configuration
-                    .component_for_instance(component_id.as_str())
-                    .context("compiled component instance is missing its component type")?;
+                let component = model_component.component_type();
                 let capability_names = component
                     .capabilities()
                     .flat_map(|(capability_id, capability)| {
@@ -71,14 +69,14 @@ impl WebotsSceneDescription {
                     })
                     .collect::<BTreeMap<_, _>>();
                 Ok((
-                    model_component.mount_link().to_string(),
+                    model_component.instance().mount_link().to_string(),
                     ComponentProtoInstance {
                         proto_name: proto_name_for_robot(
-                            model_component.component_type().as_str(),
+                            model_component.instance().component_type().as_str(),
                         )?,
                         capability_names,
                         solid_names: component_solid_links
-                            .get(model_component.component_type().as_str())
+                            .get(model_component.instance().component_type().as_str())
                             .into_iter()
                             .flat_map(|link_ids| link_ids.iter())
                             .map(|link_id| (link_id.clone(), format!("{component_id}__{link_id}")))

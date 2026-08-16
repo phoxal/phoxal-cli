@@ -63,7 +63,6 @@ pub(crate) fn expected_kind_for_source_participant(kind: SourceParticipantKind) 
         phoxal_runtime_contract::metadata::ParticipantKind::Brain => "brain",
         phoxal_runtime_contract::metadata::ParticipantKind::Service => "service",
         phoxal_runtime_contract::metadata::ParticipantKind::Driver => "driver",
-        phoxal_runtime_contract::metadata::ParticipantKind::Simulator => "simulator",
     }
 }
 

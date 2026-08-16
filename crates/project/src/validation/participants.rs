@@ -37,7 +37,6 @@ impl PlatformArtifactRef {
         match self.kind {
             ArtifactKind::Service => "official service",
             ArtifactKind::ComponentDriver => "official driver",
-            ArtifactKind::Simulator => "official simulator",
         }
     }
 }
@@ -124,21 +123,9 @@ pub(crate) fn component_driver_runtimes_by_ref(
         .collect()
 }
 
-pub(crate) fn check_artifact_refs_from_resolved(
-    resolved: &BundlePlan,
-    drivers: crate::source::intent::DriverSelection,
-) -> Vec<PlatformArtifactRef> {
+pub(crate) fn check_artifact_refs_from_resolved(resolved: &BundlePlan) -> Vec<PlatformArtifactRef> {
     let mut refs = platform_artifact_refs_from_resolved(resolved);
-    refs.extend(
-        component_driver_platform_refs_from_resolved(resolved)
-            .into_iter()
-            .filter_map(|mut reference| {
-                reference
-                    .instances
-                    .retain(|instance| drivers.includes_instance(instance));
-                (!reference.instances.is_empty()).then_some(reference)
-            }),
-    );
+    refs.extend(component_driver_platform_refs_from_resolved(resolved));
     refs
 }
 
@@ -197,23 +184,6 @@ pub(crate) fn source_participants_from_resolved_with_drivers(
             component.source_name.clone(),
             crate_dir.clone(),
         ));
-    }
-
-    for simulator in resolved
-        .path_overrides
-        .iter()
-        .filter(|override_| {
-            override_.kind == crate::source::resolver::ResolvedPathOverrideKind::Simulator
-        })
-        .map(|override_| {
-            SourceParticipant::simulator(
-                override_.artifact_name.clone(),
-                override_.artifact_name.clone(),
-                override_.path.clone(),
-            )
-        })
-    {
-        participants.push(simulator);
     }
 
     Ok(participants)
@@ -299,7 +269,6 @@ mod tests {
                 bin_target: "testbot-robot".to_string(),
             },
             platform_runtimes: Vec::new(),
-            simulators: Vec::new(),
             user_runtimes: Vec::new(),
             undeclared_runtimes: Vec::new(),
             components,
@@ -473,26 +442,14 @@ robot:
             vec!["left_drive".to_string(), "right_drive".to_string()]
         );
 
-        let off = check_artifact_refs_from_resolved(
-            &resolved,
-            crate::source::intent::DriverSelection::None,
-        );
-        assert!(
-            off.iter()
-                .all(|reference| reference.kind != ArtifactKind::ComponentDriver),
-            "--drivers off must not fetch a registry driver during checking"
-        );
-        let subset = check_artifact_refs_from_resolved(
-            &resolved,
-            crate::source::intent::DriverSelection::Only(
-                ["left_drive".to_string()].into_iter().collect(),
-            ),
-        );
-        let selected = subset
+        // One bundle serves every mode, so the driver is always resolved and
+        // always checked: whether it is started is the launcher's decision.
+        let refs = check_artifact_refs_from_resolved(&resolved);
+        let checked = refs
             .iter()
             .find(|reference| reference.kind == ArtifactKind::ComponentDriver)
-            .expect("the selected registry driver remains checkable");
-        assert_eq!(selected.instances, ["left_drive"]);
+            .expect("a declared registry driver is always checkable");
+        assert_eq!(checked.instances, ["left_drive", "right_drive"]);
 
         // Only the mandatory brain, exactly once: the registry driver stays a
         // platform ref.

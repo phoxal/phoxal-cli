@@ -229,6 +229,14 @@ impl Worker {
             }
             std::fs::copy(pulled.path(), &output)?;
             let digest = sha256_file(&output)?;
+            // Every archive this CLI produces carries its own fence, whichever
+            // backend produced it: a remote build's bytes are attested here,
+            // where they land, so `install` has the same sidecar to refuse
+            // against.
+            let sidecar = crate::bundle::archive::digest_sidecar(&output);
+            std::fs::write(&sidecar, format!("{digest}\n")).with_context(|| {
+                format!("failed to write digest sidecar {}", sidecar.display())
+            })?;
             Ok((output, digest, staged_root))
         })();
         let cleanup = cleanup_remote_temp(host, &remote_dir, reporter);
@@ -516,14 +524,12 @@ impl Worker {
         target: &str,
         input: BuildStagingInput,
     ) -> Result<(PathBuf, String, Option<PathBuf>)> {
-        // A shippable bundle contains everything, so staging validates against
-        // the full driver set (DriverSelection::All), never a `--drivers`
-        // subset. `build` skips the host-native source check (`false`): the
-        // loader's target-aware validation over the staged binaries is
-        // authoritative, and a cross target's Linux-only crates need not
-        // compile on the build host. Shared staging validates the compiled
-        // layout against its declared target signature and publishes only
-        // after that succeeds.
+        // One bundle serves every mode, so there is nothing to select here.
+        // `build` skips the host-native source check (`false`): the staged
+        // binaries' target-aware validation is authoritative, and a cross
+        // target's Linux-only crates need not compile on the build host.
+        // Shared staging validates the compiled layout against its declared
+        // target signature and publishes only after that succeeds.
         let staged = match input {
             BuildStagingInput::Resolved(resolved) => crate::run::prepare::refresh_staging_resolved(
                 *resolved,
@@ -532,8 +538,6 @@ impl Worker {
             ),
             BuildStagingInput::Source(build) => {
                 let options = RunOptions {
-                    drivers: crate::run::DriversMode::On,
-                    drivers_subset: Vec::new(),
                     offline: self.request.offline,
                 };
                 crate::run::prepare::refresh_staging(
@@ -581,11 +585,7 @@ pub(crate) fn resolve_container_staging(
     crate::run::prepare::resolve_staging_with_registry_cache(
         snapshot_root,
         Some(registry_cache_root),
-        RunOptions {
-            drivers: crate::run::DriversMode::On,
-            drivers_subset: Vec::new(),
-            offline,
-        },
+        RunOptions { offline },
         StagingBuild::native_bundle(target.to_string()),
         ui,
     )
@@ -1141,7 +1141,6 @@ robot:
                 bin_target: "testbot-robot".to_string(),
             },
             platform_runtimes: Vec::new(),
-            simulators: Vec::new(),
             user_runtimes: Vec::new(),
             undeclared_runtimes: Vec::new(),
             components: Vec::new(),

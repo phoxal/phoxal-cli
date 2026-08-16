@@ -349,6 +349,10 @@ impl ContainerBuildSpec {
                     Some(&self.target),
                     crate::build::materialise::MaterializeProfile::Release,
                     self.offline,
+                    // A container builds the published train: a host checkout
+                    // is not mounted inside it, so the development overlay
+                    // deliberately does not reach here.
+                    &crate::build::materialise::MaterializeSource::Registry,
                 );
                 let package_target =
                     crate::build::materialise::package_target_dir(&shared_target, &package.package);

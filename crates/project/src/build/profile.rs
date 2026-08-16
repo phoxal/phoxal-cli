@@ -48,10 +48,6 @@ impl StagingBuild {
         }
     }
 
-    pub(crate) fn include_simulators(&self) -> bool {
-        matches!(self, Self::HostRuntime)
-    }
-
     pub(crate) fn target(&self) -> Option<&str> {
         match self {
             Self::HostRuntime => None,

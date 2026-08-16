@@ -55,8 +55,8 @@ impl MaterializeSettings {
 
 /// Stage one resolved source binary into the staged `bin/` under an explicit
 /// canonical name, returning the flat `bin/` entry the participant runs from.
-/// The runtime document refers to these immutable entries by their exact
-/// bundle-relative paths.
+/// A launcher finds this entry by the id it is launching; nothing records a
+/// path.
 pub(crate) fn stage_named_binary(
     staged_root: &Path,
     binary_name: &str,
@@ -92,6 +92,7 @@ pub(crate) fn materialize_candidate_store(
         reporter,
         build_override: &mut build_override,
         pending: Vec::new(),
+        renames: Vec::new(),
     };
     for runtime in &resolved.platform_runtimes {
         materialize_platform_runtime(&mut context, runtime)?;
@@ -99,7 +100,43 @@ pub(crate) fn materialize_candidate_store(
     for runtime in extra_registry_runtimes {
         queue_component_driver(&mut context, runtime)?;
     }
-    context.install_pending()
+    let renames = std::mem::take(&mut context.renames);
+    context.install_pending()?;
+    // Cargo installs a package under its own name; the bundle names a binary by
+    // the id it is launched under. Renaming here - once, right after the batch -
+    // is what keeps `--root <candidate>` pointed straight at `bundle/bin` while
+    // still producing `bin/drive` rather than `bin/phoxal-service-drive`.
+    for (cargo_name, bundle_name) in renames {
+        rename_installed_binary(&bin_dir, &cargo_name, &bundle_name)?;
+    }
+    Ok(())
+}
+
+/// Move `<bin>/<cargo_name>` onto `<bin>/<bundle_name>`.
+///
+/// A no-op when the install was skipped because the bundle entry is already
+/// there: an unchanged project re-stages without reinstalling, and its `bin/`
+/// already carries the launched name.
+fn rename_installed_binary(bin_dir: &Path, cargo_name: &str, bundle_name: &str) -> Result<()> {
+    let installed = bin_dir.join(cargo_name);
+    if !installed.is_file() {
+        ensure!(
+            bin_dir.join(bundle_name).is_file(),
+            "cargo install produced neither {} nor {}",
+            installed.display(),
+            bin_dir.join(bundle_name).display()
+        );
+        return Ok(());
+    }
+    let staged = bin_dir.join(bundle_name);
+    remove_if_present(&staged)?;
+    fs::rename(&installed, &staged).with_context(|| {
+        format!(
+            "failed to stage {} as {}",
+            installed.display(),
+            staged.display()
+        )
+    })
 }
 
 fn ensure_bin_dir(staged_root: &Path) -> Result<PathBuf> {
@@ -154,9 +191,34 @@ struct MaterializationContext<'a> {
     reporter: &'a dyn crate::Reporter,
     build_override: &'a mut dyn FnMut(&Path, &str) -> Result<PathBuf>,
     pending: Vec<MaterializeSpec>,
+    /// `(cargo binary name, bundle entry name)` for every queued install, so
+    /// the batch's output can be renamed onto the id it is launched under.
+    renames: Vec<(String, String)>,
 }
 
 impl MaterializationContext<'_> {
+    /// Queue one official for `cargo install`, recording the rename its output
+    /// needs. A development overlay redirects the same spec to a local crate
+    /// directory without changing anything else about the install.
+    fn queue_registry_install(&mut self, runtime: &ResolvedPlatformRuntime, cargo_binary: &str) {
+        let spec = self.settings.apply(
+            MaterializeSpec::new(
+                phoxal_cli_catalog::cargo_package_name(&runtime.package),
+                runtime.train.clone(),
+            )
+            .with_target(runtime.target.clone())
+            .with_source(crate::build::overlay::official_source(
+                runtime.kind,
+                &runtime.name,
+            )),
+        );
+        self.pending.push(spec);
+        self.renames.push((
+            cargo_binary.to_string(),
+            phoxal_cli_catalog::bundle_binary_name(&runtime.name),
+        ));
+    }
+
     fn install_pending(&mut self) -> Result<()> {
         let mut groups = BTreeMap::<
             (Option<String>, MaterializeProfile, Option<PathBuf>),
@@ -207,8 +269,9 @@ fn materialize_platform_runtime(
     context: &mut MaterializationContext<'_>,
     runtime: &ResolvedPlatformRuntime,
 ) -> Result<()> {
-    let binary_name = official_binary_name(runtime.kind, &runtime.name);
-    let staged = context.bin_dir.join(&binary_name);
+    let staged = context
+        .bin_dir
+        .join(phoxal_cli_catalog::bundle_binary_name(&runtime.name));
     if staged.is_file() {
         return Ok(());
     }
@@ -216,22 +279,16 @@ fn materialize_platform_runtime(
         let source = (context.build_override)(crate_dir, &runtime.name)?;
         return link_or_copy(&source, &staged);
     }
+    let cargo_binary = official_binary_name(runtime.kind, &runtime.name);
     if link_from_officials_source(
         context.officials_source,
         &runtime.package,
-        &binary_name,
+        &cargo_binary,
         &staged,
     )? {
         return Ok(());
     }
-    let spec = context.settings.apply(
-        MaterializeSpec::new(
-            phoxal_cli_catalog::cargo_package_name(&runtime.package),
-            runtime.train.clone(),
-        )
-        .with_target(runtime.target.clone()),
-    );
-    context.pending.push(spec);
+    context.queue_registry_install(runtime, &cargo_binary);
     Ok(())
 }
 
@@ -239,27 +296,21 @@ fn queue_component_driver(
     context: &mut MaterializationContext<'_>,
     runtime: &ResolvedPlatformRuntime,
 ) -> Result<()> {
-    let binary_name = official_binary_name(runtime.kind, &runtime.name);
-    let staged = context.bin_dir.join(&binary_name);
+    let staged = context
+        .bin_dir
+        .join(phoxal_cli_catalog::bundle_binary_name(&runtime.name));
+    let cargo_binary = official_binary_name(runtime.kind, &runtime.name);
     if staged.is_file()
         || link_from_officials_source(
             context.officials_source,
             &runtime.package,
-            &binary_name,
+            &cargo_binary,
             &staged,
         )?
     {
         return Ok(());
     }
-    context.pending.push(
-        context.settings.apply(
-            MaterializeSpec::new(
-                phoxal_cli_catalog::cargo_package_name(&runtime.package),
-                runtime.train.clone(),
-            )
-            .with_target(runtime.target.clone()),
-        ),
-    );
+    context.queue_registry_install(runtime, &cargo_binary);
     Ok(())
 }
 

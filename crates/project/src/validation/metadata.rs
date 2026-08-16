@@ -100,7 +100,6 @@ mod tests {
             id: phoxal_runtime_contract::identity::ParticipantArtifactId::new(id)
                 .expect("fixture artifact id"),
             kind: phoxal_runtime_contract::metadata::ParticipantKind::Service,
-            requirement: None,
             config_schema: serde_json::json!({"type": "object", "properties": {"speed": {"type": "integer"}}}),
         }
     }

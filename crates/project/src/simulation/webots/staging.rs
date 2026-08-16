@@ -9,7 +9,6 @@ use crate::simulation::webots::root;
 use anyhow::Context;
 use anyhow::Result;
 use phoxal_bundle::RuntimeBundle;
-use phoxal_runtime_contract::identity::{ExecutionId, ParticipantId};
 use std::path::Path;
 
 /// Stage a resolved robot and authored world into the Webots filesystem view.
@@ -17,8 +16,6 @@ pub(crate) fn stage_simulation_for_robot(
     project_root: &Path,
     world_source_path: &Path,
     bundle: &RuntimeBundle,
-    execution: ExecutionId,
-    participant: ParticipantId,
     connect_endpoint: &str,
 ) -> Result<StagedSimulationWorld> {
     // Prepare every generated file in the task-local tree before reconciling
@@ -37,25 +34,17 @@ pub(crate) fn stage_simulation_for_robot(
         "Webots controller requires the supervisor router endpoint"
     );
     let controller_launch = ControllerLaunch {
-        execution,
-        participant,
         bundle_root: bundle.root().to_path_buf(),
         connect_endpoint: connect_endpoint.to_string(),
     };
 
     let component_types = robot
         .components()
-        .filter(|instance| {
-            robot
-                .simulation_for_component_type(instance.component_type().as_str())
-                .is_some()
-        })
-        .map(|instance| instance.component_type())
+        .filter(|instance| instance.simulation().is_some())
+        .map(|instance| instance.instance().component_type().as_str())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
-        .map(|component_type| ComponentTypeToStage {
-            component_type: component_type.as_str(),
-        })
+        .map(|component_type| ComponentTypeToStage { component_type })
         .collect::<Vec<_>>();
 
     let mesh_root = root::meshes_dir(project_root);
@@ -92,15 +81,7 @@ fn stage_compiled_geometry_assets(
         .asset_ids()
         .collect::<std::collections::BTreeSet<_>>();
     for instance in robot.components() {
-        let component = robot
-            .component_for_instance(instance.id().as_str())
-            .with_context(|| {
-                format!(
-                    "canonical robot component instance '{}' has no component definition",
-                    instance.id()
-                )
-            })?;
-        referenced.extend(component.structure().asset_ids());
+        referenced.extend(instance.component_type().structure().asset_ids());
     }
     validate_unique_geometry_destinations(referenced.iter().copied())?;
     for id in referenced {

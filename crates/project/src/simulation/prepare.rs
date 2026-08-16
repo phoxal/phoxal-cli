@@ -9,8 +9,8 @@
 //! - Declares an `EXTERNPROTO` for each robot's generated PROTO.
 //! - Adds exactly one static robot instance.
 //! - Assigns that robot the `phoxal-simulator-webots-controller` controller.
-//! - Passes only stable robot, staged-root, and router inputs.
-//!   Producer identity and the world timeline are controller-owned.
+//! - Passes only the bundle root and the router endpoint. Execution identity,
+//!   producer identity and the world timeline are controller-owned.
 //!
 //! The generated PROTO body lives in the same Webots project and the authored
 //! world references it relatively.
@@ -20,20 +20,21 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use phoxal_model::Robot as RobotBundle;
-use phoxal_runtime_contract::identity::{ExecutionId, ParticipantId};
 
 use crate::simulation::webots::proto::{
     self, RobotInstance, WebotsController, externproto_for_generated_proto, generate_robot_proto,
     proto_name_for_robot, relative_mesh_url_prefix, render_robot_instance_node, stage_world,
 };
 
-/// The controller's controller artifact name (Webots `controller` field).
-pub const WEBOTS_CONTROLLER_NAME: &str = "phoxal-simulator-webots-controller";
-
+/// The controller's complete launch contract.
+///
+/// There is no execution id and no participant id. A router's session id IS the
+/// execution, so the controller asks the endpoint it dials; and it is not a
+/// participant at all - it declares one liveliness token per component instance
+/// it simulates. Both absences are why the world can be staged before the
+/// supervisor is started.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerLaunch {
-    pub execution: ExecutionId,
-    pub participant: ParticipantId,
     pub bundle_root: PathBuf,
     pub connect_endpoint: String,
 }
@@ -167,7 +168,7 @@ pub fn stage_simulation_world(
             def_name: proto_name.clone(),
             robot_id: robot.robot_id.clone(),
             controller: Some(WebotsController {
-                controller_name: WEBOTS_CONTROLLER_NAME.to_string(),
+                controller_name: phoxal_cli_catalog::WEBOTS_CONTROLLER_PACKAGE.to_string(),
                 controller_args,
             }),
             supervisor: Some(false),
@@ -208,10 +209,6 @@ fn controller_args(launch: &ControllerLaunch) -> Result<Vec<String>> {
         "Webots controller requires the supervisor router endpoint"
     );
     Ok(vec![
-        "--execution-id".to_string(),
-        launch.execution.to_string(),
-        "--participant-id".to_string(),
-        launch.participant.to_string(),
         "--bundle-root".to_string(),
         launch.bundle_root.display().to_string(),
         "--connect".to_string(),
@@ -235,11 +232,12 @@ fn stage_component_protos(
     let mut component_solid_links = BTreeMap::new();
 
     for component_type in component_types {
-        let component_id = bundle
+        // One mounted instance of the type is enough: the type's definition and
+        // its simulation are the type's, not the instance's.
+        let mounted = bundle
             .components()
-            .find_map(|instance| {
-                (instance.component_type() == component_type.component_type)
-                    .then_some(instance.id())
+            .find(|instance| {
+                instance.instance().component_type().as_str() == component_type.component_type
             })
             .ok_or_else(|| {
                 anyhow!(
@@ -247,17 +245,13 @@ fn stage_component_protos(
                     component_type.component_type
                 )
             })?;
-        let component_model = bundle
-            .component_for_instance(component_id.as_str())
-            .context("compiled component instance is missing its component type")?;
-        let comp_simulation = bundle
-            .simulation_for_component_type(component_type.component_type)
-            .ok_or_else(|| {
-                anyhow!(
-                    "component type '{}' has no compiled simulation semantics",
-                    component_type.component_type
-                )
-            })?;
+        let component_model = mounted.component_type();
+        let comp_simulation = mounted.simulation().ok_or_else(|| {
+            anyhow!(
+                "component type '{}' has no compiled simulation semantics",
+                component_type.component_type
+            )
+        })?;
 
         let comp_proto_name = proto_name_for_robot(component_type.component_type)?;
         let comp_proto_path = component_protos_dir.join(format!("{comp_proto_name}.proto"));
@@ -295,22 +289,18 @@ fn stage_component_protos(
 mod tests {
     use super::*;
 
+    /// The controller's whole launch contract is the bundle and the endpoint.
+    /// No identity is passed in: it learns the execution from the router, and
+    /// it is not a participant, so there is no participant id to give it.
     #[test]
-    fn controller_arguments_are_strict_and_identity_typed() -> Result<()> {
-        let execution = ExecutionId::mint();
+    fn controller_arguments_are_the_bundle_and_the_endpoint_only() -> Result<()> {
         let launch = ControllerLaunch {
-            execution,
-            participant: ParticipantId::new("webots-controller-testbot")?,
             bundle_root: PathBuf::from("/runtime"),
             connect_endpoint: "tcp/127.0.0.1:7447".to_string(),
         };
         assert_eq!(
             controller_args(&launch)?,
             vec![
-                "--execution-id",
-                execution.to_string().as_str(),
-                "--participant-id",
-                "webots-controller-testbot",
                 "--bundle-root",
                 "/runtime",
                 "--connect",

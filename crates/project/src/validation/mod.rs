@@ -89,7 +89,7 @@ mod use_case;
 
 pub(crate) use participants::{
     PlatformArtifactRef, check_artifact_refs_from_resolved, component_driver_runtimes_by_ref,
-    source_participants_from_resolved, source_participants_from_resolved_with_drivers,
+    source_participants_from_resolved,
 };
 mod graph;
 pub use graph::run_check_with_context;

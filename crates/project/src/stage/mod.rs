@@ -5,22 +5,23 @@
 //!
 //! ```text
 //! phoxal-supervisor  # the framework supervisor this release is run by
+//! bundle/manifest.json
 //! bundle/assets/     # frozen robot and component definitions and their meshes
-//! bundle/bin/        # flat participant-executable store
-//! bundle/runtime.json
+//! bundle/bin/        # brain, <service-id>, <component-type>
 //! ```
 //!
 //! Participant `cargo install --root <candidate>` calls target the SAME
-//! candidate directory the finalized document and assets are staged into, so
-//! their `bin/` entries land directly at their final path with no separate
-//! harvest-then-link step. The supervisor shares the neutral Cargo
-//! materialization machinery but uses its own release-profile,
-//! release-destination batch and is copied beside `bundle/` only at
-//! finalization. Participant installs also leave `.crates.toml`/`.crates2.json`
-//! bookkeeping dotfiles in the candidate root; those are host-specific state,
-//! never bundle content, so publication removes them rather than fighting
-//! `--no-track` (which would disable Cargo's own concurrent-invocation
-//! protection for no real benefit).
+//! candidate directory the manifest and assets are staged into, so their
+//! `bin/` entries land beside their final path with only a rename left to do -
+//! Cargo installs a package under its own name (`phoxal-service-drive`) and the
+//! bundle names it by the id it is launched under (`drive`). The supervisor
+//! shares the neutral Cargo materialization machinery but uses its own
+//! release-profile, release-destination batch and is copied beside `bundle/`
+//! only at finalization. Participant installs also leave
+//! `.crates.toml`/`.crates2.json` bookkeeping dotfiles in the candidate root;
+//! those are host-specific state, never bundle content, so publication removes
+//! them rather than fighting `--no-track` (which would disable Cargo's own
+//! concurrent-invocation protection for no real benefit).
 //!
 //! The live `.phoxal/release/` is never deleted before every install and
 //! validation succeeds: staging always builds into a sibling candidate
@@ -30,18 +31,18 @@
 //!
 //! This is why [`begin_runtime_layout`]/[`finalize_release`] are two functions,
 //! not one: everything between them - `cargo install` for every official,
-//! building every source/override binary, the source check, and the loader's
-//! own execution-time validation - runs against
-//! [`candidate::StagedCandidate::path`], a path nobody executes from yet. Only
-//! [`finalize_release`] ever touches the live path, and it is always the last
-//! call - see `run::prepare::refresh_staging` and
-//! `simulation::prepare_simulation`. It adds the supervisor before it publishes,
-//! so a published release always has both halves and they always match.
+//! building every source/override binary, the source check, and the manifest
+//! write - runs against [`candidate::StagedCandidate::path`], a path nobody
+//! executes from yet. Only [`finalize_release`] ever touches the live path, and
+//! it is always the last call - see `run::prepare::refresh_staging` and
+//! `simulation::prepare_simulation`. It adds the supervisor before it
+//! publishes, so a published release always has both halves and they always
+//! match.
 
 mod candidate;
+mod manifest;
 mod participants;
 mod publish;
-mod runtime;
 
 use std::path::Path;
 
@@ -51,10 +52,10 @@ use crate::check::participant_metadata::ExpectedTarget;
 use crate::deployment::ReleaseLayout;
 
 pub(crate) use candidate::{StagedCandidate, begin_runtime_layout, copy_tree_into};
+pub(crate) use manifest::write_manifest_document;
 pub(crate) use participants::{
     MaterializeSettings, materialize_candidate_store, stage_named_binary,
 };
-pub(crate) use runtime::write_runtime_document;
 
 /// Complete a validated candidate into a deployment release and publish it.
 ///
@@ -100,7 +101,6 @@ pub(crate) fn test_metadata_payload(
                 framework: crate::check::participant_metadata::FIXTURE_FRAMEWORK,
                 id,
                 kind,
-                requirement: None,
                 config_schema,
             },
         },

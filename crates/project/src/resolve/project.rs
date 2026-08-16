@@ -3,7 +3,6 @@ use std::fs;
 use std::path::Path;
 
 pub use crate::source::host_target_triple;
-use crate::source::requirements::{SimulationMembership, derive_runtime_requirements};
 use crate::source::tooling::hash_tree;
 use anyhow::{Context, Result, anyhow};
 use phoxal_cli_catalog::{ArtifactKind, Catalog, OfficialRuntime};
@@ -69,13 +68,27 @@ pub(crate) fn resolve_with_train_using_registry_cache(
     )
 }
 
+/// Reject an authored `services:` map that cannot become a manifest before any
+/// resolution work is done.
+///
+/// The compiler merges the official set into the authored one, so a document
+/// that claims `brain` or an official identity would silently produce a
+/// different robot than its author wrote. Naming it here is what keeps the
+/// diagnostic about `robot.yaml` rather than about a compiled document.
 pub(crate) fn validate_runtime_declarations(robot: &Robot) -> Result<()> {
-    derive_runtime_requirements(
-        robot,
-        &SimulationMembership::default(),
-        &Catalog::official(),
-    )
-    .map(|_| ())
+    let catalog = Catalog::official();
+    for id in robot.services.keys() {
+        anyhow::ensure!(
+            id != crate::runtimes::BRAIN_ID,
+            "services.{id} is reserved for the mandatory root brain"
+        );
+        anyhow::ensure!(
+            !catalog.is_official_service(id),
+            "robot.yaml declares services.{id}, but '{id}' is an official service; official \
+             runtimes are catalog-owned, always run, and take no robot.yaml declaration"
+        );
+    }
+    Ok(())
 }
 
 /// Resolve against a locked workspace the caller has already loaded. `check`
@@ -120,21 +133,6 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
         .filter(|official| official.kind == ArtifactKind::Service)
         .map(|official| platform_runtime_from_official(official, &train, Some(&target)))
         .collect::<Vec<_>>();
-    // Simulator artifacts execute HOST-side under Webots and never belong to
-    // an installed native robot bundle. Host run/check/simulation resolution
-    // keeps them; `phoxal build` explicitly omits them so a physical target
-    // build does not require a Webots controller for that target.
-    let mut simulators = if options.include_simulators {
-        Catalog::official()
-            .simulation()
-            .map(|official| {
-                platform_runtime_from_official(official, &train, Some(&host_target_triple()))
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
     let components = resolve_components(
         robot,
         ComponentResolutionContext {
@@ -142,19 +140,13 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
             registry_cache_root,
             train: &train,
             target: &target,
-            drivers: &options.drivers,
             local_packages: &project.local_components,
             offline: options.offline,
         },
     )?;
 
-    let workspace = apply_workspace_runtimes(
-        robot,
-        project_root,
-        &project.runtimes,
-        &mut platform_runtimes,
-        &mut simulators,
-    )?;
+    let workspace =
+        apply_workspace_runtimes(robot, project_root, &project.runtimes, &mut platform_runtimes)?;
 
     let component_roots = components
         .iter()
@@ -167,7 +159,10 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
             robot_manifest,
             component_roots,
         }
-        .compile()
+        // Which services are official is a build-tooling fact the compiler
+        // deliberately does not know, so the catalogue is handed in here rather
+        // than duplicated inside the framework.
+        .compile(official_service_ids())
         .context("failed to compile the resolved source project")?,
     );
 
@@ -184,7 +179,6 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
             bin_target: project.brain.bin_target.clone(),
         },
         platform_runtimes,
-        simulators,
         user_runtimes: workspace.user_runtimes,
         undeclared_runtimes: workspace.undeclared_runtimes,
         components,
@@ -210,10 +204,19 @@ fn platform_runtime_from_official(
 fn short_name(package: &str, kind: ArtifactKind) -> String {
     let prefix = match kind {
         ArtifactKind::Service => "phoxal/service-",
-        ArtifactKind::Simulator => "phoxal/simulator-",
         ArtifactKind::ComponentDriver => "phoxal/component-",
     };
     package.strip_prefix(prefix).unwrap_or(package).to_string()
+}
+
+/// The official service identities the manifest compiler merges into the
+/// authored `services:` map.
+fn official_service_ids() -> Vec<phoxal_model::identity::ServiceId> {
+    Catalog::official()
+        .service_identities()
+        .into_iter()
+        .filter_map(|id| phoxal_model::identity::ServiceId::new(id).ok())
+        .collect()
 }
 
 /// Resolve authored component roots directly from `components/<id>/` or the
@@ -224,7 +227,6 @@ struct ComponentResolutionContext<'a> {
     registry_cache_root: &'a Path,
     train: &'a str,
     target: &'a str,
-    drivers: &'a crate::source::intent::DriverSelection,
     local_packages: &'a [crate::source::train::WorkspaceComponentCrate],
     offline: bool,
 }
@@ -263,15 +265,11 @@ fn resolve_components(
         let declares_driver = instance.driver.is_some();
 
         if let Some(local) = local.get(component_id) {
-            let driver = match (
-                &local.driver_crate,
-                declares_driver,
-                context.drivers.includes_instance(instance_name),
-            ) {
-                (Some(crate_dir), true, true) => Some(ResolvedComponentDriver::Local {
+            let driver = match (&local.driver_crate, declares_driver) {
+                (Some(crate_dir), true) => Some(ResolvedComponentDriver::Local {
                     crate_dir: crate_dir.clone(),
                 }),
-                (None, true, _) => anyhow::bail!(
+                (None, true) => anyhow::bail!(
                     "robot component instance {instance_name} declares a driver, but local components/{component_id} is asset-only"
                 ),
                 _ => None,
@@ -288,17 +286,16 @@ fn resolve_components(
         let assets_root = registry_roots.get(component_id).cloned().ok_or_else(|| {
             anyhow::anyhow!("resolved registry component {component_id} has no materialized root")
         })?;
-        let driver =
-            (declares_driver && context.drivers.includes_instance(instance_name)).then(|| {
-                ResolvedComponentDriver::Registry(ResolvedPlatformRuntime {
-                    name: component_id.clone(),
-                    package: package.clone(),
-                    kind: ArtifactKind::ComponentDriver,
-                    path_override: None,
-                    train: context.train.to_string(),
-                    target: Some(context.target.to_string()),
-                })
-            });
+        let driver = declares_driver.then(|| {
+            ResolvedComponentDriver::Registry(ResolvedPlatformRuntime {
+                name: component_id.clone(),
+                package: package.clone(),
+                kind: ArtifactKind::ComponentDriver,
+                path_override: None,
+                train: context.train.to_string(),
+                target: Some(context.target.to_string()),
+            })
+        });
 
         components.push(ResolvedComponent {
             instance: instance_name.clone(),
@@ -444,7 +441,6 @@ fn apply_workspace_runtimes(
     project_root: &Path,
     runtimes: &[crate::source::train::WorkspaceRuntime],
     platform_runtimes: &mut [ResolvedPlatformRuntime],
-    _simulators: &mut [ResolvedPlatformRuntime],
 ) -> Result<WorkspaceRuntimeResolution> {
     let mut user_runtimes = Vec::new();
     let mut undeclared = Vec::new();
@@ -959,30 +955,28 @@ robot:
         Ok(())
     }
 
+    /// The official set a resolution produces is services only. The Webots
+    /// controller used to be resolved beside them as a simulator artifact; it
+    /// is a host tool on its own train now and never enters a robot graph.
     #[test]
-    fn include_simulators_toggles_the_webots_controller_only() -> anyhow::Result<()> {
+    fn resolution_never_produces_a_simulator_runtime() -> anyhow::Result<()> {
         let robot = minimal_robot("")?;
         let project = locked_project_root()?;
 
-        let with_simulators = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
+        let resolved = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
         assert!(
-            with_simulators
-                .simulators
+            resolved
+                .platform_runtimes
                 .iter()
-                .any(|runtime| runtime.package == "phoxal/simulator-webots-controller")
+                .all(|runtime| runtime.kind == ArtifactKind::Service),
+            "a resolved robot graph is services and component drivers only"
         );
-
-        let without_simulators = resolve_fixture(
-            &robot,
-            project.path(),
-            ResolveOptions {
-                include_simulators: false,
-                ..ResolveOptions::default()
-            },
-        )?;
         assert!(
-            without_simulators.simulators.is_empty(),
-            "a Native bundle must carry no simulator-only runtimes"
+            !resolved
+                .platform_runtimes
+                .iter()
+                .any(|runtime| runtime.package.contains("simulator")),
+            "the Webots controller is not a catalog artifact"
         );
         Ok(())
     }
@@ -1391,27 +1385,23 @@ robot:
             project.path(),
             ResolveOptions {
                 offline: true,
-                drivers: crate::source::intent::DriverSelection::None,
                 ..Default::default()
             },
         )?;
-        let excluded = &resolved.components[0];
-        assert!(excluded.assets_root.join("component.yaml").is_file());
-        assert!(excluded.driver.is_none());
+        let component = &resolved.components[0];
+        assert!(component.assets_root.join("component.yaml").is_file());
         assert!(
-            resolved.source_manifest.robot.components["left_drive"]
-                .driver
-                .is_some()
+            component.driver.is_some(),
+            "a declared driver is always resolved: one bundle serves every mode"
         );
         Ok(())
     }
 
-    /// The driver policy gates resolution itself: an excluded driver
-    /// instance resolves no driver package at all, so nothing downstream ever
-    /// requires, builds, or installs a binary for it. Authored intent remains on
-    /// `source_manifest` for reporting.
+    /// A declared driver always resolves. `--drivers off` is a launch
+    /// decision the CLI applies when it starts runtimes, so it cannot reach
+    /// back into resolution and change what the bundle contains.
     #[test]
-    fn an_excluded_driver_resolves_no_driver_package() -> anyhow::Result<()> {
+    fn a_declared_driver_always_resolves_its_package() -> anyhow::Result<()> {
         let robot = minimal_robot_with_components(
             r#"
     left_drive:
@@ -1440,14 +1430,7 @@ robot:
         declare_workspace_member(project.path(), "components/ddsm115")?;
         write_lock(project.path(), &["ddsm115"])?;
 
-        let resolved = resolve_fixture(
-            &robot,
-            project.path(),
-            ResolveOptions {
-                drivers: crate::source::intent::DriverSelection::None,
-                ..ResolveOptions::default()
-            },
-        )?;
+        let resolved = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
         let component = &resolved.components[0];
         assert!(
             resolved.source_manifest.robot.components["left_drive"]
@@ -1456,8 +1439,11 @@ robot:
             "declared intent is preserved"
         );
         assert!(
-            component.driver.is_none(),
-            "an excluded driver resolves no package at all"
+            matches!(
+                component.driver,
+                Some(crate::source::resolver::ResolvedComponentDriver::Local { .. })
+            ),
+            "the workspace driver crate is resolved for every mode"
         );
         Ok(())
     }

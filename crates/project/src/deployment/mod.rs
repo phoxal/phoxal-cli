@@ -5,18 +5,19 @@
 //!
 //! ```text
 //! phoxal-supervisor    the framework supervisor this release is run by
-//! bundle/              the runtime bundle, self-verifying through phoxal-bundle
+//! bundle/              manifest.json, assets/, bin/
 //! ```
 //!
 //! Packaging the supervisor beside the bundle is what makes install and rollback
 //! atomic over both halves: activation switches one directory, so a supervisor
 //! from one release can never end up running another release's bundle.
 //!
-//! The layout is a fixed convention rather than another descriptor file. The
-//! bundle verifies its own contents and framework line, the supervisor refuses
-//! incompatible bundles, and the archive is verified by its digest. Validation
-//! here checks only the release shape: both entries are present, the supervisor
-//! is executable, and nothing else exists at the root.
+//! The layout is a fixed convention rather than another descriptor file.
+//! Integrity lives in the archive - `phoxal build` writes `build.phoxal`
+//! alongside its `build.phoxal.sha256` and `phoxal install` refuses a mismatch -
+//! so once a release is on disk it is trusted. Validation here checks only the
+//! release shape: both entries are present, the supervisor is executable, and
+//! nothing else exists at the root.
 //!
 //! The supervisor knows nothing of any of this packaging. It takes a bundle root and
 //! nothing else; the release is the CLI's packaging around it.
@@ -89,9 +90,9 @@ pub(crate) fn materialize(
 /// bundle does not verify.
 pub fn validate_release(root: &Path) -> Result<ReleaseLayout> {
     let layout = validate_layout(root)?;
-    phoxal_bundle::RuntimeBundle::open_verified(&layout.bundle).with_context(|| {
+    phoxal_bundle::RuntimeBundle::open(&layout.bundle).with_context(|| {
         format!(
-            "failed to verify the runtime bundle {} this release executes",
+            "failed to read the bundle {} this release executes",
             layout.bundle.display()
         )
     })?;
@@ -106,26 +107,26 @@ pub fn is_release_root(root: &Path) -> bool {
     root.join(SUPERVISOR_FILE).is_file()
 }
 
-/// Refuse a runtime bundle handed in where a deployment release belongs.
+/// Refuse a bundle handed in where a deployment release belongs.
 ///
-/// A `build.phoxal` written before releases owned their supervisor is a bundle at
-/// its own root: it verifies as a bundle and would install as one, and the
-/// installed unit would then execute it with whatever supervisor the host
-/// happened to have. That is exactly the drift releases exist to remove, so the
-/// old shape is refused by name rather than adapted.
+/// A `build.phoxal` written before releases owned their supervisor is a bundle
+/// at its own root: it would install as one, and the installed unit would then
+/// execute it with whatever supervisor the host happened to have. That is
+/// exactly the drift releases exist to remove, so the old shape is refused by
+/// name rather than adapted.
 ///
 /// # Errors
 ///
 /// When `root` is a bundle root rather than a release root.
 pub fn refuse_bundle_shaped_release(root: &Path) -> Result<()> {
     ensure!(
-        !root.join(phoxal_bundle::RUNTIME_FILE).is_file(),
-        "{} is a runtime bundle, not a deployment release: it carries {} at its root instead of \
+        !root.join(phoxal_bundle::MANIFEST_FILE).is_file(),
+        "{} is a bundle, not a deployment release: it carries {} at its root instead of \
          `{SUPERVISOR_FILE}` and `{BUNDLE_DIR}/`. This archive predates supervisor-owning releases, \
          where a release carries the supervisor that runs it; rebuild it with this CLI (`phoxal \
          build`) and install the result",
         root.display(),
-        phoxal_bundle::RUNTIME_FILE,
+        phoxal_bundle::MANIFEST_FILE,
     );
     Ok(())
 }
@@ -353,7 +354,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path().join("extracted");
         fs::create_dir_all(root.join("bin")).expect("bin directory");
-        fs::write(root.join(phoxal_bundle::RUNTIME_FILE), b"{}").expect("runtime document");
+        fs::write(root.join(phoxal_bundle::MANIFEST_FILE), b"{}").expect("manifest document");
 
         let error = refuse_bundle_shaped_release(&root)
             .expect_err("a bundle root is not a release root")
@@ -361,7 +362,7 @@ mod tests {
         assert_eq!(
             error,
             format!(
-                "{} is a runtime bundle, not a deployment release: it carries runtime.json at its \
+                "{} is a bundle, not a deployment release: it carries manifest.json at its \
                  root instead of `phoxal-supervisor` and `bundle/`. This archive predates supervisor-owning \
                  releases, where a release carries the supervisor that runs it; rebuild it with this \
                  CLI (`phoxal build`) and install the result",

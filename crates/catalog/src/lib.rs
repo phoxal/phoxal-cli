@@ -14,6 +14,11 @@
 //! thing. There is consequently no `CatalogId` and no catalog constant in any
 //! wire contract: this remains an identity-free index of where official
 //! participants live.
+//!
+//! The Webots controller is deliberately *not* an entry here. It is not a
+//! participant, is never staged into a bundle, and rides its own release train
+//! rather than the framework's, so it is modelled below as a host tool the CLI
+//! materializes into its own cache.
 
 #![cfg_attr(
     test,
@@ -36,13 +41,23 @@ pub const REGISTRY_NAME: &str = "phoxal";
 /// The static margo registry official packages publish to.
 pub const REGISTRY_INDEX: &str = "sparse+https://phoxal.github.io/registry/";
 
+/// The Webots controller package the CLI materializes for a simulation.
+///
+/// It is a host tool, not a robot runtime: it runs beside Webots on an
+/// operator's machine, never on the robot, and never appears in a bundle or a
+/// manifest. It therefore carries its own version rather than the framework
+/// train - the repository that owns it releases on its own cadence.
+pub const WEBOTS_CONTROLLER_PACKAGE: &str = "phoxal-simulator-webots-controller";
+
+/// The exact controller version this CLI release drives Webots with.
+pub const WEBOTS_CONTROLLER_VERSION: &str = "0.1.0";
+
 /// What an official catalog entry is, which decides its canonical staged binary
-/// name and whether it belongs to the native or the simulation membership.
+/// name.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ArtifactKind {
     Service,
     ComponentDriver,
-    Simulator,
 }
 
 impl ArtifactKind {
@@ -52,18 +67,21 @@ impl ArtifactKind {
         match self {
             Self::Service => "service",
             Self::ComponentDriver => "driver",
-            Self::Simulator => "simulator",
         }
     }
 
-    /// The canonical `bin/` file name a participant of this kind is staged
-    /// under, given its short identity (`drive`, `ddsm115`).
+    /// The Cargo package and executable name an official of this kind is
+    /// published and installed under, given its short identity (`drive`,
+    /// `ddsm115`).
+    ///
+    /// This is the name `cargo install` writes into `<root>/bin`, and it is
+    /// **not** the name the binary is staged under inside a bundle - see
+    /// [`bundle_binary_name`].
     #[must_use]
-    pub fn staged_binary_name(self, short: &str) -> String {
+    pub fn cargo_binary_name(self, short: &str) -> String {
         match self {
             Self::ComponentDriver => format!("phoxal-component-{short}"),
             Self::Service => format!("phoxal-service-{short}"),
-            Self::Simulator => format!("phoxal-simulator-{short}"),
         }
     }
 
@@ -72,7 +90,6 @@ impl ArtifactKind {
         match self {
             Self::Service => "phoxal/service-",
             Self::ComponentDriver => "phoxal/component-",
-            Self::Simulator => "phoxal/simulator-",
         }
     }
 }
@@ -81,6 +98,16 @@ impl std::fmt::Display for ArtifactKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
+}
+
+/// The name a runtime's executable is staged under inside `<bundle>/bin`.
+///
+/// There is no path field anywhere in the manifest: a launcher derives the
+/// executable from the id it is launching. A service runs from its service id,
+/// a component driver from its component *type*, and the brain from `brain`.
+#[must_use]
+pub fn bundle_binary_name(short: &str) -> String {
+    short.to_string()
 }
 
 /// One official participant the catalog owns.
@@ -102,10 +129,10 @@ impl OfficialRuntime {
             .unwrap_or(self.package)
     }
 
-    /// The canonical `bin/` file name this official is staged under.
+    /// The executable name `cargo install` produces for this official.
     #[must_use]
-    pub fn staged_binary_name(&self) -> String {
-        self.kind.staged_binary_name(self.short_name())
+    pub fn cargo_binary_name(&self) -> String {
+        self.kind.cargo_binary_name(self.short_name())
     }
 
     /// The Cargo package name this catalog identity is published under.
@@ -177,11 +204,6 @@ const NATIVE: &[OfficialRuntime] = &[
     },
 ];
 
-const SIMULATION: &[OfficialRuntime] = &[OfficialRuntime {
-    package: "phoxal/simulator-webots-controller",
-    kind: ArtifactKind::Simulator,
-}];
-
 /// The official participant set one CLI/framework-supervisor pair interprets.
 ///
 /// A single current snapshot, deliberately not a table keyed by framework
@@ -198,24 +220,11 @@ impl Catalog {
         Self
     }
 
-    /// The officials that run on real hardware. Every one of them is
-    /// mandatory: an official participant is always started, always startup
-    /// required, and takes no authored configuration.
+    /// The officials that run on the robot. Every one of them is mandatory: an
+    /// official participant is always started and takes no authored
+    /// configuration.
     pub fn native(&self) -> impl Iterator<Item = &'static OfficialRuntime> {
         NATIVE.iter()
-    }
-
-    /// The officials that only exist when the robot runs on simulated time.
-    /// The world-clock owner is the first of them.
-    pub fn simulation(&self) -> impl Iterator<Item = &'static OfficialRuntime> {
-        SIMULATION.iter()
-    }
-
-    /// The participant that owns the simulated world clock. A `clock:
-    /// simulated` bundle without it can never leave `Starting`.
-    #[must_use]
-    pub fn world_clock_owner(&self) -> &'static OfficialRuntime {
-        &SIMULATION[0]
     }
 
     /// Whether `identity` is an official service short name, so an authored
@@ -253,35 +262,49 @@ mod tests {
         );
     }
 
+    /// The two names an official carries are deliberately different: the one
+    /// Cargo publishes and installs it under, and the short id it is launched
+    /// by inside a bundle.
     #[test]
-    fn an_official_names_its_identity_and_its_staged_binary() {
+    fn an_official_names_its_cargo_binary_and_its_bundle_entry() {
         let drive = Catalog::official()
             .native()
             .find(|official| official.short_name() == "drive")
             .expect("drive is an official service");
-        assert_eq!(drive.staged_binary_name(), "phoxal-service-drive");
+        assert_eq!(drive.cargo_binary_name(), "phoxal-service-drive");
         assert_eq!(drive.cargo_package_name(), "phoxal-service-drive");
+        assert_eq!(bundle_binary_name(drive.short_name()), "drive");
         assert_eq!(
-            ArtifactKind::ComponentDriver.staged_binary_name("ddsm115"),
+            ArtifactKind::ComponentDriver.cargo_binary_name("ddsm115"),
             "phoxal-component-ddsm115"
         );
+        assert_eq!(bundle_binary_name("ddsm115"), "ddsm115");
     }
 
+    /// The official set is services only, and the simulator that used to sit
+    /// beside them is gone: the Webots controller is a host tool on its own
+    /// train, named by its package constant rather than by a catalog entry.
     #[test]
-    fn native_membership_excludes_simulators_and_simulation_owns_the_world_clock() {
+    fn the_official_set_is_services_and_the_controller_is_a_host_tool() {
         let catalog = Catalog::official();
         assert!(
             catalog
                 .native()
                 .all(|official| official.kind == ArtifactKind::Service),
-            "the native set is services only"
-        );
-        assert_eq!(
-            catalog.world_clock_owner().short_name(),
-            "webots-controller"
+            "the official set is services only"
         );
         assert!(catalog.is_official_service("drive"));
         assert!(!catalog.is_official_service("mission"));
+        assert_eq!(
+            WEBOTS_CONTROLLER_PACKAGE,
+            "phoxal-simulator-webots-controller"
+        );
+        assert!(
+            catalog
+                .native()
+                .all(|official| official.cargo_package_name() != WEBOTS_CONTROLLER_PACKAGE),
+            "the controller is never a catalog participant"
+        );
     }
 
     #[test]
