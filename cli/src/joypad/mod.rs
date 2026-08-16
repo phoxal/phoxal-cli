@@ -4,21 +4,24 @@
 //! client reads it directly and publishes `motion::ManualCommand`, the one
 //! result that belongs on the bus.
 //!
+//! That command is normalized intent, not physics: it is a fraction of what
+//! the robot was authored to do, and the robot scales it by its own limits. So
+//! this module holds no wheel base and no speed limit, and there is no robot
+//! fact it must fetch before an operator can drive.
+//!
 //! [`Joypad`] is the backend-facing half: it owns the `gilrs` handle and
 //! translates its events into [`registry`] transitions. The registry itself is
 //! hardware-free and holds every rule worth testing.
 
 mod drive;
-pub(crate) mod manual;
 mod registry;
 
 use std::collections::HashSet;
 
 use gilrs::{Button, EventType, Gamepad, Gilrs};
-use phoxal_cli_observation::{JoypadDevicesSample, ManualDriveUnsupported};
+use phoxal_cli_observation::JoypadDevicesSample;
 use phoxal_client::robot as api;
 
-use manual::ManualDrive;
 use registry::{PadHandle, Registry, RegistryChange};
 
 /// How many stop commands a revoked authority queues. Manual stop is the one
@@ -32,19 +35,11 @@ pub(crate) struct Joypad {
     /// reason instead of an empty list.
     backend: Option<Gilrs>,
     registry: Registry,
-    drive: Option<ManualDrive>,
 }
 
 impl Joypad {
     /// Open the local gamepad backend and take an initial inventory.
-    ///
-    /// `drive` is absent when the robot's model cannot support manual input;
-    /// `unsupported` then carries the typed reason. The pads are still
-    /// enumerated and shown, but no command is ever derived.
-    pub(crate) fn open(
-        drive: Option<ManualDrive>,
-        unsupported: Option<ManualDriveUnsupported>,
-    ) -> Self {
+    pub(crate) fn open() -> Self {
         let (backend, backend_unavailable) = match Gilrs::new() {
             Ok(backend) => (Some(backend), None),
             Err(error) => {
@@ -55,11 +50,9 @@ impl Joypad {
         let mut joypad = Self {
             backend,
             registry: Registry {
-                unsupported,
                 last_error: backend_unavailable,
                 ..Registry::default()
             },
-            drive,
         };
         joypad.rescan();
         joypad
@@ -134,8 +127,7 @@ impl Joypad {
     }
 
     /// The command the selected pad is currently asking for, or `None` when
-    /// manual authority is off, nothing usable is selected, or this robot has
-    /// no manual drive at all.
+    /// manual authority is off or nothing usable is selected.
     ///
     /// A selection that turns out to be disconnected is dropped here rather
     /// than silently producing nothing, so the returned change tells the caller
@@ -144,11 +136,9 @@ impl Joypad {
         if !self.registry.enabled {
             return (None, RegistryChange::default());
         }
-        let (Some(drive), Some(backend), Some(handle)) = (
-            self.drive,
-            self.backend.as_ref(),
-            self.registry.selected_handle(),
-        ) else {
+        let (Some(backend), Some(handle)) =
+            (self.backend.as_ref(), self.registry.selected_handle())
+        else {
             return (None, RegistryChange::default());
         };
         let gamepad = backend.gamepad(handle);
@@ -163,7 +153,6 @@ impl Joypad {
             button_value(&gamepad, Button::LeftTrigger2),
             button_value(&gamepad, Button::RightTrigger),
             button_value(&gamepad, Button::RightTrigger2),
-            drive,
         );
         (Some(command), RegistryChange::default())
     }
@@ -205,36 +194,21 @@ fn button_value(gamepad: &Gamepad<'_>, button: Button) -> f32 {
 mod tests {
     use super::*;
 
-    /// A user whose robot cannot be driven manually still needs to see whether
-    /// their pad is even detected, and to be told why in a reason the renderer
-    /// matched on rather than a sentence composed elsewhere.
+    /// Whether a robot can be driven is the robot's own business now, so the
+    /// only thing that can rule manual input out here is the operator's own
+    /// hardware: with nothing selected, authority stays off.
     #[test]
-    fn a_robot_without_manual_drive_still_enumerates_pads_and_names_the_reason() {
-        let joypad = Joypad::open(None, Some(ManualDriveUnsupported::NoDifferentialBase));
-        let sample = joypad.sample();
-        assert_eq!(
-            sample.unsupported,
-            Some(ManualDriveUnsupported::NoDifferentialBase)
-        );
-        assert!(!sample.enabled);
-    }
-
-    #[test]
-    fn manual_authority_cannot_be_enabled_without_a_usable_robot() {
-        let mut joypad = Joypad::open(None, Some(ManualDriveUnsupported::NoDifferentialBase));
+    fn manual_authority_cannot_be_enabled_without_a_selected_pad() {
+        let mut joypad = Joypad::open();
         assert!(!joypad.set_enabled(true));
-        assert!(!joypad.sample().enabled);
+        let sample = joypad.sample();
+        assert!(!sample.enabled);
+        assert!(sample.selected.is_none());
     }
 
     #[test]
     fn no_command_is_derived_while_authority_is_off() {
-        let mut joypad = Joypad::open(
-            Some(ManualDrive {
-                wheel_base_m: 0.5,
-                side_speed_mps: 1.0,
-            }),
-            None,
-        );
+        let mut joypad = Joypad::open();
         let (command, change) = joypad.command();
         assert!(command.is_none());
         assert_eq!(change, RegistryChange::default());

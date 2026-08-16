@@ -877,6 +877,7 @@ mod tests {
 
     fn snapshot(lifecycle: Lifecycle) -> Snapshot {
         Snapshot {
+            robot: RobotId::new("rover").expect("fixture robot"),
             revision: 7,
             lifecycle,
             startup: Vec::new(),
@@ -895,7 +896,6 @@ mod tests {
         phoxal_client::Connected {
             execution: phoxal_runtime_contract::identity::ExecutionId::mint(),
             robot: RobotId::new("rover").expect("fixture robot"),
-            manual_drive: None,
             framework: phoxal_runtime_contract::version::FrameworkVersion::CURRENT,
         }
     }

@@ -9,9 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use phoxal_cli_observation::{
-    JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, ManualDriveUnsupported,
-};
+use phoxal_cli_observation::{JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample};
 
 /// Cap on remembered pads. Disconnected entries are kept so a pad that
 /// reconnects keeps its id, which is what makes the cap necessary.
@@ -51,7 +49,7 @@ pub(crate) struct RegistryChange {
 }
 
 /// Authoritative controller inventory, selection and manual authority, plus
-/// structural unavailability and the last rejected request (if any).
+/// the last rejected request (if any).
 #[derive(Default)]
 pub(super) struct Registry {
     pub entries: HashMap<String, PadEntry>,
@@ -59,9 +57,6 @@ pub(super) struct Registry {
     pub selected: Option<String>,
     pub enabled: bool,
     pub last_error: Option<String>,
-    /// Why this robot cannot be driven manually at all, as a closed reason the
-    /// renderer matches on.
-    pub unsupported: Option<ManualDriveUnsupported>,
 }
 
 impl Registry {
@@ -91,7 +86,6 @@ impl Registry {
             available: Arc::new(available),
             selected: self.selected.clone(),
             enabled: self.enabled,
-            unsupported: self.unsupported,
             last_error: self.last_error.clone(),
         }
     }
@@ -239,12 +233,6 @@ impl Registry {
             self.enabled = false;
             self.last_error = None;
             return was_enabled;
-        }
-        if let Some(unsupported) = self.unsupported {
-            self.enabled = false;
-            self.last_error = None;
-            tracing::warn!(reason = %unsupported, "manual input enable rejected");
-            return false;
         }
         let Some(selected) = self.selected.as_ref() else {
             self.enabled = false;
@@ -634,26 +622,6 @@ mod tests {
         assert!(
             registry.last_error.is_none(),
             "hardware changing under us is not a rejected user action"
-        );
-    }
-
-    /// A robot that cannot be driven manually is a structural fact carried as
-    /// a typed reason, not a rejected user action.
-    #[test]
-    fn structural_unavailability_is_separate_from_a_transient_rejection() {
-        let mut registry = Registry {
-            selected: Some("pad".to_string()),
-            unsupported: Some(ManualDriveUnsupported::NoDifferentialBase),
-            last_error: Some("old transient error".to_string()),
-            ..Registry::default()
-        };
-
-        assert!(!registry.set_enabled(true));
-        assert!(!registry.enabled);
-        assert!(registry.last_error.is_none());
-        assert_eq!(
-            registry.sample().unsupported,
-            Some(ManualDriveUnsupported::NoDifferentialBase)
         );
     }
 

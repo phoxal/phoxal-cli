@@ -12,7 +12,6 @@ use phoxal_protocol::supervisor;
 use phoxal_protocol::supervisor::command::{Command, CommandOutcome};
 use phoxal_protocol::supervisor::connect::{ConnectReply, ConnectRequest, PRESENCE_KEY};
 use phoxal_protocol::supervisor::execution::{Lifecycle, Snapshot, SnapshotDocument};
-use phoxal_protocol::supervisor::info::ManualDrive;
 use phoxal_runtime_contract::identity::{ExecutionId, RobotId};
 use phoxal_runtime_contract::version::FrameworkVersion;
 use tokio::sync::{oneshot, watch};
@@ -48,8 +47,10 @@ impl ConnectOptions {
 #[derive(Clone, Debug)]
 pub struct Connected {
     pub execution: ExecutionId,
+    /// Read once from the first snapshot. The supervisor is handed one bundle
+    /// root for the life of an execution, so this value never changes and needs
+    /// no endpoint of its own.
     pub robot: RobotId,
-    pub manual_drive: Option<ManualDrive>,
     pub framework: FrameworkVersion,
 }
 
@@ -483,13 +484,7 @@ async fn initialize(bus: &BusHandle, execution: ExecutionId) -> Result<Initializ
         .await?
         .into_snapshot();
     current.validate()?;
-    let info = Querier::new(
-        bus.clone(),
-        &supervisor::topic::client().info().topic(),
-        DEFAULT_QUERY_TIMEOUT,
-    )?
-    .query(supervisor::info::InfoRequest {})
-    .await?;
+    let robot = current.robot.clone();
 
     let (snapshots_tx, snapshots) = watch::channel(Some(current.clone()));
     let mut tasks = JoinSet::new();
@@ -511,8 +506,7 @@ async fn initialize(bus: &BusHandle, execution: ExecutionId) -> Result<Initializ
     Ok(Initialized {
         connected: Arc::new(Connected {
             execution,
-            robot: info.robot,
-            manual_drive: info.manual_drive,
+            robot,
             framework,
         }),
         snapshots,
@@ -781,6 +775,7 @@ mod tests {
 
     fn snapshot(revision: u64, lifecycle: Lifecycle) -> Snapshot {
         Snapshot {
+            robot: RobotId::new("rover").expect("fixture robot"),
             revision,
             lifecycle,
             startup: Vec::new(),

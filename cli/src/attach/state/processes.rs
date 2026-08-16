@@ -46,13 +46,14 @@ impl ProcessStore {
 mod tests {
     use phoxal_cli_observation::{LocalRuntime, LocalRuntimeState};
     use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
-    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
+    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId, RobotId};
     use phoxal_runtime_contract::metadata::ParticipantKind;
 
     use super::*;
 
     fn snapshot(revision: u64, present: bool) -> Snapshot {
         Snapshot {
+            robot: RobotId::new("rover").expect("fixture robot"),
             revision,
             lifecycle: Lifecycle::Ready,
             startup: Vec::new(),

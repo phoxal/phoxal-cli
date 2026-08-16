@@ -587,7 +587,7 @@ mod tests {
     use super::*;
     use phoxal_cli_observation::LocalRuntime;
     use phoxal_client::supervisor::execution::{Detail, Process, StartupStep};
-    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
+    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId, RobotId};
     use phoxal_runtime_contract::metadata::ParticipantKind;
 
     fn step(kind: StartupStepKind, state: StartupStepState, detail: Option<&str>) -> StartupStep {
@@ -633,6 +633,7 @@ mod tests {
 
     fn snapshot(lifecycle: Lifecycle) -> Snapshot {
         Snapshot {
+            robot: RobotId::new("rover").expect("fixture robot"),
             revision: 3,
             lifecycle,
             startup: vec![

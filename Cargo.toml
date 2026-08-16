@@ -58,12 +58,12 @@ thiserror = "2.0.18"
 
 # The framework train. Every crate in this workspace speaks one train, so the
 # pins live here and nowhere else.
-phoxal-protocol = "0.63"
-phoxal-bundle = "0.63"
-phoxal-bus = "0.63"
-phoxal-manifest = "0.63"
-phoxal-model = "0.63"
-phoxal-runtime-contract = "0.63"
+phoxal-protocol = "0.64"
+phoxal-bundle = "0.64"
+phoxal-bus = "0.64"
+phoxal-manifest = "0.64"
+phoxal-model = "0.64"
+phoxal-runtime-contract = "0.64"
 
 # The external client boundary. Anything in this workspace that speaks to a
 # running robot depends on this and not on the wire crates above.

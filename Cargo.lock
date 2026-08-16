@@ -3246,9 +3246,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bundle"
-version = "0.63.0"
+version = "0.64.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2ba29faead99f7d98acbb3d439e3cdf6b30255eba23815f662bd4f5d3e32b20"
+checksum = "99fe26b45ad321f46972f9cd7bac67791152a4b909f90ea736570d6d24b876bb"
 dependencies = [
  "phoxal-model",
  "phoxal-runtime-contract",
@@ -3259,9 +3259,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-bus"
-version = "0.63.0"
+version = "0.64.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b642b1495270c1bcab28df12b303f71be630180da1e3d0c251459be897d3c464"
+checksum = "26688441bce5fa57c1dfa5b4cf21352fc84474c7cf0dff2c7c964230883fa562"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -3391,9 +3391,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.63.0"
+version = "0.64.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfc90aed1ef704a25ae770bcbdeb0fee03ecd889472a655448426deab3f11297"
+checksum = "0c0349ef7e9e9070dcc1af8aeeb3fd2682339b070d92e6405e0e85a3babf3b0b"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3404,9 +3404,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-manifest"
-version = "0.63.0"
+version = "0.64.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2798235d0cba2e9d2ba367dc7c76b2c943ce4f07fd10ae3b64cf7f51a376bcff"
+checksum = "c4fa1b17157dfa3968d537ddc2e6b51a636df0d1c3457fc3f9b030de91c02f9c"
 dependencies = [
  "phoxal-model",
  "phoxal-runtime-contract",
@@ -3421,9 +3421,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-model"
-version = "0.63.0"
+version = "0.64.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a80d54cb17bc403b22c6e33430b7820ac7f9794f537d9e7aba771da999de0ee"
+checksum = "3e645a96b0666b5ff4d9a009db6a37a8e3fdc64eee7989811d7a9b45dd5fc014"
 dependencies = [
  "phoxal-macros",
  "phoxal-runtime-contract",
@@ -3435,9 +3435,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-protocol"
-version = "0.63.0"
+version = "0.64.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d547a21666701025ca01ad07c6a74f985d1906115f41f39221847b267e6a6d2"
+checksum = "c32cf333a03705a9dba3266bd36260c5293b3f9796c13200a0a9073c7a6073d2"
 dependencies = [
  "phoxal-bus",
  "phoxal-macros",
@@ -3449,9 +3449,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-runtime-contract"
-version = "0.63.0"
+version = "0.64.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67f3cd376612dd4407e9c5de8db17ecd268495ce7edf44deca8100384100c77e"
+checksum = "3e2f01280800aed11ffa14b6dba72ff762caf9638a1915af30092abff88d5614"
 dependencies = [
  "const_format",
  "getrandom 0.3.4",
