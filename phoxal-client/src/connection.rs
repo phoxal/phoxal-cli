@@ -11,7 +11,7 @@ use phoxal_bus::{
 use phoxal_protocol::supervisor;
 use phoxal_protocol::supervisor::command::{Command, CommandOutcome};
 use phoxal_protocol::supervisor::connect::{ConnectReply, ConnectRequest, PRESENCE_KEY};
-use phoxal_protocol::supervisor::execution::{Lifecycle, Snapshot, SnapshotDocument};
+use phoxal_protocol::supervisor::execution::{Snapshot, SnapshotDocument};
 use phoxal_runtime_contract::identity::{ExecutionId, RobotId};
 use phoxal_runtime_contract::version::FrameworkVersion;
 use tokio::sync::{oneshot, watch};
@@ -205,38 +205,6 @@ impl Client {
     pub async fn disconnected(&self) -> DisconnectReason {
         let mut terminal = self.terminal.clone();
         wait_for_terminal(&mut terminal).await
-    }
-
-    /// Wait until the execution can accept work.
-    ///
-    /// Timeout policy remains with the application.
-    pub async fn wait_ready(&self) -> Result<Snapshot, ClientError> {
-        let mut snapshots = self.snapshots();
-        let mut terminal = self.terminal.clone();
-        loop {
-            ensure_receiver_connected(&terminal)?;
-            if let Some(snapshot) = snapshots.borrow_and_update().clone() {
-                match classify_installed_readiness(&terminal, &snapshot)? {
-                    Readiness::Ready => {
-                        ensure_receiver_connected(&terminal)?;
-                        return Ok(snapshot);
-                    }
-                    Readiness::Pending => {}
-                }
-            }
-            tokio::select! {
-                biased;
-                reason = wait_for_terminal(&mut terminal) => {
-                    return Err(ClientError::Disconnected { reason });
-                }
-                changed = snapshots.changed() => {
-                    if changed.is_err() {
-                        let reason = wait_for_terminal(&mut terminal).await;
-                        return Err(ClientError::Disconnected { reason });
-                    }
-                }
-            }
-        }
     }
 
     pub async fn command(&self, command: Command) -> Result<CommandOutcome, ClientError> {
@@ -690,34 +658,6 @@ fn snapshot_task_reason(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Readiness {
-    Ready,
-    Pending,
-}
-
-/// A graph is usable once every expected runtime has been seen, and stays
-/// usable when one later goes away.
-///
-/// There is no failed and no stopped answer to give: an absent runtime is what
-/// `Degraded` says, and a supervisor that died is observed as its identity
-/// token disappearing rather than as a lifecycle value it could not have
-/// published.
-const fn classify_readiness(snapshot: &Snapshot) -> Result<Readiness, ClientError> {
-    match snapshot.lifecycle {
-        Lifecycle::Ready | Lifecycle::Degraded => Ok(Readiness::Ready),
-        Lifecycle::Starting => Ok(Readiness::Pending),
-    }
-}
-
-fn classify_installed_readiness(
-    terminal: &watch::Receiver<Option<DisconnectReason>>,
-    snapshot: &Snapshot,
-) -> Result<Readiness, ClientError> {
-    ensure_receiver_connected(terminal)?;
-    classify_readiness(snapshot)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotPumpDecision {
     Continue,
     ObserversDropped,
@@ -797,32 +737,6 @@ mod tests {
         ] {
             assert!(ensure_compatible_framework(older, newer).is_ok());
             assert!(ensure_compatible_framework(newer, older).is_ok());
-        }
-    }
-
-    #[test]
-    fn ready_and_degraded_snapshots_succeed() {
-        for lifecycle in [Lifecycle::Ready, Lifecycle::Degraded] {
-            assert_eq!(
-                classify_readiness(&snapshot(1, lifecycle)).expect("ready lifecycle"),
-                Readiness::Ready
-            );
-        }
-    }
-
-    /// Readiness has exactly three answers because presence has exactly three
-    /// shapes. A runtime that is absent is not a failure to report here - it
-    /// is what `Degraded` already says, and the client that launched it is the
-    /// one that knows why.
-    #[test]
-    fn a_starting_graph_is_pending_and_nothing_is_ever_a_readiness_failure() {
-        assert_eq!(
-            classify_readiness(&snapshot(1, Lifecycle::Starting))
-                .expect("starting is not an error"),
-            Readiness::Pending
-        );
-        for lifecycle in [Lifecycle::Starting, Lifecycle::Ready, Lifecycle::Degraded] {
-            assert!(classify_readiness(&snapshot(1, lifecycle)).is_ok());
         }
     }
 
@@ -927,12 +841,12 @@ mod tests {
     }
 
     #[test]
-    fn terminal_state_preempts_a_cached_ready_snapshot() {
+    fn terminal_state_preempts_a_snapshot_observer() {
         let (terminal_tx, terminal) = watch::channel(None);
         latch_terminal(&terminal_tx, DisconnectReason::SupervisorIdentityLost);
 
         assert!(matches!(
-            classify_installed_readiness(&terminal, &snapshot(1, Lifecycle::Ready)),
+            ensure_receiver_connected(&terminal),
             Err(ClientError::Disconnected {
                 reason: DisconnectReason::SupervisorIdentityLost,
             })

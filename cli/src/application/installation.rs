@@ -9,6 +9,13 @@
 //! one symlink swap, so the supervisor and the bundle move together: there is no
 //! moment, and no failure path, at which one release's supervisor could be
 //! executing another release's bundle.
+//!
+//! What an activation gates on is the supervisor answering, and nothing beyond
+//! it. A release is responsible for its own two halves coming up; it is not
+//! responsible for which of the robot's hardware happens to be attached to the
+//! machine. The supervisor observes rather than starts, and the launcher owns
+//! each runtime's process and its restarts, so an absent component driver is
+//! reported to the operator - not treated as a release that failed to install.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,6 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 
 use phoxal_cli_project::BUNDLE_DIR;
+use phoxal_client::supervisor::execution::{ProcessState, Snapshot};
 
 use super::units;
 use crate::cli::context::AppContext;
@@ -32,7 +40,52 @@ fn installed_endpoint(roots: &InstallRoots) -> String {
     )
 }
 
+/// How long an activated release has to bring its supervisor up and answer.
 const READINESS_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// One completed activation: the release `/var/phoxal` now selects, and the
+/// graph its supervisor reported once it answered.
+#[derive(Debug)]
+pub(crate) struct Activation {
+    release: PathBuf,
+    graph: InstalledGraph,
+}
+
+/// What the installed supervisor said about its robot the first time it spoke.
+///
+/// The present/absent split is carried so it can be reported, never so it can
+/// be judged: a component whose hardware is not plugged into this machine is
+/// absent, and absence is the launcher's business.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InstalledGraph {
+    robot: String,
+    present: usize,
+    absent: Vec<String>,
+}
+
+impl InstalledGraph {
+    fn from_snapshot(snapshot: &Snapshot) -> Self {
+        Self {
+            robot: snapshot.robot.to_string(),
+            present: snapshot
+                .processes
+                .iter()
+                .filter(|process| process.state == ProcessState::Present)
+                .count(),
+            absent: snapshot
+                .processes
+                .iter()
+                .filter(|process| process.state != ProcessState::Present)
+                .map(|process| process.participant.to_string())
+                .collect(),
+        }
+    }
+
+    /// Every runtime the installed bundle declares, present or not.
+    fn expected(&self) -> usize {
+        self.present + self.absent.len()
+    }
+}
 
 #[derive(Debug, Clone)]
 struct InstallRoots {
@@ -61,7 +114,11 @@ enum ServiceControl {
     #[cfg(test)]
     Fake {
         operations: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
-        fail_readiness_once: std::sync::Arc<std::sync::Mutex<bool>>,
+        /// What the installed supervisor answers with once it answers.
+        graph: InstalledGraph,
+        /// A supervisor that does not answer the first time it is asked, which
+        /// is the one condition that still rolls a release back.
+        silent_once: std::sync::Arc<std::sync::Mutex<bool>>,
     },
 }
 
@@ -89,9 +146,9 @@ impl ServiceControl {
     ///
     /// systemd reads units once and caches them, so a unit written but not
     /// reloaded does not exist as far as `systemctl start` is concerned. On a
-    /// first install that is every runtime unit and the target: the supervisor
-    /// comes up alone, nothing joins its graph, and readiness times out on a
-    /// robot whose unit files are all correct.
+    /// first install that is every runtime unit and the target, and the start
+    /// that should bring the robot's runtimes up fails against a set of unit
+    /// files that are all correct.
     fn reload(&self) -> Result<()> {
         match self {
             Self::Systemd => systemctl(["daemon-reload"]),
@@ -125,31 +182,35 @@ impl ServiceControl {
         }
     }
 
-    async fn wait_ready(&self, endpoint: &str) -> Result<()> {
+    /// Wait until the activated release's supervisor answers, and take what it
+    /// says about the robot.
+    ///
+    /// The completed handshake plus a first snapshot is the whole gate: it is
+    /// exactly the part of a robot the installed release is answerable for. A
+    /// graph missing the drivers for hardware that is not attached to this
+    /// machine still comes back from here, because that release is running.
+    async fn observe(&self, endpoint: &str) -> Result<InstalledGraph> {
         #[cfg(test)]
         if let Self::Fake {
             operations,
-            fail_readiness_once,
+            graph,
+            silent_once,
         } = self
         {
-            operations.lock().unwrap().push("ready");
-            let mut fail = fail_readiness_once.lock().unwrap();
-            if *fail {
-                *fail = false;
-                bail!("forced readiness failure");
+            operations.lock().unwrap().push("observe");
+            let mut silent = silent_once.lock().unwrap();
+            if *silent {
+                *silent = false;
+                bail!("forced: the installed supervisor never answered");
             }
-            return Ok(());
+            return Ok(graph.clone());
         }
 
         let deadline = tokio::time::Instant::now() + READINESS_TIMEOUT;
         loop {
             if let Some(failure) = systemd_failure()? {
-                bail!("phoxal-supervisor.service failed before readiness: {failure}");
+                bail!("phoxal-supervisor.service failed before it answered: {failure}");
             }
-            // The completed handshake plus a snapshot is the readiness
-            // signal, exactly as it is for an interactive `run`. A unit that is
-            // up but whose graph never came together answers connect and
-            // reports why.
             let connection = phoxal_client::Connection::connect(
                 &phoxal_client::ConnectOptions::new(endpoint, crate::attach::CLIENT_PARTICIPANT),
             )
@@ -157,24 +218,63 @@ impl ServiceControl {
             match connection {
                 Ok(connection) => {
                     let client = connection.client();
-                    let readiness =
-                        tokio::time::timeout(Duration::from_millis(250), client.wait_ready()).await;
+                    let observed =
+                        tokio::time::timeout(Duration::from_millis(250), first_snapshot(&client))
+                            .await;
                     let _ = connection.close().await;
-                    if let Ok(readiness) = readiness {
-                        readiness.context("the installed runtime failed readiness")?;
-                        return Ok(());
+                    if let Ok(Some(snapshot)) = observed {
+                        return Ok(InstalledGraph::from_snapshot(&snapshot));
                     }
                 }
                 // The installed unit answered and speaks another framework
-                // train. Waiting out the readiness budget would report a
-                // timeout for something that will never become ready.
+                // train. Waiting out the budget would report a timeout for
+                // something that will never answer this client at all.
                 Err(error) if error.is_compatibility_refusal() => return Err(error.into()),
                 Err(_) => {}
             }
             if tokio::time::Instant::now() >= deadline {
-                bail!("timed out waiting for the installed supervisor to become ready");
+                bail!("timed out waiting for the installed supervisor to answer");
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+}
+
+/// The first snapshot a connection sees, or `None` when the supervisor stops
+/// publishing before there is one.
+async fn first_snapshot(client: &phoxal_client::Client) -> Option<Snapshot> {
+    let mut snapshots = client.snapshots();
+    loop {
+        let observed = snapshots.borrow_and_update().clone();
+        if let Some(snapshot) = observed {
+            return Some(snapshot);
+        }
+        snapshots.changed().await.ok()?;
+    }
+}
+
+/// Wait for the just-activated release's supervisor to answer, restoring the
+/// previous release whole when it never does.
+///
+/// This is the only place an activation can be undone by its own gate, and it
+/// is deliberately narrow: a supervisor that is up and answering has installed
+/// successfully however much of the robot's hardware is attached. `discard` is
+/// the release this activation created, removed on failure so a release nobody
+/// could reach is not left in the rollback index.
+async fn observe_or_restore(
+    roots: &InstallRoots,
+    service: &ServiceControl,
+    previous: Option<&Path>,
+    discard: Option<&Path>,
+) -> Result<InstalledGraph> {
+    match service.observe(&installed_endpoint(roots)).await {
+        Ok(graph) => Ok(graph),
+        Err(error) => {
+            restore_after_failed_activation(previous, roots, service).await?;
+            if let Some(discard) = discard {
+                discard_failed_release(discard, &roots.releases)?;
+            }
+            Err(error)
         }
     }
 }
@@ -220,7 +320,7 @@ fn parse_systemd_failure(state: &str) -> Option<String> {
     }
 }
 
-pub(crate) async fn install(archive: &Path, offline: bool) -> Result<PathBuf> {
+pub(crate) async fn install(archive: &Path, offline: bool) -> Result<Activation> {
     require_system_installation()?;
     let archive = archive
         .canonicalize()
@@ -234,7 +334,7 @@ pub(crate) async fn install(archive: &Path, offline: bool) -> Result<PathBuf> {
     .await
 }
 
-pub(crate) async fn rollback(release: Option<&str>) -> Result<PathBuf> {
+pub(crate) async fn rollback(release: Option<&str>) -> Result<Activation> {
     require_system_installation()?;
     rollback_release(release, &InstallRoots::system(), &ServiceControl::Systemd).await
 }
@@ -260,7 +360,7 @@ async fn install_archive(
     roots: &InstallRoots,
     service: &ServiceControl,
     offline: bool,
-) -> Result<PathBuf> {
+) -> Result<Activation> {
     require_build_archive(archive)?;
     // The archive's own sidecar is the only integrity fence in the system: a
     // bundle records no digest of anything, so an archive nobody attested to
@@ -363,19 +463,17 @@ async fn install_archive(
         discard_failed_release(&release, &roots.releases)?;
         return Err(error);
     }
-    if let Err(error) = service.wait_ready(&installed_endpoint(roots)).await {
-        restore_after_failed_activation(previous.as_deref(), roots, service).await?;
-        discard_failed_release(&release, &roots.releases)?;
-        return Err(error).context("new release was rolled back after failed readiness");
-    }
-    Ok(release)
+    let graph = observe_or_restore(roots, service, previous.as_deref(), Some(&release))
+        .await
+        .context("new release was rolled back: its supervisor never answered")?;
+    Ok(Activation { release, graph })
 }
 
 async fn rollback_release(
     requested: Option<&str>,
     roots: &InstallRoots,
     service: &ServiceControl,
-) -> Result<PathBuf> {
+) -> Result<Activation> {
     let active = active_release(&roots.active)?
         .context("cannot roll back: /var/phoxal does not select a release")?;
     let selected = select_rollback_release(requested, &active, &roots.releases)?;
@@ -396,11 +494,15 @@ async fn rollback_release(
         restore_after_failed_activation(Some(&active), roots, service).await?;
         return Err(error);
     }
-    if let Err(error) = service.wait_ready(&installed_endpoint(roots)).await {
-        restore_after_failed_activation(Some(&active), roots, service).await?;
-        return Err(error).context("rollback target failed readiness; original restored");
-    }
-    Ok(selected)
+    // The gate is the same one an install uses, so an operator cannot reach a
+    // release through `install` that `rollback` would refuse to return to.
+    let graph = observe_or_restore(roots, service, Some(&active), None)
+        .await
+        .context("rollback target's supervisor never answered; original restored")?;
+    Ok(Activation {
+        release: selected,
+        graph,
+    })
 }
 
 fn discard_failed_release(release: &Path, releases: &Path) -> Result<()> {
@@ -422,7 +524,7 @@ async fn restore_after_failed_activation(
             .start()
             .context("failed to restart the previous release")?;
         service
-            .wait_ready(&installed_endpoint(roots))
+            .observe(&installed_endpoint(roots))
             .await
             .context("previous release did not recover after rollback")?;
     } else {
@@ -663,18 +765,46 @@ fn systemctl<const N: usize>(args: [&str; N]) -> Result<()> {
 }
 
 pub(crate) async fn install_command(app: &AppContext, archive: &Path) -> Result<()> {
-    let release = install(archive, app.offline).await?;
-    app.ui.info(active_release_report("installed", &release));
+    let activation = install(archive, app.offline).await?;
+    app.ui
+        .info(active_release_report("installed", &activation.release));
+    report_graph(app, "installed", &activation.graph);
     Ok(())
 }
 
 pub(crate) async fn rollback_command(app: &AppContext, release: Option<&str>) -> Result<()> {
-    let release = rollback(release).await?;
+    let activation = rollback(release).await?;
     app.ui.info(active_release_report(
         "active release restored to",
-        &release,
+        &activation.release,
     ));
+    report_graph(app, "rolled back", &activation.graph);
     Ok(())
+}
+
+/// Tell the operator what the installed robot actually looks like.
+///
+/// The split is the report, not the verdict: naming the runtimes that are not
+/// present is how an operator learns a sensor is unplugged without the
+/// installer pretending the release itself failed.
+fn report_graph(app: &AppContext, verb: &str, graph: &InstalledGraph) {
+    app.ui.info(graph_report(verb, graph));
+    if let Some(absent) = absent_report(graph) {
+        app.ui.warn(absent);
+    }
+}
+
+fn graph_report(verb: &str, graph: &InstalledGraph) -> String {
+    format!(
+        "{verb} {}: {}/{} runtimes present",
+        graph.robot,
+        graph.present,
+        graph.expected()
+    )
+}
+
+fn absent_report(graph: &InstalledGraph) -> Option<String> {
+    (!graph.absent.is_empty()).then(|| format!("not present: {}", graph.absent.join(", ")))
 }
 
 /// What an activation reports: the release, and both halves that came with it.
@@ -695,6 +825,35 @@ fn active_release_report(verb: &str, release: &Path) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// The eight component drivers the Jetson devkit has no hardware for.
+    const UNPLUGGED: [&str; 8] = [
+        "front_camera",
+        "front_center_tof",
+        "front_left_tof",
+        "front_right_tof",
+        "rear_tof",
+        "imu",
+        "left_drive",
+        "right_drive",
+    ];
+
+    fn graph(present: usize, absent: &[&str]) -> InstalledGraph {
+        InstalledGraph {
+            robot: "robot-rover".to_string(),
+            present,
+            absent: absent.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    /// A supervisor that comes up and answers with a whole robot.
+    fn answering(operations: &std::sync::Arc<Mutex<Vec<&'static str>>>) -> ServiceControl {
+        ServiceControl::Fake {
+            operations: operations.clone(),
+            graph: graph(1, &[]),
+            silent_once: std::sync::Arc::new(Mutex::new(false)),
+        }
+    }
 
     fn roots(temp: &tempfile::TempDir) -> InstallRoots {
         InstallRoots {
@@ -798,7 +957,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_activation_restores_the_previous_symlink_and_readiness() -> Result<()> {
+    async fn failed_activation_restores_the_previous_symlink_and_waits_for_its_supervisor()
+    -> Result<()> {
         let temp = tempfile::tempdir()?;
         let roots = roots(&temp);
         std::fs::create_dir_all(&roots.releases)?;
@@ -808,10 +968,7 @@ mod tests {
         let failed = release_stamped(&roots, "20260725T010000.000Z-22222222", "failed")?;
         atomic_symlink_switch(&roots.active, &failed)?;
         let operations = std::sync::Arc::new(Mutex::new(Vec::new()));
-        let service = ServiceControl::Fake {
-            operations: operations.clone(),
-            fail_readiness_once: std::sync::Arc::new(Mutex::new(false)),
-        };
+        let service = answering(&operations);
 
         restore_after_failed_activation(Some(&previous), &roots, &service).await?;
 
@@ -820,7 +977,7 @@ mod tests {
         // starting them: systemd has to read a unit before it can start it.
         assert_eq!(
             *operations.lock().unwrap(),
-            ["stop", "reload", "start", "ready"]
+            ["stop", "reload", "start", "observe"]
         );
         // The restored release's own process set is what systemd is left
         // describing, not the failed one's.
@@ -885,10 +1042,7 @@ mod tests {
         std::fs::create_dir_all(&roots.releases)?;
         let older = release_stamped(&roots, "20260724T010000.000Z-11111111", "older")?;
         let newer = release_stamped(&roots, "20260725T010000.000Z-22222222", "newer")?;
-        let service = ServiceControl::Fake {
-            operations: std::sync::Arc::new(Mutex::new(Vec::new())),
-            fail_readiness_once: std::sync::Arc::new(Mutex::new(false)),
-        };
+        let service = answering(&std::sync::Arc::new(Mutex::new(Vec::new())));
 
         atomic_symlink_switch(&roots.active, &older)?;
         assert_eq!(
@@ -929,10 +1083,12 @@ mod tests {
         Ok(())
     }
 
-    /// A readiness failure restores the previous release complete: the supervisor
-    /// flips back together with the bundle, and the service is restarted on it.
+    /// A supervisor that never answers is the failure that still rolls back,
+    /// and it restores the previous release complete: the supervisor flips back
+    /// together with the bundle, and the service is restarted on it.
     #[tokio::test]
-    async fn a_release_that_fails_readiness_is_replaced_by_the_previous_one_whole() -> Result<()> {
+    async fn a_release_whose_supervisor_never_answers_is_replaced_by_the_previous_one_whole()
+    -> Result<()> {
         let temp = tempfile::tempdir()?;
         let roots = roots(&temp);
         std::fs::create_dir_all(&roots.releases)?;
@@ -944,11 +1100,14 @@ mod tests {
         let operations = std::sync::Arc::new(Mutex::new(Vec::new()));
         let service = ServiceControl::Fake {
             operations: operations.clone(),
-            fail_readiness_once: std::sync::Arc::new(Mutex::new(false)),
+            graph: graph(1, &[]),
+            silent_once: std::sync::Arc::new(Mutex::new(true)),
         };
 
-        restore_after_failed_activation(Some(&previous), &roots, &service).await?;
-        discard_failed_release(&failed, &roots.releases)?;
+        let error = observe_or_restore(&roots, &service, Some(&previous), Some(&failed))
+            .await
+            .expect_err("a supervisor that never answers is not an installed release");
+        assert!(format!("{error:#}").contains("never answered"), "{error:#}");
 
         assert_eq!(
             active_halves(&roots)?,
@@ -959,9 +1118,110 @@ mod tests {
         // starting them: systemd has to read a unit before it can start it.
         assert_eq!(
             *operations.lock().unwrap(),
-            ["stop", "reload", "start", "ready"]
+            ["observe", "stop", "reload", "start", "observe"]
         );
         Ok(())
+    }
+
+    /// The field case this gate exists for: a Jetson devkit with none of the
+    /// rover's sensors or motors attached. The supervisor is up and answering,
+    /// the brain and every service are running, and only the eight component
+    /// drivers for hardware that is not there are absent. That release is
+    /// installed - reported, not rolled back.
+    #[tokio::test]
+    async fn a_graph_with_absent_runtimes_is_installed_and_reported() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let roots = roots(&temp);
+        std::fs::create_dir_all(&roots.releases)?;
+        std::fs::create_dir_all(&roots.state)?;
+        std::fs::create_dir_all(&roots.volatile)?;
+        let previous = release_stamped(&roots, "20260724T010000.000Z-11111111", "previous")?;
+        let installed = release_stamped(&roots, "20260725T010000.000Z-22222222", "installed")?;
+        atomic_symlink_switch(&roots.active, &installed)?;
+        let operations = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let service = ServiceControl::Fake {
+            operations: operations.clone(),
+            graph: graph(12, &UNPLUGGED),
+            silent_once: std::sync::Arc::new(Mutex::new(false)),
+        };
+
+        let observed =
+            observe_or_restore(&roots, &service, Some(&previous), Some(&installed)).await?;
+
+        assert_eq!(observed.present, 12);
+        assert_eq!(observed.expected(), 20);
+        assert_eq!(observed.absent, UNPLUGGED);
+        // Nothing was undone: the release just activated is still the active
+        // one, it is still on disk, and the service was never stopped.
+        assert_eq!(std::fs::read_link(&roots.active)?, installed);
+        assert_eq!(
+            active_halves(&roots)?,
+            ("installed".to_string(), "installed".to_string())
+        );
+        assert_eq!(*operations.lock().unwrap(), ["observe"]);
+        Ok(())
+    }
+
+    /// What the operator is told: the robot, the split, and every runtime that
+    /// is not present named so an unplugged sensor is obvious.
+    #[test]
+    fn the_report_names_the_robot_the_split_and_every_absent_runtime() {
+        let whole = graph(20, &[]);
+        assert_eq!(
+            graph_report("installed", &whole),
+            "installed robot-rover: 20/20 runtimes present"
+        );
+        assert_eq!(absent_report(&whole), None);
+
+        let degraded = graph(12, &UNPLUGGED);
+        assert_eq!(
+            graph_report("installed", &degraded),
+            "installed robot-rover: 12/20 runtimes present"
+        );
+        assert_eq!(
+            absent_report(&degraded).as_deref(),
+            Some(
+                "not present: front_camera, front_center_tof, front_left_tof, front_right_tof, \
+                 rear_tof, imu, left_drive, right_drive"
+            )
+        );
+    }
+
+    /// The split comes off the snapshot the supervisor published, so what is
+    /// reported is what the supervisor saw.
+    #[test]
+    fn the_graph_is_read_off_the_supervisor_snapshot() {
+        use phoxal_client::supervisor::execution::{Lifecycle, Process};
+        use phoxal_runtime_contract::identity::{ParticipantId, RobotId};
+        use phoxal_runtime_contract::metadata::ParticipantKind;
+
+        let process = |name: &str, state| Process {
+            participant: ParticipantId::new(name).expect("fixture participant"),
+            kind: ParticipantKind::Driver,
+            state,
+            producer: None,
+        };
+        let snapshot = Snapshot {
+            robot: RobotId::new("robot-rover").expect("fixture robot"),
+            revision: 4,
+            // A graph the supervisor itself still calls incomplete is exactly
+            // the graph this gate accepts.
+            lifecycle: Lifecycle::Starting,
+            startup: Vec::new(),
+            processes: vec![
+                process("brain", ProcessState::Present),
+                process("front_camera", ProcessState::Absent),
+            ],
+        };
+
+        assert_eq!(
+            InstalledGraph::from_snapshot(&snapshot),
+            InstalledGraph {
+                robot: "robot-rover".to_string(),
+                present: 1,
+                absent: vec!["front_camera".to_string()],
+            }
+        );
     }
 
     /// An archive built before releases owned their supervisor is a bundle at its
@@ -1003,17 +1263,9 @@ mod tests {
         )?;
 
         let operations = std::sync::Arc::new(Mutex::new(Vec::new()));
-        let error = install_archive(
-            &archive,
-            &roots,
-            &ServiceControl::Fake {
-                operations: operations.clone(),
-                fail_readiness_once: std::sync::Arc::new(Mutex::new(false)),
-            },
-            true,
-        )
-        .await
-        .expect_err("a bundle-shaped archive is not a deployment release");
+        let error = install_archive(&archive, &roots, &answering(&operations), true)
+            .await
+            .expect_err("a bundle-shaped archive is not a deployment release");
         let error = format!("{error:#}");
 
         assert!(
