@@ -67,10 +67,20 @@ pub fn stage_webots(request: StageWebotsRequest) -> Result<WebotsLaunch> {
 /// so without an explicit run mode the controller never steps and the
 /// simulation clock never advances. `--batch` suppresses blocking modal
 /// dialogs so requested SIGTERM shutdown can complete unattended.
+///
+/// `--stdout`/`--stderr` are what make the controller's output reachable at
+/// all. Webots owns the controller process and keeps its streams inside the
+/// GUI console; these forward them to Webots' own, which this client has
+/// already redirected into the session's Webots log. The controller is an
+/// external entity that never publishes to the supervisor's log stream, so
+/// without them its account of a failed simulation exists only in a console
+/// nobody is watching.
 fn webots_launch_args(staged_world_path: &std::path::Path) -> Vec<String> {
     vec![
         "--mode=realtime".to_string(),
         "--batch".to_string(),
+        "--stdout".to_string(),
+        "--stderr".to_string(),
         staged_world_path.display().to_string(),
     ]
 }
@@ -79,12 +89,21 @@ fn webots_launch_args(staged_world_path: &std::path::Path) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The controller's output has to leave Webots' own console, or a failed
+    /// simulation has no readable account anywhere: the controller logs to
+    /// stderr rather than to the supervisor's log stream.
     #[test]
     fn webots_host_arguments_are_stable_and_contain_no_runtime_identity() {
         let world = std::path::Path::new("/tmp/staged/worlds/rover.wbt");
         assert_eq!(
             webots_launch_args(world),
-            vec!["--mode=realtime", "--batch", "/tmp/staged/worlds/rover.wbt"]
+            vec![
+                "--mode=realtime",
+                "--batch",
+                "--stdout",
+                "--stderr",
+                "/tmp/staged/worlds/rover.wbt"
+            ]
         );
         assert!(
             !webots_launch_args(world)

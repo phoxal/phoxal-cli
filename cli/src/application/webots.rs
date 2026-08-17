@@ -42,7 +42,10 @@ impl Webots {
     ///
     /// Neither stream is inherited. Webots writes driver notices
     /// (`UNSUPPORTED (log once): ...`) whenever it feels like it, and an
-    /// inherited stream puts them straight over the dashboard's frame.
+    /// inherited stream puts them straight over the dashboard's frame. The
+    /// controller's own output arrives on these same streams - Webots is
+    /// launched with `--stdout --stderr` - so this file is where a simulation
+    /// that failed is read back from.
     pub(crate) fn launch(spec: &WebotsLaunch, log: &std::path::Path) -> Result<Self> {
         let file = crate::application::supervisor::create_log(log)?;
         let errors = file
