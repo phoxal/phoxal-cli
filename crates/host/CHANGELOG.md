@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.40.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.40.0) - 2026-08-17
+
+
+### Added
+
+- Follow the 0.65 train, ask the supervisor which robot it runs, and delete what the campaign left behind ([#339](https://github.com/phoxal/phoxal-cli/pull/339)) [**breaking**]
+
+
 ## [0.39.4](https://github.com/phoxal/phoxal-cli/releases/tag/v0.39.4) - 2026-08-17
 
 
