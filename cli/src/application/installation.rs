@@ -149,9 +149,18 @@ impl ServiceControl {
     /// first install that is every runtime unit and the target, and the start
     /// that should bring the robot's runtimes up fails against a set of unit
     /// files that are all correct.
+    /// Also enables the robot target, which is what makes the runtimes come
+    /// back after a reboot. `service install` enables the supervisor's unit,
+    /// but the target is written from the bundle and so is enabled here: a
+    /// device that rebooted with only the supervisor enabled came up with a
+    /// router and an empty graph, which is worse than not coming up at all
+    /// because it looks like a robot.
     fn reload(&self) -> Result<()> {
         match self {
-            Self::Systemd => systemctl(["daemon-reload"]),
+            Self::Systemd => {
+                systemctl(["daemon-reload"])?;
+                systemctl(["enable", crate::application::units::TARGET_UNIT])
+            }
             #[cfg(test)]
             Self::Fake { operations, .. } => {
                 operations.lock().unwrap().push("reload");
