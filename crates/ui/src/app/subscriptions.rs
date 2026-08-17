@@ -338,7 +338,6 @@ mod tests {
                 robot: RobotId::new("rover").expect("fixture robot id"),
                 project: "project".into(),
                 lifecycle: Lifecycle::Degraded,
-                startup: Vec::new(),
             }),
         )));
         assert!(pending.drain().iter().any(|input| matches!(

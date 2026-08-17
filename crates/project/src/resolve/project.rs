@@ -3,7 +3,6 @@ use std::fs;
 use std::path::Path;
 
 pub use crate::source::host_target_triple;
-use crate::source::tooling::hash_tree;
 use anyhow::{Context, Result, anyhow};
 use phoxal_cli_catalog::{ArtifactKind, Catalog, OfficialRuntime};
 use phoxal_manifest::source::robot::v0::Manifest as Robot;
@@ -13,8 +12,8 @@ const PHOXAL_PROVIDER: &str = "phoxal";
 
 use crate::source::resolver::{
     BundlePlan, CompiledBundle, ResolveOptions, ResolvedBrain, ResolvedComponent,
-    ResolvedComponentDriver, ResolvedPathOverride, ResolvedPathOverrideKind,
-    ResolvedPlatformRuntime, ResolvedUserRuntime, UndeclaredRuntime,
+    ResolvedComponentDriver, ResolvedPathOverride, ResolvedPlatformRuntime, ResolvedUserRuntime,
+    UndeclaredRuntime,
 };
 
 /// Resolve a robot manifest against the CLI-internal official catalog
@@ -469,7 +468,6 @@ fn apply_workspace_runtimes(
             official.path_override = Some(runtime.crate_dir.clone());
             overrides.push(ResolvedPathOverride {
                 key: official_package,
-                kind: ResolvedPathOverrideKind::Service,
                 artifact_name: logical_name,
                 path: runtime.crate_dir.clone(),
             });
@@ -479,15 +477,11 @@ fn apply_workspace_runtimes(
             user_runtimes.push(ResolvedUserRuntime {
                 name: logical_name,
                 path: relative,
-                source_hash: hash_tree(&runtime.crate_dir)?,
             });
         } else {
             // Present but undeclared: legal, not built or launched;
             // surfaced as a drift diagnostic.
-            undeclared.push(UndeclaredRuntime {
-                name: logical_name,
-                family: "services",
-            });
+            undeclared.push(UndeclaredRuntime { name: logical_name });
         }
     }
     let discovered_services = user_runtimes
@@ -496,7 +490,6 @@ fn apply_workspace_runtimes(
         .chain(
             overrides
                 .iter()
-                .filter(|override_| override_.kind == ResolvedPathOverrideKind::Service)
                 .map(|override_| override_.artifact_name.as_str()),
         )
         .collect::<std::collections::BTreeSet<_>>();
@@ -515,7 +508,7 @@ fn apply_workspace_runtimes(
             .join(", ")
     );
     overrides.sort_by(|left, right| left.key.cmp(&right.key));
-    undeclared.sort_by(|left, right| (left.family, &left.name).cmp(&(right.family, &right.name)));
+    undeclared.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(WorkspaceRuntimeResolution {
         user_runtimes,
         undeclared_runtimes: undeclared,
@@ -1047,7 +1040,6 @@ robot:
         let resolved = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
         assert_eq!(resolved.undeclared_runtimes.len(), 1);
         assert_eq!(resolved.undeclared_runtimes[0].name, "mission");
-        assert_eq!(resolved.undeclared_runtimes[0].family, "services");
         Ok(())
     }
 

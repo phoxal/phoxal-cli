@@ -45,26 +45,25 @@ async fn feed(context: &FeedContext, commands: &mut mpsc::Receiver<InputCommand>
     // single dropped publish, so it is a countdown drained a tick at a time
     // rather than one best-effort send.
     let mut pending_stops = 0_usize;
-    let mut dropped_commands = 0_u64;
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                publish_stop(&publisher, &mut pending_stops, &mut dropped_commands);
+                publish_stop(&publisher, &mut pending_stops);
 
                 let polled = joypad.poll();
                 let (command, derived) = joypad.command();
                 if polled.zero_required || derived.zero_required {
                     queue_stop(&mut pending_stops);
-                    publish_stop(&publisher, &mut pending_stops, &mut dropped_commands);
+                    publish_stop(&publisher, &mut pending_stops);
                 }
                 if polled.changed || derived.changed {
                     publish_joypad(context, joypad.sample()).await?;
                 }
-                if let Some(command) = command
-                    && publisher.send(command).is_err()
-                {
-                    dropped_commands = dropped_commands.saturating_add(1);
+                if let Some(command) = command {
+                    // A dropped setpoint is replaced by the next tick's, 20ms
+                    // later; only a stop owes a retry, and it has one below.
+                    let _ = publisher.send(command);
                 }
             }
             command = commands.recv() => {
@@ -82,7 +81,7 @@ async fn feed(context: &FeedContext, commands: &mut mpsc::Receiver<InputCommand>
                 };
                 if zero_required {
                     queue_stop(&mut pending_stops);
-                    publish_stop(&publisher, &mut pending_stops, &mut dropped_commands);
+                    publish_stop(&publisher, &mut pending_stops);
                 }
                 // Re-observing IS the acknowledgement, including for a request
                 // the registry rejected.
@@ -127,18 +126,14 @@ fn queue_stop(pending_stops: &mut usize) {
 fn publish_stop(
     publisher: &SetpointPublisher<api::endpoint::motion::ManualEndpoint>,
     pending_stops: &mut usize,
-    dropped: &mut u64,
 ) {
-    publish_stop_with(pending_stops, dropped, |command| {
-        publisher.send(command).is_ok()
-    });
+    publish_stop_with(pending_stops, |command| publisher.send(command).is_ok());
 }
 
 /// Apply one stop-publish result to the retry budget. The closure keeps the
 /// countdown rule independently testable without constructing a live bus.
 fn publish_stop_with(
     pending_stops: &mut usize,
-    dropped: &mut u64,
     mut publish: impl FnMut(api::motion::ManualCommand) -> bool,
 ) {
     if *pending_stops == 0 {
@@ -146,8 +141,6 @@ fn publish_stop_with(
     }
     if publish(stop()) {
         *pending_stops -= 1;
-    } else {
-        *dropped = dropped.saturating_add(1);
     }
 }
 
@@ -178,16 +171,14 @@ mod tests {
     #[test]
     fn successful_stop_publication_decrements_the_retry_budget() {
         let mut pending_stops = STOP_REPEAT_COUNT;
-        let mut dropped = 0;
         let mut published = Vec::new();
 
-        publish_stop_with(&mut pending_stops, &mut dropped, |command| {
+        publish_stop_with(&mut pending_stops, |command| {
             published.push(command);
             true
         });
 
         assert_eq!(pending_stops, STOP_REPEAT_COUNT - 1);
-        assert_eq!(dropped, 0);
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].linear, 0.0);
         assert_eq!(published[0].angular, 0.0);
@@ -196,19 +187,16 @@ mod tests {
     #[test]
     fn failed_stop_publication_retains_the_budget_for_the_next_attempt() {
         let mut pending_stops = STOP_REPEAT_COUNT;
-        let mut dropped = 0;
         let mut outcomes = [false, true].into_iter();
 
-        publish_stop_with(&mut pending_stops, &mut dropped, |_| {
+        publish_stop_with(&mut pending_stops, |_| {
             outcomes.next().expect("an outcome for the first attempt")
         });
         assert_eq!(pending_stops, STOP_REPEAT_COUNT);
-        assert_eq!(dropped, 1);
 
-        publish_stop_with(&mut pending_stops, &mut dropped, |_| {
+        publish_stop_with(&mut pending_stops, |_| {
             outcomes.next().expect("an outcome for the retry")
         });
         assert_eq!(pending_stops, STOP_REPEAT_COUNT - 1);
-        assert_eq!(dropped, 1);
     }
 }

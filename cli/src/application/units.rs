@@ -192,8 +192,7 @@ pub(crate) fn is_generated_unit(name: &str) -> bool {
     name == TARGET_UNIT
         || (name.starts_with("phoxal-")
             && name.ends_with(".service")
-            && name != phoxal_cli_host::paths::SYSTEMD_UNIT
-            && name != phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT)
+            && name != phoxal_cli_host::paths::SYSTEMD_UNIT)
 }
 
 #[cfg(test)]
@@ -407,9 +406,6 @@ mod tests {
         assert!(is_generated_unit("phoxal-left_drive.service"));
         assert!(is_generated_unit("phoxal.target"));
         assert!(!is_generated_unit("phoxal-supervisor.service"));
-        assert!(!is_generated_unit(
-            phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT
-        ));
         assert!(!is_generated_unit("sshd.service"));
     }
 }

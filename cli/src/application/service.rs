@@ -18,22 +18,14 @@ fn unit_contents() -> String {
 pub(crate) async fn install(app: &AppContext) -> Result<()> {
     require_root()?;
     require_systemd()?;
-    // Prove ownership of both transition paths before creating users,
-    // changing directories, or retiring the legacy unit. A foreign current
-    // unit must leave an otherwise valid legacy installation untouched.
+    // Prove ownership of the unit before creating users or changing
+    // directories: a foreign unit at that path ends the install having touched
+    // nothing.
     validate_managed_unit(Path::new(UNIT_PATH), "overwrite")?;
-    validate_managed_unit(
-        Path::new(phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT_PATH),
-        "retire",
-    )?;
     ensure_service_group()?;
     ensure_service_user()?;
     ensure_runtime_paths()?;
-    install_unit_files_with(
-        Path::new(UNIT_PATH),
-        Path::new(phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT_PATH),
-        disable_managed_unit,
-    )?;
+    write_managed_unit(Path::new(UNIT_PATH))?;
     run_status("systemctl", &["daemon-reload"])?;
     run_status(
         "systemctl",
@@ -47,9 +39,7 @@ pub(crate) async fn install(app: &AppContext) -> Result<()> {
 pub(crate) async fn uninstall(app: &AppContext) -> Result<()> {
     require_root()?;
     require_systemd()?;
-    let path = Path::new(UNIT_PATH);
-    let legacy_path = Path::new(phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT_PATH);
-    if uninstall_unit_files_with(path, legacy_path, disable_managed_unit)? {
+    if uninstall_unit_file_with(Path::new(UNIT_PATH), disable_managed_unit)? {
         run_status("systemctl", &["daemon-reload"])?;
     }
     app.ui.info(
@@ -180,61 +170,17 @@ fn write_managed_unit(path: &Path) -> Result<()> {
     sync_parent(path)
 }
 
-fn install_unit_files_with(
-    current_path: &Path,
-    legacy_path: &Path,
-    mut disable_now: impl FnMut(&str) -> Result<()>,
-) -> Result<()> {
-    retire_managed_unit_with(
-        legacy_path,
-        phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT,
-        "retire",
-        &mut disable_now,
-    )?;
-    write_managed_unit(current_path)
-}
-
-fn uninstall_unit_files_with(
-    current_path: &Path,
-    legacy_path: &Path,
-    mut disable_now: impl FnMut(&str) -> Result<()>,
-) -> Result<bool> {
-    // Validate both ownership claims before stopping or removing either unit.
-    // A foreign legacy unit must therefore leave the current managed unit
-    // untouched, just as a foreign current unit leaves the legacy one intact.
-    let current_exists = validate_managed_unit(current_path, "remove")?;
-    let legacy_exists = validate_managed_unit(legacy_path, "retire")?;
-    if current_exists {
-        retire_managed_unit_with(
-            current_path,
-            phoxal_cli_host::paths::SYSTEMD_UNIT,
-            "remove",
-            &mut disable_now,
-        )?;
-    }
-    if legacy_exists {
-        retire_managed_unit_with(
-            legacy_path,
-            phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT,
-            "retire",
-            &mut disable_now,
-        )?;
-    }
-    Ok(current_exists || legacy_exists)
-}
-
-/// Stop and retire only an exact unit this CLI manages. A missing unit is the
-/// sole benign no-op; any failure to stop an existing managed unit leaves its
+/// Stop and remove the unit only if this CLI wrote it. A missing unit is the
+/// sole benign no-op; a failure to stop an existing managed unit leaves its
 /// file in place so systemd cannot later restart a process from removed policy.
-fn retire_managed_unit_with(
+fn uninstall_unit_file_with(
     path: &Path,
-    unit: &str,
-    action: &str,
-    disable_now: &mut impl FnMut(&str) -> Result<()>,
+    mut disable_now: impl FnMut(&str) -> Result<()>,
 ) -> Result<bool> {
-    if !validate_managed_unit(path, action)? {
+    if !validate_managed_unit(path, "remove")? {
         return Ok(false);
     }
+    let unit = phoxal_cli_host::paths::SYSTEMD_UNIT;
     disable_now(unit).with_context(|| format!("failed to disable and stop {unit}"))?;
     std::fs::remove_file(path)?;
     sync_parent(path)?;
@@ -308,105 +254,80 @@ mod unit_tests {
         }
     }
 
+    /// A unit that could not be stopped keeps its file: systemd must never be
+    /// left able to restart a process from policy this CLI already removed.
     #[test]
-    fn failed_current_stop_leaves_current_and_legacy_unit_files_untouched() -> Result<()> {
+    fn a_failed_stop_leaves_the_unit_file_in_place() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let current = root.path().join(phoxal_cli_host::paths::SYSTEMD_UNIT);
-        let legacy = root
-            .path()
-            .join(phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT);
-        write_managed_test_unit(&current)?;
-        write_managed_test_unit(&legacy)?;
+        let unit = root.path().join(phoxal_cli_host::paths::SYSTEMD_UNIT);
+        write_managed_test_unit(&unit)?;
 
-        let error = uninstall_unit_files_with(&current, &legacy, |unit| {
+        let error = uninstall_unit_file_with(&unit, |unit| {
             anyhow::bail!("injected stop failure for {unit}")
         })
-        .expect_err("the injected current-unit stop must fail uninstall");
+        .expect_err("the injected stop must fail uninstall");
 
         assert!(error.to_string().contains("failed to disable and stop"));
-        assert!(current.exists());
-        assert!(legacy.exists());
+        assert!(unit.exists());
         Ok(())
     }
 
     #[test]
-    fn failed_legacy_stop_blocks_legacy_removal_and_new_unit_installation() -> Result<()> {
+    fn uninstall_stops_the_managed_unit_before_removing_its_file() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let current = root.path().join(phoxal_cli_host::paths::SYSTEMD_UNIT);
-        let legacy = root
-            .path()
-            .join(phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT);
-        write_managed_test_unit(&legacy)?;
-
-        let error = install_unit_files_with(&current, &legacy, |unit| {
-            anyhow::bail!("injected stop failure for {unit}")
-        })
-        .expect_err("the injected legacy-unit stop must fail install");
-
-        assert!(error.to_string().contains("failed to disable and stop"));
-        assert!(legacy.exists());
-        assert!(!current.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn uninstall_stops_each_exact_managed_unit_before_removing_its_file() -> Result<()> {
-        let root = tempfile::tempdir()?;
-        let current = root.path().join(phoxal_cli_host::paths::SYSTEMD_UNIT);
-        let legacy = root
-            .path()
-            .join(phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT);
-        write_managed_test_unit(&current)?;
-        write_managed_test_unit(&legacy)?;
+        let path = root.path().join(phoxal_cli_host::paths::SYSTEMD_UNIT);
+        write_managed_test_unit(&path)?;
         let mut stopped = Vec::new();
 
-        let changed = uninstall_unit_files_with(&current, &legacy, |unit| {
-            match unit {
-                phoxal_cli_host::paths::SYSTEMD_UNIT => {
-                    assert!(current.exists());
-                    assert!(legacy.exists());
-                }
-                phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT => {
-                    assert!(!current.exists());
-                    assert!(legacy.exists());
-                }
-                other => panic!("unexpected unit {other}"),
-            }
+        let changed = uninstall_unit_file_with(&path, |unit| {
+            assert_eq!(unit, phoxal_cli_host::paths::SYSTEMD_UNIT);
+            assert!(path.exists(), "the file outlives the stop that precedes it");
             stopped.push(unit.to_owned());
             Ok(())
         })?;
 
         assert!(changed);
-        assert_eq!(
-            stopped,
-            [
-                phoxal_cli_host::paths::SYSTEMD_UNIT,
-                phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT,
-            ]
-        );
-        assert!(!current.exists());
-        assert!(!legacy.exists());
+        assert_eq!(stopped, [phoxal_cli_host::paths::SYSTEMD_UNIT]);
+        assert!(!path.exists());
         Ok(())
     }
 
+    /// A unit file this CLI did not write is never stopped, removed, or
+    /// overwritten - whoever wrote it owns it.
     #[test]
-    fn install_stops_and_removes_exact_legacy_unit_before_writing_current() -> Result<()> {
+    fn a_foreign_unit_is_left_entirely_alone() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let current = root.path().join(phoxal_cli_host::paths::SYSTEMD_UNIT);
-        let legacy = root
-            .path()
-            .join(phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT);
-        write_managed_test_unit(&legacy)?;
+        let path = root.path().join(phoxal_cli_host::paths::SYSTEMD_UNIT);
+        std::fs::write(&path, "# Managed by somebody else\n[Unit]\n")?;
 
-        install_unit_files_with(&current, &legacy, |unit| {
-            assert_eq!(unit, phoxal_cli_host::paths::LEGACY_SYSTEMD_UNIT);
-            assert!(legacy.exists());
-            assert!(!current.exists());
-            Ok(())
-        })?;
+        let error = uninstall_unit_file_with(&path, |unit| {
+            panic!("a foreign unit must never be stopped: {unit}")
+        })
+        .expect_err("a foreign unit is refused");
 
-        assert!(!legacy.exists());
-        assert_eq!(std::fs::read_to_string(&current)?, unit_contents());
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to remove foreign unit")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path)?,
+            "# Managed by somebody else\n[Unit]\n"
+        );
+        Ok(())
+    }
+
+    /// Writing the unit is idempotent and produces exactly the contents the
+    /// generator renders.
+    #[test]
+    fn writing_the_managed_unit_produces_the_generated_contents() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join(phoxal_cli_host::paths::SYSTEMD_UNIT);
+
+        write_managed_unit(&path)?;
+        assert_eq!(std::fs::read_to_string(&path)?, unit_contents());
+        write_managed_unit(&path)?;
+        assert_eq!(std::fs::read_to_string(&path)?, unit_contents());
         Ok(())
     }
 }

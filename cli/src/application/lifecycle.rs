@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal_client::supervisor::execution::{ProcessState, Snapshot};
+use phoxal_cli_observation::GraphSplit;
+use phoxal_client::supervisor::execution::Snapshot;
 use phoxal_client::{BusError, ConnectError, ConnectOptions, Connection};
 
 use super::launcher::{
@@ -129,10 +130,12 @@ pub(crate) async fn start_command(
     // exiting - which is the whole point of `start`.
     launched.session.shutdown().await;
     let display = target.project.display();
-    if !absent.is_empty() {
+    // The robot is left running, so its runtimes' own account of themselves is
+    // still reachable: a runtime logs over the bus, and the supervisor is the
+    // one holding it.
+    if let Some(absent) = absent {
         app.ui.warn(format!(
-            "started degraded; not present: {}",
-            absent.join(", ")
+            "started degraded; not present: {absent}. `phoxal logs <participant>` says why"
         ));
     }
     app.ui.info(format!(
@@ -150,6 +153,10 @@ pub(crate) struct LaunchedSession {
     /// checklist can say why an absent runtime is absent.
     pub(crate) children: tokio::task::JoinHandle<()>,
     record: SessionRecord,
+    /// The bundle every runtime of this session was launched against. It is a
+    /// live-session fact, not part of the record `stop` reads: what ends a
+    /// session is signalling pids.
+    bundle: PathBuf,
     paths: phoxal_cli_host::paths::RuntimePaths,
     /// Held for the whole session: the bundle being executed is the one this
     /// command just published, and a concurrent build would replace it.
@@ -157,25 +164,21 @@ pub(crate) struct LaunchedSession {
 }
 
 impl LaunchedSession {
-    /// The runtimes the supervisor does not see, named for the operator.
-    fn absent_runtimes(&self) -> Vec<String> {
-        self.session.snapshot().map_or_else(Vec::new, |snapshot| {
-            snapshot
-                .processes
-                .iter()
-                .filter(|process| process.state != ProcessState::Present)
-                .map(|process| process.participant.to_string())
-                .collect()
-        })
+    /// The runtimes the supervisor does not see, named for the operator, or
+    /// `None` when the whole robot is up.
+    fn absent_runtimes(&self) -> Option<String> {
+        self.session
+            .snapshot()
+            .and_then(|snapshot| GraphSplit::from(&snapshot).absent_line())
     }
 
     pub(crate) fn owned(&self) -> OwnedSession {
         OwnedSession::new(self.record.clone(), self.paths.clone())
     }
 
-    /// The bundle every recorded process was launched against.
+    /// The bundle every runtime of this session was launched against.
     pub(crate) fn bundle(&self) -> &Path {
-        &self.record.bundle
+        &self.bundle
     }
 }
 
@@ -226,10 +229,7 @@ pub(crate) async fn launch_execution(
         &paths,
     )?;
     let record = SessionRecord {
-        project: target.project.clone(),
         endpoint: target.endpoint.clone(),
-        bundle: release.bundle.clone(),
-        simulation,
         supervisor: RecordedProcess {
             pid: supervisor.pid(),
             log: paths.supervisor_log(),
@@ -263,6 +263,7 @@ pub(crate) async fn launch_execution(
         supervisor,
         children,
         record,
+        bundle: release.bundle,
         paths,
         _lock: lock,
     };
@@ -381,7 +382,7 @@ async fn drive_launched_session(
         children,
         record,
         paths,
-        _lock,
+        ..
     } = launched;
     let owned = OwnedSession::new(record, paths.clone());
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
@@ -868,7 +869,7 @@ pub(crate) fn report_outcome(
 
 #[cfg(test)]
 mod tests {
-    use phoxal_client::supervisor::execution::{Lifecycle, Process};
+    use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
     use phoxal_client::{BusError, QueryError};
     use phoxal_runtime_contract::identity::{ParticipantId, ProducerId, RobotId};
     use phoxal_runtime_contract::metadata::ParticipantKind;
@@ -877,10 +878,8 @@ mod tests {
 
     fn snapshot(lifecycle: Lifecycle) -> Snapshot {
         Snapshot {
-            robot: RobotId::new("rover").expect("fixture robot"),
             revision: 7,
             lifecycle,
-            startup: Vec::new(),
             processes: vec![Process {
                 participant: ParticipantId::new("base").expect("fixture participant"),
                 kind: ParticipantKind::Service,
@@ -902,10 +901,7 @@ mod tests {
 
     fn record() -> SessionRecord {
         SessionRecord {
-            project: PathBuf::from("/tmp/rover"),
             endpoint: "unixsock-stream//tmp/rover/.phoxal/run/supervisor.sock".to_string(),
-            bundle: PathBuf::from("/tmp/rover/.phoxal/release/bundle"),
-            simulation: false,
             supervisor: RecordedProcess {
                 pid: 1,
                 log: PathBuf::from("/tmp/rover/.phoxal/run/supervisor.log"),

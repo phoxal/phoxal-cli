@@ -7,7 +7,8 @@
 use std::sync::Arc;
 
 use phoxal_cli_observation::{
-    AttachmentEvent, ConnectionObservation, ObservationSource, SourceStatus, SupervisorObservation,
+    AttachmentEvent, ConnectionObservation, LocalRuntimes, ObservationSource, ProcessObservation,
+    ProcessTable, SourceStatus, SupervisorObservation,
 };
 use phoxal_client::DisconnectReason;
 use phoxal_client::supervisor::execution::Snapshot;
@@ -59,12 +60,7 @@ fn lost_observation(reason: DisconnectReason) -> ConnectionObservation {
 }
 
 async fn publish(context: &FeedContext, snapshot: &Snapshot) -> Result<(), ()> {
-    let processes = context
-        .stores
-        .processes
-        .write()
-        .await
-        .replace(snapshot, &context.local.read());
+    let processes = expected_runtimes(snapshot, &context.local.read());
     context
         .events
         .send(AttachmentEvent::SupervisorChanged(Arc::new(observation(
@@ -82,6 +78,28 @@ async fn publish(context: &FeedContext, snapshot: &Snapshot) -> Result<(), ()> {
         .map_err(|_| ())
 }
 
+/// Merge the authoritative snapshot with this client's own child facts.
+///
+/// The snapshot is the whole remote truth and it is thin on purpose: a runtime
+/// is present or it is not. Everything that explains an absence - an exit
+/// status, a log path - comes from `local`, and only a session that launched
+/// the runtime has any.
+fn expected_runtimes(snapshot: &Snapshot, local: &LocalRuntimes) -> ProcessTable {
+    snapshot
+        .processes
+        .iter()
+        .map(|row| {
+            (
+                row.participant.clone(),
+                ProcessObservation {
+                    row: row.clone(),
+                    local: local.get(&row.participant).cloned(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn observation(context: &FeedContext, snapshot: &Snapshot) -> SupervisorObservation {
     SupervisorObservation {
         revision: snapshot.revision,
@@ -89,15 +107,67 @@ fn observation(context: &FeedContext, snapshot: &Snapshot) -> SupervisorObservat
         robot: context.client.connected().robot.clone(),
         project: context.project.clone(),
         lifecycle: snapshot.lifecycle,
-        startup: snapshot.startup.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use phoxal_cli_observation::{LocalRuntime, LocalRuntimeState};
     use phoxal_client::BusFault;
+    use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
+    use phoxal_runtime_contract::identity::ParticipantId;
+    use phoxal_runtime_contract::metadata::ParticipantKind;
 
     use super::*;
+
+    fn brain() -> ParticipantId {
+        ParticipantId::new("brain").expect("fixture participant")
+    }
+
+    fn absent_brain() -> Snapshot {
+        Snapshot {
+            revision: 1,
+            lifecycle: Lifecycle::Starting,
+            processes: vec![Process {
+                participant: brain(),
+                kind: ParticipantKind::Brain,
+                state: ProcessState::Absent,
+                producer: None,
+            }],
+        }
+    }
+
+    /// A session that launched the runtime carries the answer the snapshot
+    /// cannot give: why an absent row is absent, and where to read the rest.
+    #[test]
+    fn a_launched_runtimes_own_exit_is_merged_onto_its_absent_row() {
+        let local = LocalRuntimes::from([(
+            brain(),
+            LocalRuntime {
+                state: LocalRuntimeState::Exited {
+                    status: "exit status: 1".to_string(),
+                },
+                log: std::path::PathBuf::from("/tmp/rover/.phoxal/run/log/brain.log"),
+            },
+        )]);
+
+        let table = expected_runtimes(&absent_brain(), &local);
+        let observed = table[&brain()]
+            .local
+            .as_ref()
+            .expect("a launched runtime carries its own child facts");
+        assert_eq!(observed.state.label(), "exit status: 1");
+        assert_eq!(
+            observed.log,
+            std::path::PathBuf::from("/tmp/rover/.phoxal/run/log/brain.log")
+        );
+
+        // An attachment to somebody else's execution has none of this, and the
+        // row is still a complete row.
+        let attached = expected_runtimes(&absent_brain(), &LocalRuntimes::new());
+        assert!(attached[&brain()].local.is_none());
+        assert_eq!(attached[&brain()].row.state, ProcessState::Absent);
+    }
 
     #[test]
     fn every_disconnect_reason_reaches_the_tui_unchanged() {

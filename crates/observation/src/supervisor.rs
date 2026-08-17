@@ -1,11 +1,12 @@
 //! The execution-level observation, projected from one supervisor snapshot.
 
-use phoxal_client::supervisor::execution::{Lifecycle, StartupStep};
+use phoxal_client::supervisor::execution::Lifecycle;
 use phoxal_runtime_contract::identity::{ExecutionId, RobotId};
 
 /// What an attached client knows about the execution as a whole.
 ///
-/// Everything here comes from the authoritative snapshot except `project`,
+/// Everything here comes from the authoritative snapshot except `robot`, read
+/// once at connect from the manifest the supervisor serves, and `project`,
 /// which is the client's own local knowledge of where the bundle it launched
 /// lives - the supervisor has no opinion about the operator's directory layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,5 +22,4 @@ pub struct SupervisorObservation {
     /// There is no failed or stopped value - the supervisor's own death is
     /// observed as its identity token disappearing.
     pub lifecycle: Lifecycle,
-    pub startup: Vec<StartupStep>,
 }
