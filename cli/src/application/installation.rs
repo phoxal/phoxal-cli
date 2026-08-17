@@ -453,7 +453,31 @@ fn regenerate_runtime_units(release: &Path, unit_root: &Path) -> Result<()> {
             std::fs::remove_file(&path)?;
         }
     }
-    fsync_dir(unit_root)
+    fsync_dir(unit_root)?;
+    // systemd reads units once and caches them, so a unit written but not
+    // reloaded does not exist as far as `systemctl start` is concerned. On a
+    // first install that is every runtime unit and the target: the supervisor
+    // would come up alone, nothing would join its graph, and readiness would
+    // time out on a robot whose units were all written correctly. The reload is
+    // part of writing them, not a separate step a caller may forget.
+    reload_systemd()
+}
+
+/// Make systemd read the units this install just wrote.
+///
+/// Absent on a host without systemd - unit files are still written there, which
+/// is what a container image or a hand-managed device wants, and nothing to
+/// reload is not a failure.
+fn reload_systemd() -> Result<()> {
+    let Ok(output) = Command::new("systemctl").arg("daemon-reload").output() else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        output.status.success(),
+        "systemctl daemon-reload failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
 }
 
 /// Write one unit, refusing to overwrite a file this CLI did not write.

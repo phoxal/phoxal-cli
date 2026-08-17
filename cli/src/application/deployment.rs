@@ -36,6 +36,10 @@ impl DeployRequest {
                 .suffix(".build.phoxal")
                 .tempfile()?;
             let built = self.build_source(app, output.path()).await?;
+            // The build writes the sidecar beside its output, and `output` is a
+            // temporary that only removes the archive itself.
+            let sidecar = phoxal_cli_project::digest_sidecar(output.path());
+            let _sidecar = scopeguard_remove(sidecar);
 
             // The project build use case deliberately returns one locally
             // verified archive regardless of backend. Deploy sends that exact
@@ -63,6 +67,19 @@ impl DeployRequest {
             .canonicalize()
             .with_context(|| format!("failed to resolve {}", archive.display()))?;
         anyhow::ensure!(archive.is_file(), "{} is not a file", archive.display());
+        // The digest sidecar travels with the archive, always. It is what the
+        // remote installer verifies the transfer against, and it is the only
+        // integrity claim a bundle carries now that nothing inside it is
+        // hashed - an archive that arrives without one is refused there rather
+        // than installed on trust.
+        let sidecar = phoxal_cli_project::digest_sidecar(&archive);
+        anyhow::ensure!(
+            sidecar.is_file(),
+            "{} has no digest sidecar at {}; `phoxal build` writes one beside every archive, so \
+             rebuild it or copy the sidecar next to it before deploying",
+            archive.display(),
+            sidecar.display()
+        );
         let remote_archive = format!("{remote_dir}/build.phoxal");
         run_local(
             "scp",
@@ -70,6 +87,14 @@ impl DeployRequest {
                 "-q",
                 archive.to_string_lossy().as_ref(),
                 &format!("{}:{remote_archive}", self.target),
+            ],
+        )?;
+        run_local(
+            "scp",
+            &[
+                "-q",
+                sidecar.to_string_lossy().as_ref(),
+                &format!("{}:{remote_archive}.sha256", self.target),
             ],
         )?;
         run_remote(&self.target, &remote_install_command(&remote_archive)).with_context(|| {
@@ -117,6 +142,21 @@ impl DeployRequest {
 
 pub(crate) fn remote_install_command(archive: &str) -> String {
     format!("sudo -n {REMOTE_PHOXAL} install {}", shell_quote(archive))
+}
+
+/// Remove `path` when the returned guard drops.
+///
+/// The temporary archive a source deploy builds into removes only itself, and
+/// the build writes the digest sidecar beside it. Without this the sidecar
+/// outlives the deploy in the system temporary directory.
+fn scopeguard_remove(path: std::path::PathBuf) -> impl Drop {
+    struct Remove(std::path::PathBuf);
+    impl Drop for Remove {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    Remove(path)
 }
 
 pub(crate) fn validate_ssh_target(target: &str) -> Result<()> {
@@ -225,6 +265,24 @@ pub(crate) async fn deploy_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The installer verifies the archive against its sidecar, so a deploy
+    /// that sent only the archive could never install anywhere. The remote
+    /// name is the archive's own with `.sha256` appended, which is what
+    /// `install` looks for beside it.
+    #[test]
+    fn the_sidecar_travels_under_the_name_the_installer_looks_for() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let archive = directory.path().join("build.phoxal");
+        std::fs::write(&archive, b"archive").expect("archive");
+
+        let sidecar = phoxal_cli_project::digest_sidecar(&archive);
+        assert_eq!(sidecar, directory.path().join("build.phoxal.sha256"));
+        assert_eq!(
+            format!("{}.sha256", "/tmp/phoxal-deploy.ABC/build.phoxal"),
+            "/tmp/phoxal-deploy.ABC/build.phoxal.sha256"
+        );
+    }
 
     #[test]
     fn deploy_target_is_exactly_user_at_host() {
