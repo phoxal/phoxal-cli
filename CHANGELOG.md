@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.39.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.39.1) - 2026-08-17
+
+
+### Fixed
+
+- Make a systemd install actually come up ([#331](https://github.com/phoxal/phoxal-cli/pull/331))
+
+
 ## [0.39.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.39.0) - 2026-08-17
 
 
