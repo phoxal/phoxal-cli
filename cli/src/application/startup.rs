@@ -19,9 +19,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use phoxal_cli_observation::{GraphSplit, LocalRuntimeState, LocalRuntimes};
-use phoxal_client::supervisor::execution::{
-    Lifecycle, ProcessState, Snapshot, StartupStepKind, StartupStepState,
-};
+use phoxal_client::supervisor::execution::{Lifecycle, ProcessState, Snapshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::attach::Session;
@@ -222,21 +220,13 @@ impl Startup {
     }
 
     /// Fold one published snapshot into the checklist.
+    ///
+    /// The supervisor step is already settled here, and settled against the
+    /// endpoint this client dialled: a snapshot only exists once the client is
+    /// attached, and attaching is what completes that step. A snapshot
+    /// therefore only ever advances the runtimes.
     fn observe(&self, snapshot: &Snapshot, local: &LocalRuntimes) -> Progress {
         let mut welcome = self.welcome();
-        // The supervisor's own bootstrap is the same in every mode now: it
-        // reads the manifest and opens its router, and it waits for nothing
-        // else - not for a world clock, not for a participant. So there is no
-        // mode-specific settling here.
-        if !welcome.settled(StepId::Supervisor) {
-            if step_state(snapshot, StartupStepKind::Bundle) == Some(StartupStepState::Done)
-                && step_state(snapshot, StartupStepKind::Router) == Some(StartupStepState::Done)
-            {
-                welcome.complete(StepId::Supervisor, supervisor_detail(snapshot));
-            } else {
-                welcome.detail(StepId::Supervisor, active_startup_detail(snapshot));
-            }
-        }
         if welcome.settled(StepId::Supervisor) {
             let detail = graph_detail(snapshot, local);
             if welcome.running(StepId::Runtimes) {
@@ -353,48 +343,6 @@ async fn watch_interrupt(cancellation: CancellationToken, stop: CancellationToke
 // ---------------------------------------------------------------------------
 // snapshot -> checklist
 // ---------------------------------------------------------------------------
-
-fn step_state(snapshot: &Snapshot, kind: StartupStepKind) -> Option<StartupStepState> {
-    snapshot
-        .startup
-        .iter()
-        .find(|step| step.kind == kind)
-        .map(|step| step.state)
-}
-
-fn step_detail(snapshot: &Snapshot, kind: StartupStepKind) -> Option<&str> {
-    snapshot
-        .startup
-        .iter()
-        .find(|step| step.kind == kind)
-        .and_then(|step| step.detail.as_ref())
-        .map(phoxal_client::supervisor::execution::Detail::as_str)
-}
-
-/// What the supervisor is doing right now, from its own startup sequence.
-fn active_startup_detail(snapshot: &Snapshot) -> String {
-    snapshot
-        .startup
-        .iter()
-        .find(|step| step.state == StartupStepState::Active)
-        .map_or_else(
-            || "waiting for the supervisor".to_string(),
-            |step| match step.kind {
-                StartupStepKind::Bundle => "reading the manifest".to_string(),
-                StartupStepKind::Router => "starting the router".to_string(),
-            },
-        )
-}
-
-/// The supervisor line's evidence: its bundle is open and its router is up.
-/// The router's own detail is `<execution> on <endpoint>`; the endpoint is the
-/// half that is worth the width.
-fn supervisor_detail(snapshot: &Snapshot) -> String {
-    let router = step_detail(snapshot, StartupStepKind::Router)
-        .map(|detail| detail.rsplit(" on ").next().unwrap_or(detail).to_string())
-        .unwrap_or_else(|| "router".to_string());
-    format!("bundle · {router}")
-}
 
 /// Whether what this session started is up.
 ///
@@ -580,18 +528,9 @@ impl phoxal_cli_project::Reporter for PreparationReporter {
 mod tests {
     use super::*;
     use phoxal_cli_observation::LocalRuntime;
-    use phoxal_client::supervisor::execution::{Detail, Process, StartupStep};
-    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId, RobotId};
+    use phoxal_client::supervisor::execution::Process;
+    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
     use phoxal_runtime_contract::metadata::ParticipantKind;
-
-    fn step(kind: StartupStepKind, state: StartupStepState, detail: Option<&str>) -> StartupStep {
-        StartupStep {
-            kind,
-            state,
-            detail: detail.map(Detail::new),
-            elapsed_ms: Some(900),
-        }
-    }
 
     fn process(participant: &str, state: ProcessState) -> Process {
         Process {
@@ -627,37 +566,13 @@ mod tests {
 
     fn snapshot(lifecycle: Lifecycle) -> Snapshot {
         Snapshot {
-            robot: RobotId::new("rover").expect("fixture robot"),
             revision: 3,
             lifecycle,
-            startup: vec![
-                step(
-                    StartupStepKind::Bundle,
-                    StartupStepState::Done,
-                    Some("/tmp/rover/.phoxal/release/bundle"),
-                ),
-                step(
-                    StartupStepKind::Router,
-                    StartupStepState::Done,
-                    Some("01JABCDEF on unixsock-stream//tmp/rover/.phoxal/run/supervisor.sock"),
-                ),
-            ],
             processes: vec![
                 process("base", ProcessState::Present),
                 process("drive", ProcessState::Absent),
             ],
         }
-    }
-
-    /// The supervisor line names its bundle and the endpoint its router bound,
-    /// not the execution id that would eat the whole column.
-    #[test]
-    fn the_supervisor_line_keeps_the_router_endpoint() {
-        let detail = supervisor_detail(&snapshot(Lifecycle::Starting));
-        assert_eq!(
-            detail,
-            "bundle · unixsock-stream//tmp/rover/.phoxal/run/supervisor.sock"
-        );
     }
 
     /// The runtimes line counts what an operator is waiting for, and - because
@@ -764,24 +679,6 @@ mod tests {
         assert!(
             unstarted.contains("drive (not started by this session)"),
             "{unstarted}"
-        );
-    }
-
-    /// While the supervisor is still coming up, the line says which of its own
-    /// steps is running rather than a blank wait.
-    #[test]
-    fn the_supervisor_line_tracks_the_running_bootstrap_step() {
-        let mut starting = snapshot(Lifecycle::Starting);
-        starting.startup[1].state = StartupStepState::Active;
-        assert_eq!(active_startup_detail(&starting), "starting the router");
-
-        let mut settled = snapshot(Lifecycle::Starting);
-        for step in &mut settled.startup {
-            step.state = StartupStepState::Pending;
-        }
-        assert_eq!(
-            active_startup_detail(&settled),
-            "waiting for the supervisor"
         );
     }
 }

@@ -878,10 +878,8 @@ mod tests {
 
     fn snapshot(lifecycle: Lifecycle) -> Snapshot {
         Snapshot {
-            robot: RobotId::new("rover").expect("fixture robot"),
             revision: 7,
             lifecycle,
-            startup: Vec::new(),
             processes: vec![Process {
                 participant: ParticipantId::new("base").expect("fixture participant"),
                 kind: ParticipantKind::Service,

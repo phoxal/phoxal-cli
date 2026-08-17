@@ -120,7 +120,6 @@ pub type ProcessTable = BTreeMap<ParticipantId, ProcessObservation>;
 #[cfg(test)]
 mod tests {
     use phoxal_client::supervisor::execution::Lifecycle;
-    use phoxal_runtime_contract::identity::RobotId;
 
     use super::*;
 
@@ -135,10 +134,8 @@ mod tests {
             producer: None,
         };
         let mut snapshot = Snapshot {
-            robot: RobotId::new("rover").expect("fixture robot"),
             revision: 1,
             lifecycle: Lifecycle::Starting,
-            startup: Vec::new(),
             processes: vec![
                 process("brain", ProcessState::Present),
                 process("front_camera", ProcessState::Absent),

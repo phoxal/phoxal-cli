@@ -1639,7 +1639,6 @@ mod tests {
             robot: RobotId::new("testbot").expect("fixture robot id"),
             project: "/tmp/robot".to_string(),
             lifecycle,
-            startup: Vec::new(),
         }
     }
 

@@ -107,7 +107,6 @@ fn observation(context: &FeedContext, snapshot: &Snapshot) -> SupervisorObservat
         robot: context.client.connected().robot.clone(),
         project: context.project.clone(),
         lifecycle: snapshot.lifecycle,
-        startup: snapshot.startup.clone(),
     }
 }
 
@@ -116,7 +115,7 @@ mod tests {
     use phoxal_cli_observation::{LocalRuntime, LocalRuntimeState};
     use phoxal_client::BusFault;
     use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
-    use phoxal_runtime_contract::identity::{ParticipantId, RobotId};
+    use phoxal_runtime_contract::identity::ParticipantId;
     use phoxal_runtime_contract::metadata::ParticipantKind;
 
     use super::*;
@@ -127,10 +126,8 @@ mod tests {
 
     fn absent_brain() -> Snapshot {
         Snapshot {
-            robot: RobotId::new("rover").expect("fixture robot"),
             revision: 1,
             lifecycle: Lifecycle::Starting,
-            startup: Vec::new(),
             processes: vec![Process {
                 participant: brain(),
                 kind: ParticipantKind::Brain,
