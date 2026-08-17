@@ -35,6 +35,17 @@ async fn every_descriptor_driven_operation(
     Ok(())
 }
 
+/// The robot a connection is attached to is one query away, and the answer is
+/// the bundle manifest itself: an application that depends only on this crate
+/// can name the reply and read the compiled robot out of it.
+#[allow(dead_code)]
+async fn the_manifest_is_reachable_through_the_client(
+    client: &Client,
+) -> Result<String, ClientError> {
+    let manifest: supervisor::info::InfoReply = client.manifest().await?;
+    Ok(manifest.robot().id().to_string())
+}
+
 #[test]
 fn protocol_families_and_structured_errors_are_reexported() {
     fn cloneable<T: Clone>() {}
@@ -45,6 +56,10 @@ fn protocol_families_and_structured_errors_are_reexported() {
     assert_eq!(
         supervisor::topic::client().connect().topic().key(),
         "supervisor/connect"
+    );
+    assert_eq!(
+        supervisor::topic::client().info().topic().key(),
+        "supervisor/info"
     );
     assert_eq!(
         robot::topic::client().motion().manual().key(),

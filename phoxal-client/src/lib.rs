@@ -46,7 +46,7 @@ pub use phoxal_bus::{
     StreamEvent, StreamPublisher, StreamReceiver, Subscribe, Topic,
 };
 
-/// Framework value types exposed by connection facts and fenced commands.
+/// Framework value types exposed by connection facts and typed operations.
 pub use phoxal_runtime_contract::{
     identity::{ExecutionId, ParticipantId, ProducerId, RobotId},
     version::FrameworkVersion,

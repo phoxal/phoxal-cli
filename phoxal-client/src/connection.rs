@@ -47,9 +47,9 @@ impl ConnectOptions {
 #[derive(Clone, Debug)]
 pub struct Connected {
     pub execution: ExecutionId,
-    /// Read once from the first snapshot. The supervisor is handed one bundle
-    /// root for the life of an execution, so this value never changes and needs
-    /// no endpoint of its own.
+    /// Read once at connect from the manifest `supervisor/info` answers with.
+    /// The supervisor is handed one bundle root for the life of an execution,
+    /// so this value never changes and no caller has to ask twice.
     pub robot: RobotId,
     pub framework: FrameworkVersion,
 }
@@ -66,7 +66,7 @@ pub struct Client {
     bus: BusHandle,
     snapshots: watch::Receiver<Option<Snapshot>>,
     terminal: watch::Receiver<Option<DisconnectReason>>,
-    current: Querier<supervisor::snapshot::CurrentRequest, SnapshotDocument>,
+    info: Querier<supervisor::info::InfoRequest, supervisor::info::InfoReply>,
     command: Querier<supervisor::command::Request, supervisor::command::Reply>,
     logs: Querier<supervisor::logs::SnapshotRequest, supervisor::logs::Snapshot>,
     telemetry: Querier<supervisor::telemetry::SnapshotRequest, supervisor::telemetry::Snapshot>,
@@ -218,8 +218,7 @@ impl Client {
             })?)
     }
 
-    /// Ask the host this execution runs on to reboot, fenced on a fresh
-    /// authoritative snapshot revision.
+    /// Ask the host this execution runs on to reboot.
     ///
     /// There is no `stop` and no `restart` beside it. The supervisor starts
     /// nothing, so it can stop nothing: whoever launched a runtime stops that
@@ -228,26 +227,24 @@ impl Client {
     /// thing only the machine running the supervisor can do for a remote
     /// operator - cycle its own power.
     pub async fn reboot(&self) -> Result<CommandOutcome, ClientError> {
-        let expected_revision = self.fenced_revision().await?;
-        self.command(Command::Reboot { expected_revision }).await
+        self.command(Command::Reboot).await
     }
 
-    /// Ask the host this execution runs on to power off, fenced the same way.
+    /// Ask the host this execution runs on to power off.
     pub async fn poweroff(&self) -> Result<CommandOutcome, ClientError> {
-        let expected_revision = self.fenced_revision().await?;
-        self.command(Command::Poweroff { expected_revision }).await
+        self.command(Command::Poweroff).await
     }
 
-    /// The revision a host command is acknowledged against, read fresh so an
-    /// operator cannot reboot a robot against a view that has moved on.
-    async fn fenced_revision(&self) -> Result<u64, ClientError> {
+    /// The bundle manifest this execution is running, exactly as it is on disk.
+    ///
+    /// It is the same document every participant of this execution reads, so a
+    /// caller that needs the mounted components or a runtime's configuration
+    /// gets the robot itself rather than a projection of it that could
+    /// disagree. [`Connected::robot`] is this document's id, already read once
+    /// at connect, so asking again is only worth it for the rest of the model.
+    pub async fn manifest(&self) -> Result<supervisor::info::InfoReply, ClientError> {
         self.ensure_connected()?;
-        Ok(self
-            .current
-            .query(supervisor::snapshot::CurrentRequest {})
-            .await?
-            .snapshot()
-            .revision)
+        Ok(self.info.query(supervisor::info::InfoRequest {}).await?)
     }
 
     pub async fn logs(
@@ -354,7 +351,7 @@ impl Connection {
             terminal_tx,
             identity,
             tasks,
-            current,
+            info,
             command,
             logs,
             telemetry,
@@ -364,7 +361,7 @@ impl Connection {
             bus,
             snapshots,
             terminal: terminal.clone(),
-            current,
+            info,
             command,
             logs,
             telemetry,
@@ -431,7 +428,7 @@ struct Initialized {
     terminal_tx: watch::Sender<Option<DisconnectReason>>,
     identity: KeyLivelinessObserver,
     tasks: JoinSet<SnapshotPumpExit>,
-    current: Querier<supervisor::snapshot::CurrentRequest, SnapshotDocument>,
+    info: Querier<supervisor::info::InfoRequest, supervisor::info::InfoReply>,
     command: Querier<supervisor::command::Request, supervisor::command::Reply>,
     logs: Querier<supervisor::logs::SnapshotRequest, supervisor::logs::Snapshot>,
     telemetry: Querier<supervisor::telemetry::SnapshotRequest, supervisor::telemetry::Snapshot>,
@@ -441,18 +438,31 @@ async fn initialize(bus: &BusHandle, execution: ExecutionId) -> Result<Initializ
     let framework = remote_framework(bus).await?;
     ensure_compatible_framework(framework, FrameworkVersion::CURRENT)?;
 
+    let info = Querier::new(
+        bus.clone(),
+        &supervisor::topic::client().info().topic(),
+        DEFAULT_QUERY_TIMEOUT,
+    )?;
+    // The identity is one fact for the life of the execution, so it is asked
+    // once here and carried on `Connected`. Every screen that shows the robot
+    // reads it from there rather than repeating this query.
+    let robot = info
+        .query(supervisor::info::InfoRequest {})
+        .await?
+        .into_robot()
+        .id()
+        .clone();
+
     let stream = StreamReceiver::new(bus, &supervisor::topic::client().snapshot().topic()).await?;
-    let current_query = Querier::new(
+    let current = Querier::new(
         bus.clone(),
         &supervisor::topic::client().snapshot().current(),
         DEFAULT_QUERY_TIMEOUT,
-    )?;
-    let current = current_query
-        .query(supervisor::snapshot::CurrentRequest {})
-        .await?
-        .into_snapshot();
+    )?
+    .query(supervisor::snapshot::CurrentRequest {})
+    .await?
+    .into_snapshot();
     current.validate()?;
-    let robot = current.robot.clone();
 
     let (snapshots_tx, snapshots) = watch::channel(Some(current.clone()));
     let mut tasks = JoinSet::new();
@@ -482,7 +492,7 @@ async fn initialize(bus: &BusHandle, execution: ExecutionId) -> Result<Initializ
         terminal_tx,
         identity,
         tasks,
-        current: current_query,
+        info,
         command: Querier::new(
             bus.clone(),
             &supervisor::topic::client().command().topic(),
@@ -715,10 +725,8 @@ mod tests {
 
     fn snapshot(revision: u64, lifecycle: Lifecycle) -> Snapshot {
         Snapshot {
-            robot: RobotId::new("rover").expect("fixture robot"),
             revision,
             lifecycle,
-            startup: Vec::new(),
             processes: Vec::new(),
         }
     }

@@ -26,6 +26,7 @@ use anyhow::{Context, Result, bail};
 use phoxal_cli_observation::GraphSplit;
 use phoxal_cli_project::BUNDLE_DIR;
 use phoxal_client::supervisor::execution::Snapshot;
+use phoxal_runtime_contract::identity::RobotId;
 
 use super::units;
 use crate::cli::context::AppContext;
@@ -75,9 +76,12 @@ struct InstalledGraph {
 }
 
 impl InstalledGraph {
-    fn from_snapshot(snapshot: &Snapshot) -> Self {
+    /// The robot is the connection's own, established at connect from the
+    /// manifest the supervisor serves, so this report costs no second round
+    /// trip and names what is *running* rather than what was unpacked.
+    fn observed(robot: &RobotId, snapshot: &Snapshot) -> Self {
         Self {
-            robot: snapshot.robot.to_string(),
+            robot: robot.to_string(),
             split: GraphSplit::from(snapshot),
         }
     }
@@ -233,12 +237,13 @@ impl ServiceControl {
             match connection {
                 Ok(connection) => {
                     let client = connection.client();
+                    let robot = client.connected().robot.clone();
                     let observed =
                         tokio::time::timeout(Duration::from_millis(250), first_snapshot(&client))
                             .await;
                     let _ = connection.close().await;
                     if let Ok(Some(snapshot)) = observed {
-                        return Ok(InstalledGraph::from_snapshot(&snapshot));
+                        return Ok(InstalledGraph::observed(&robot, &snapshot));
                     }
                 }
                 // The installed unit answered and speaks another framework
@@ -1336,12 +1341,12 @@ mod tests {
         );
     }
 
-    /// The split comes off the snapshot the supervisor published, so what is
-    /// reported is what the supervisor saw.
+    /// The split comes off the snapshot the supervisor published and the robot
+    /// off the connection that read it, so what is reported is what the
+    /// running release said about itself.
     #[test]
     fn the_graph_is_read_off_the_supervisor_snapshot() {
         use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
-        use phoxal_runtime_contract::identity::RobotId;
         use phoxal_runtime_contract::metadata::ParticipantKind;
 
         let process = |name: &str, state| Process {
@@ -1351,20 +1356,19 @@ mod tests {
             producer: None,
         };
         let snapshot = Snapshot {
-            robot: RobotId::new("robot-rover").expect("fixture robot"),
             revision: 4,
             // A graph the supervisor itself still calls incomplete is exactly
             // the graph this gate accepts.
             lifecycle: Lifecycle::Starting,
-            startup: Vec::new(),
             processes: vec![
                 process("brain", ProcessState::Present),
                 process("front_camera", ProcessState::Absent),
             ],
         };
+        let robot = RobotId::new("robot-rover").expect("fixture robot");
 
         assert_eq!(
-            InstalledGraph::from_snapshot(&snapshot),
+            InstalledGraph::observed(&robot, &snapshot),
             graph(1, &["front_camera"])
         );
     }
