@@ -202,6 +202,20 @@ mod tests {
 
     use super::*;
 
+    /// A rebooted device must come back as a robot, not as a lone router: the
+    /// target is what pulls every runtime up, so it declares the install
+    /// section that lets `systemctl enable` make that true.
+    #[test]
+    fn the_target_can_be_enabled_so_a_reboot_brings_the_runtimes_back() {
+        let units = bundle_units(&[runtime("brain", "brain", RuntimeRole::Brain)]);
+        let (_, target) = units
+            .iter()
+            .find(|(name, _)| name == TARGET_UNIT)
+            .expect("the robot target is generated");
+        assert!(target.contains("[Install]\nWantedBy=multi-user.target"));
+        assert!(target.contains("Wants=phoxal-brain.service"));
+    }
+
     /// systemd removes a `RuntimeDirectory=` when the declaring unit stops, and
     /// every unit declaring the same one shares that removal. Only the
     /// supervisor may declare `/run/phoxal`: it owns the socket inside it, and
