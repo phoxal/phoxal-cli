@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal_client::supervisor::execution::{ProcessState, Snapshot};
+use phoxal_cli_observation::GraphSplit;
+use phoxal_client::supervisor::execution::Snapshot;
 use phoxal_client::{BusError, ConnectError, ConnectOptions, Connection};
 
 use super::launcher::{
@@ -129,11 +130,9 @@ pub(crate) async fn start_command(
     // exiting - which is the whole point of `start`.
     launched.session.shutdown().await;
     let display = target.project.display();
-    if !absent.is_empty() {
-        app.ui.warn(format!(
-            "started degraded; not present: {}",
-            absent.join(", ")
-        ));
+    if let Some(absent) = absent {
+        app.ui
+            .warn(format!("started degraded; not present: {absent}"));
     }
     app.ui.info(format!(
         "robot instance ready; attach with `phoxal attach {display}` or stop with `phoxal stop \
@@ -157,16 +156,12 @@ pub(crate) struct LaunchedSession {
 }
 
 impl LaunchedSession {
-    /// The runtimes the supervisor does not see, named for the operator.
-    fn absent_runtimes(&self) -> Vec<String> {
-        self.session.snapshot().map_or_else(Vec::new, |snapshot| {
-            snapshot
-                .processes
-                .iter()
-                .filter(|process| process.state != ProcessState::Present)
-                .map(|process| process.participant.to_string())
-                .collect()
-        })
+    /// The runtimes the supervisor does not see, named for the operator, or
+    /// `None` when the whole robot is up.
+    fn absent_runtimes(&self) -> Option<String> {
+        self.session
+            .snapshot()
+            .and_then(|snapshot| GraphSplit::from(&snapshot).absent_line())
     }
 
     pub(crate) fn owned(&self) -> OwnedSession {
@@ -868,7 +863,7 @@ pub(crate) fn report_outcome(
 
 #[cfg(test)]
 mod tests {
-    use phoxal_client::supervisor::execution::{Lifecycle, Process};
+    use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
     use phoxal_client::{BusError, QueryError};
     use phoxal_runtime_contract::identity::{ParticipantId, ProducerId, RobotId};
     use phoxal_runtime_contract::metadata::ParticipantKind;

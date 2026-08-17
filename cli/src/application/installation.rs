@@ -23,8 +23,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
+use phoxal_cli_observation::GraphSplit;
 use phoxal_cli_project::BUNDLE_DIR;
-use phoxal_client::supervisor::execution::{ProcessState, Snapshot};
+use phoxal_client::supervisor::execution::Snapshot;
 
 use super::units;
 use crate::cli::context::AppContext;
@@ -70,31 +71,15 @@ pub(crate) struct Activation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InstalledGraph {
     robot: String,
-    present: usize,
-    absent: Vec<String>,
+    split: GraphSplit,
 }
 
 impl InstalledGraph {
     fn from_snapshot(snapshot: &Snapshot) -> Self {
         Self {
             robot: snapshot.robot.to_string(),
-            present: snapshot
-                .processes
-                .iter()
-                .filter(|process| process.state == ProcessState::Present)
-                .count(),
-            absent: snapshot
-                .processes
-                .iter()
-                .filter(|process| process.state != ProcessState::Present)
-                .map(|process| process.participant.to_string())
-                .collect(),
+            split: GraphSplit::from(snapshot),
         }
-    }
-
-    /// Every runtime the installed bundle declares, present or not.
-    fn expected(&self) -> usize {
-        self.present + self.absent.len()
     }
 }
 
@@ -877,13 +862,16 @@ fn graph_report(verb: &str, graph: &InstalledGraph) -> String {
     format!(
         "{verb} {}: {}/{} runtimes present",
         graph.robot,
-        graph.present,
-        graph.expected()
+        graph.split.present,
+        graph.split.expected()
     )
 }
 
 fn absent_report(graph: &InstalledGraph) -> Option<String> {
-    (!graph.absent.is_empty()).then(|| format!("not present: {}", graph.absent.join(", ")))
+    graph
+        .split
+        .absent_line()
+        .map(|absent| format!("not present: {absent}"))
 }
 
 /// What an activation reports: the release, and both halves that came with it.
@@ -902,8 +890,11 @@ fn active_release_report(verb: &str, release: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Mutex;
+
+    use phoxal_runtime_contract::identity::ParticipantId;
+
+    use super::*;
 
     /// The eight component drivers the Jetson devkit has no hardware for.
     const UNPLUGGED: [&str; 8] = [
@@ -920,8 +911,13 @@ mod tests {
     fn graph(present: usize, absent: &[&str]) -> InstalledGraph {
         InstalledGraph {
             robot: "robot-rover".to_string(),
-            present,
-            absent: absent.iter().map(|name| (*name).to_string()).collect(),
+            split: GraphSplit {
+                present,
+                absent: absent
+                    .iter()
+                    .map(|name| ParticipantId::new(*name).expect("fixture participant"))
+                    .collect(),
+            },
         }
     }
 
@@ -1298,9 +1294,12 @@ mod tests {
         let observed =
             observe_or_restore(&roots, &service, Some(&previous), &[installed.as_path()]).await?;
 
-        assert_eq!(observed.present, 12);
-        assert_eq!(observed.expected(), 20);
-        assert_eq!(observed.absent, UNPLUGGED);
+        assert_eq!(observed.split.present, 12);
+        assert_eq!(observed.split.expected(), 20);
+        assert_eq!(
+            observed.split.absent_line().as_deref(),
+            Some(UNPLUGGED.join(", ").as_str())
+        );
         // Nothing was undone: the release just activated is still the active
         // one, it is still on disk, and the service was never stopped.
         assert_eq!(std::fs::read_link(&roots.active)?, installed);
@@ -1341,8 +1340,8 @@ mod tests {
     /// reported is what the supervisor saw.
     #[test]
     fn the_graph_is_read_off_the_supervisor_snapshot() {
-        use phoxal_client::supervisor::execution::{Lifecycle, Process};
-        use phoxal_runtime_contract::identity::{ParticipantId, RobotId};
+        use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
+        use phoxal_runtime_contract::identity::RobotId;
         use phoxal_runtime_contract::metadata::ParticipantKind;
 
         let process = |name: &str, state| Process {
@@ -1366,11 +1365,7 @@ mod tests {
 
         assert_eq!(
             InstalledGraph::from_snapshot(&snapshot),
-            InstalledGraph {
-                robot: "robot-rover".to_string(),
-                present: 1,
-                absent: vec!["front_camera".to_string()],
-            }
+            graph(1, &["front_camera"])
         );
     }
 

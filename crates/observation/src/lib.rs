@@ -40,7 +40,7 @@ pub use logs::{
     WindowDirection, bounded_log_text, sanitize_terminal_text,
 };
 pub use processes::{
-    LocalRuntime, LocalRuntimeState, LocalRuntimes, ProcessObservation, ProcessTable,
+    GraphSplit, LocalRuntime, LocalRuntimeState, LocalRuntimes, ProcessObservation, ProcessTable,
 };
 pub use revision::{ObservationQuery, ObservationWindow, QueryToken, StoreChanged, StoreRevision};
 pub use runtimes::{

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use phoxal_cli_observation::{LocalRuntimeState, LocalRuntimes};
+use phoxal_cli_observation::{GraphSplit, LocalRuntimeState, LocalRuntimes};
 use phoxal_client::supervisor::execution::{
     Lifecycle, ProcessState, Snapshot, StartupStepKind, StartupStepState,
 };
@@ -197,21 +197,17 @@ impl Startup {
         let Some(snapshot) = snapshot else {
             return message;
         };
-        let absent = snapshot
-            .processes
+        let absent = GraphSplit::from(snapshot)
+            .absent
             .iter()
-            .filter(|process| process.state != ProcessState::Present)
-            .map(|process| {
-                let participant = process.participant.to_string();
-                match local.get(&process.participant) {
-                    Some(runtime) => match &runtime.state {
-                        LocalRuntimeState::Running => format!("{participant} (started, no lease)"),
-                        LocalRuntimeState::Exited { status } => {
-                            format!("{participant} ({status}, see {})", runtime.log.display())
-                        }
-                    },
-                    None => format!("{participant} (not started by this session)"),
-                }
+            .map(|participant| match local.get(participant) {
+                Some(runtime) => match &runtime.state {
+                    LocalRuntimeState::Running => format!("{participant} (started, no lease)"),
+                    LocalRuntimeState::Exited { status } => {
+                        format!("{participant} ({status}, see {})", runtime.log.display())
+                    }
+                },
+                None => format!("{participant} (not started by this session)"),
             })
             .collect::<Vec<_>>();
         if !absent.is_empty() {
@@ -428,16 +424,12 @@ fn launch_is_up(snapshot: &Snapshot, local: &LocalRuntimes) -> bool {
 /// how many of them this session started, and what happened to the ones that
 /// are not there.
 fn graph_detail(snapshot: &Snapshot, local: &LocalRuntimes) -> String {
-    let total = snapshot.processes.len();
+    let split = GraphSplit::from(snapshot);
+    let total = split.expected();
     if total == 0 {
         return "waiting for the runtime set".to_string();
     }
-    let present = snapshot
-        .processes
-        .iter()
-        .filter(|process| process.state == ProcessState::Present)
-        .count();
-    let mut detail = format!("{present}/{total} present");
+    let mut detail = format!("{}/{total} present", split.present);
     // A launch that deliberately started a subset says so, because otherwise
     // "12/20" reads as eight runtimes that failed rather than eight nobody
     // asked for.
@@ -451,16 +443,13 @@ fn graph_detail(snapshot: &Snapshot, local: &LocalRuntimes) -> String {
     }
     // An exited child is the one thing worth the width: it is the difference
     // between "still coming up" and "will never come up".
-    let exited = snapshot
-        .processes
+    let exited = split
+        .absent
         .iter()
-        .filter(|process| process.state != ProcessState::Present)
-        .filter_map(|process| {
-            let runtime = local.get(&process.participant)?;
+        .filter_map(|participant| {
+            let runtime = local.get(participant)?;
             match &runtime.state {
-                LocalRuntimeState::Exited { status } => {
-                    Some(format!("{} {status}", process.participant))
-                }
+                LocalRuntimeState::Exited { status } => Some(format!("{participant} {status}")),
                 LocalRuntimeState::Running => None,
             }
         })
