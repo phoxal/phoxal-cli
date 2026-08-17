@@ -85,6 +85,24 @@ impl ServiceControl {
         }
     }
 
+    /// Make systemd read the units an install just wrote.
+    ///
+    /// systemd reads units once and caches them, so a unit written but not
+    /// reloaded does not exist as far as `systemctl start` is concerned. On a
+    /// first install that is every runtime unit and the target: the supervisor
+    /// comes up alone, nothing joins its graph, and readiness times out on a
+    /// robot whose unit files are all correct.
+    fn reload(&self) -> Result<()> {
+        match self {
+            Self::Systemd => systemctl(["daemon-reload"]),
+            #[cfg(test)]
+            Self::Fake { operations, .. } => {
+                operations.lock().unwrap().push("reload");
+                Ok(())
+            }
+        }
+    }
+
     fn start(&self) -> Result<()> {
         match self {
             // The supervisor first, then the runtimes the target wants: a
@@ -326,6 +344,7 @@ async fn install_archive(
         // the units are regenerated with the symlink rather than left to
         // describe the release that was there before.
         regenerate_runtime_units(&release, &roots.units)?;
+        service.reload()?;
         Ok(())
     })() {
         drop(_lock);
@@ -371,6 +390,7 @@ async fn rollback_release(
     // A rollback activates a different bundle, which may declare a different
     // process set - so its units are regenerated exactly as an install's are.
     regenerate_runtime_units(&selected, &roots.units)?;
+    service.reload()?;
     drop(_lock);
     if let Err(error) = service.start().context("failed to start rollback release") {
         restore_after_failed_activation(Some(&active), roots, service).await?;
@@ -397,6 +417,7 @@ async fn restore_after_failed_activation(
     if let Some(previous) = previous {
         atomic_symlink_switch(&roots.active, previous)?;
         regenerate_runtime_units(previous, &roots.units)?;
+        service.reload()?;
         service
             .start()
             .context("failed to restart the previous release")?;
@@ -795,7 +816,12 @@ mod tests {
         restore_after_failed_activation(Some(&previous), &roots, &service).await?;
 
         assert_eq!(std::fs::read_link(&roots.active)?, previous);
-        assert_eq!(*operations.lock().unwrap(), ["stop", "start", "ready"]);
+        // The reload is between writing the restored release's units and
+        // starting them: systemd has to read a unit before it can start it.
+        assert_eq!(
+            *operations.lock().unwrap(),
+            ["stop", "reload", "start", "ready"]
+        );
         // The restored release's own process set is what systemd is left
         // describing, not the failed one's.
         assert!(
@@ -929,7 +955,12 @@ mod tests {
             ("previous".to_string(), "previous".to_string())
         );
         assert!(!failed.exists(), "the failed release leaves nothing behind");
-        assert_eq!(*operations.lock().unwrap(), ["stop", "start", "ready"]);
+        // The reload is between writing the restored release's units and
+        // starting them: systemd has to read a unit before it can start it.
+        assert_eq!(
+            *operations.lock().unwrap(),
+            ["stop", "reload", "start", "ready"]
+        );
         Ok(())
     }
 

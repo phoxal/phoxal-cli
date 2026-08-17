@@ -54,12 +54,13 @@ Wants=network-online.target
 [Service]
 Type=notify
 NotifyAccess=main
-{hardening}ExecStart={active}/{supervisor} {active}/{bundle}
+{hardening}{run_directory}ExecStart={active}/{supervisor} {active}/{bundle}
 
 [Install]
 WantedBy=multi-user.target
 "#,
         hardening = hardening(),
+        run_directory = run_directory(),
         supervisor = phoxal_cli_project::SUPERVISOR_FILE,
         bundle = phoxal_cli_project::BUNDLE_DIR,
         active = phoxal_cli_project::ACTIVE_RUNTIME_ROOT,
@@ -141,8 +142,6 @@ TimeoutStartSec=300s
 TimeoutStopSec=300s
 KillMode=control-group
 UMask=0007
-RuntimeDirectory=phoxal
-RuntimeDirectoryMode=2775
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths={state} {volatile}
@@ -151,6 +150,19 @@ ReadWritePaths={state} {volatile}
         state = phoxal_cli_project::INSTALLED_STATE_ROOT,
         volatile = phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
     )
+}
+
+/// The run directory, declared by the supervisor's unit and by nothing else.
+///
+/// systemd deletes a `RuntimeDirectory=` when the unit that declares it stops,
+/// and every unit that declares the same one shares that fate. With this on the
+/// runtime units too, one restarting runtime deleted `/run/phoxal` out from
+/// under a healthy supervisor, taking the socket every other runtime was
+/// connected through with it - a robot that crash-looped itself, observed on a
+/// device. The supervisor owns the directory because it owns the socket inside
+/// it; the runtimes only reach in, which `ReadWritePaths` above already grants.
+fn run_directory() -> String {
+    "RuntimeDirectory=phoxal\nRuntimeDirectoryMode=2775\n".to_string()
 }
 
 /// Every unit an installed bundle needs, as `(file name, contents)`.
@@ -189,6 +201,32 @@ mod tests {
     use phoxal_cli_project::RuntimeRole;
 
     use super::*;
+
+    /// systemd removes a `RuntimeDirectory=` when the declaring unit stops, and
+    /// every unit declaring the same one shares that removal. Only the
+    /// supervisor may declare `/run/phoxal`: it owns the socket inside it, and
+    /// a runtime that declared it too would delete the whole robot's transport
+    /// every time it restarted.
+    #[test]
+    fn only_the_supervisor_owns_the_run_directory() {
+        assert!(supervisor_unit().contains("RuntimeDirectory=phoxal"));
+        for (name, contents) in bundle_units(&[
+            runtime("brain", "brain", RuntimeRole::Brain),
+            runtime("left_drive", "ddsm115", RuntimeRole::Driver),
+        ]) {
+            assert!(
+                !contents.contains("RuntimeDirectory="),
+                "{name} must not declare the supervisor's run directory"
+            );
+            if name != TARGET_UNIT {
+                assert!(
+                    contents.contains("ReadWritePaths=")
+                        && contents.contains(phoxal_cli_project::INSTALLED_VOLATILE_ROOT),
+                    "{name} still needs write access to the run directory"
+                );
+            }
+        }
+    }
 
     fn runtime(participant: &str, binary: &str, role: RuntimeRole) -> RobotRuntime {
         RobotRuntime {
