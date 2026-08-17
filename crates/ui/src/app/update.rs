@@ -37,13 +37,17 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
         }
         Msg::StopSessionFailed(reason) => complete_stop_failure(model, reason),
         Msg::OwnedSupervisorStopped => {
-            model.exit = Some(AttachmentOutcome::SessionStopped);
+            if owned_supervisor_ends_the_session(model) {
+                model.exit = Some(AttachmentOutcome::SessionStopped);
+            }
             Vec::new()
         }
         Msg::OwnedSupervisorFailed(reason) => {
-            model.exit = Some(AttachmentOutcome::ExecutionEnded {
-                reason: Some(reason),
-            });
+            if owned_supervisor_ends_the_session(model) {
+                model.exit = Some(AttachmentOutcome::ExecutionEnded {
+                    reason: Some(reason),
+                });
+            }
             Vec::new()
         }
         Msg::Logs(LogsMsg::Window(window)) => accept_logs(model, window),
@@ -51,6 +55,22 @@ pub fn update(model: &mut AppModel, message: Msg) -> Vec<Effect> {
     };
     model.redraw_requested = true;
     effects
+}
+
+/// Whether the owned supervisor's exit still gets to say how the session ended.
+///
+/// It does not once the operator confirmed a stop: the supervisor going away is
+/// that stop's consequence, and reporting it as the cause would tell an operator
+/// their own deliberate action was an unexplained failure. An ending that
+/// already explains itself stays for the same reason. The one it does replace is
+/// the reason-less `ExecutionEnded` a lost connection leaves behind - the
+/// supervisor knows why it went, and the transport does not.
+fn owned_supervisor_ends_the_session(model: &AppModel) -> bool {
+    !model.stop_requested
+        && matches!(
+            model.exit,
+            None | Some(AttachmentOutcome::ExecutionEnded { reason: None })
+        )
 }
 
 fn complete_stop_failure(model: &mut AppModel, reason: String) -> Vec<Effect> {
@@ -1150,6 +1170,35 @@ mod tests {
                 reason: Some("exit status: 1".to_string())
             })
         );
+    }
+
+    /// The supervisor exiting after a stop the operator confirmed is that
+    /// stop's consequence, not an ending of its own: an operator who pressed
+    /// `S` must never be told the execution failed underneath them.
+    #[test]
+    fn an_owned_supervisor_exit_never_overrides_the_stop_that_caused_it() {
+        let mut stopped = launched();
+        assert_eq!(request_stop(&mut stopped), vec![Effect::StopSession]);
+        update(&mut stopped, Msg::OwnedSupervisorStopped);
+        update(
+            &mut stopped,
+            Msg::OwnedSupervisorFailed("exit status: 143".to_string()),
+        );
+        assert_eq!(
+            stopped.exit, None,
+            "the stop this client asked for is still the ending"
+        );
+        update(&mut stopped, Msg::SessionStopped);
+        assert_eq!(stopped.exit, Some(AttachmentOutcome::SessionStopped));
+
+        // An ending that already arrived is not replaced either.
+        let mut detached = launched();
+        detached.exit = Some(AttachmentOutcome::Detached);
+        update(
+            &mut detached,
+            Msg::OwnedSupervisorFailed("exit status: 1".to_string()),
+        );
+        assert_eq!(detached.exit, Some(AttachmentOutcome::Detached));
     }
 
     /// A modal opened by reflex must have an exit that does nothing to the
