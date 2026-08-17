@@ -17,9 +17,6 @@ pub const SYSTEMD_UNIT: &str = "phoxal-supervisor.service";
 pub const SYSTEMD_ACTIVE_ROOT: &str = "/run/systemd/system";
 pub const SYSTEMD_UNIT_ROOT: &str = "/etc/systemd/system";
 pub const SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/phoxal-supervisor.service";
-/// The exact previously managed unit retired during the cutover.
-pub const LEGACY_SYSTEMD_UNIT: &str = "phoxal.service";
-pub const LEGACY_SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/phoxal.service";
 
 /// The directory the running CLI executable lives in.
 pub fn executable_directory() -> anyhow::Result<PathBuf> {
@@ -159,17 +156,14 @@ mod tests {
         assert_eq!(installed.state_root, Path::new(INSTALLED_STATE_ROOT));
     }
 
+    /// The unit's name and the path it is installed at are one fact, and the
+    /// install, the generated units, and every `systemctl` call read both.
     #[test]
-    fn only_the_exact_old_managed_unit_is_a_retirement_target() {
+    fn the_managed_unit_name_and_its_installed_path_agree() {
         assert_eq!(SYSTEMD_UNIT, "phoxal-supervisor.service");
         assert_eq!(
             SYSTEMD_UNIT_PATH,
-            "/etc/systemd/system/phoxal-supervisor.service"
-        );
-        assert_eq!(LEGACY_SYSTEMD_UNIT, "phoxal.service");
-        assert_eq!(
-            LEGACY_SYSTEMD_UNIT_PATH,
-            "/etc/systemd/system/phoxal.service"
+            format!("{SYSTEMD_UNIT_ROOT}/{SYSTEMD_UNIT}")
         );
     }
 }
