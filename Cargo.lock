@@ -3278,7 +3278,7 @@ dependencies = [
 
 [[package]]
 name = "phoxal-cli"
-version = "0.39.3"
+version = "0.39.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -3313,11 +3313,11 @@ dependencies = [
 
 [[package]]
 name = "phoxal-cli-catalog"
-version = "0.39.3"
+version = "0.39.4"
 
 [[package]]
 name = "phoxal-cli-host"
-version = "0.39.3"
+version = "0.39.4"
 dependencies = [
  "anyhow",
  "phoxal-runtime-contract",
@@ -3325,7 +3325,7 @@ dependencies = [
 
 [[package]]
 name = "phoxal-cli-observation"
-version = "0.39.3"
+version = "0.39.4"
 dependencies = [
  "phoxal-client",
  "phoxal-runtime-contract",
@@ -3333,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "phoxal-cli-project"
-version = "0.39.3"
+version = "0.39.4"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -3365,7 +3365,7 @@ dependencies = [
 
 [[package]]
 name = "phoxal-cli-ui"
-version = "0.39.3"
+version = "0.39.4"
 dependencies = [
  "anyhow",
  "console",
@@ -3379,7 +3379,7 @@ dependencies = [
 
 [[package]]
 name = "phoxal-client"
-version = "0.39.3"
+version = "0.39.4"
 dependencies = [
  "phoxal-bus",
  "phoxal-protocol",
