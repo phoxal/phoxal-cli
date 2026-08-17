@@ -9,16 +9,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use phoxal_cli_observation::{
-    AttachmentEvent, ManualDriveUnsupported, ObservationSource, SourceStatus,
-};
+use phoxal_cli_observation::{AttachmentEvent, ObservationSource, SourceStatus};
 use phoxal_client::SetpointPublisher;
 use phoxal_client::robot as api;
 use tokio::sync::mpsc;
 
 use super::FeedContext;
 use crate::attach::ports::input::InputCommand;
-use crate::joypad::manual::ManualDrive;
 use crate::joypad::{Joypad, STOP_REPEAT_COUNT};
 
 const SOURCE: ObservationSource = ObservationSource::Input;
@@ -27,26 +24,18 @@ const SOURCE: ObservationSource = ObservationSource::Input;
 const POLL_HZ: f64 = 50.0;
 
 /// Read the local gamepad until the command port closes.
-pub(crate) async fn run(
-    context: FeedContext,
-    mut commands: mpsc::Receiver<InputCommand>,
-    drive: Result<ManualDrive, ManualDriveUnsupported>,
-) {
+pub(crate) async fn run(context: FeedContext, mut commands: mpsc::Receiver<InputCommand>) {
     let commands = &mut commands;
-    super::until_cancelled(&context, SOURCE, feed(&context, commands, drive)).await;
+    super::until_cancelled(&context, SOURCE, feed(&context, commands)).await;
 }
 
-async fn feed(
-    context: &FeedContext,
-    commands: &mut mpsc::Receiver<InputCommand>,
-    drive: Result<ManualDrive, ManualDriveUnsupported>,
-) -> Result<()> {
+async fn feed(context: &FeedContext, commands: &mut mpsc::Receiver<InputCommand>) -> Result<()> {
     let publisher = context
         .client
         .setpoint_publisher(api::topic::client().motion().manual())
         .context("failed to attach the manual command publisher")?;
 
-    let mut joypad = Joypad::open(drive.ok(), drive.err());
+    let mut joypad = Joypad::open();
     publish_joypad(context, joypad.sample()).await?;
     context.health(SOURCE, SourceStatus::Live).await;
 
@@ -177,8 +166,8 @@ fn publish_stop_repeats(publisher: &SetpointPublisher<api::endpoint::motion::Man
 
 const fn stop() -> api::motion::ManualCommand {
     api::motion::ManualCommand {
-        linear_x_mps: 0.0,
-        angular_z_radps: 0.0,
+        linear: 0.0,
+        angular: 0.0,
     }
 }
 
@@ -200,8 +189,8 @@ mod tests {
         assert_eq!(pending_stops, STOP_REPEAT_COUNT - 1);
         assert_eq!(dropped, 0);
         assert_eq!(published.len(), 1);
-        assert_eq!(published[0].linear_x_mps, 0.0);
-        assert_eq!(published[0].angular_z_radps, 0.0);
+        assert_eq!(published[0].linear, 0.0);
+        assert_eq!(published[0].angular, 0.0);
     }
 
     #[test]

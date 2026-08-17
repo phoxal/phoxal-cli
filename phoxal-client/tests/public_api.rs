@@ -31,7 +31,7 @@ async fn every_descriptor_driven_operation(
             .speaker("audio")?
             .stream(),
     )?;
-    let _query = client.querier(supervisor::topic::client().info().topic())?;
+    let _query = client.querier(supervisor::topic::client().command().topic())?;
     Ok(())
 }
 

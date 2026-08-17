@@ -12,9 +12,7 @@ pub(crate) mod telemetry;
 
 use std::sync::Arc;
 
-use phoxal_cli_observation::{
-    AttachmentEpoch, AttachmentEvent, ManualDriveUnsupported, ObservationSource, SourceStatus,
-};
+use phoxal_cli_observation::{AttachmentEpoch, AttachmentEvent, ObservationSource, SourceStatus};
 use phoxal_client::Client;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -22,7 +20,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::ports::input::InputCommand;
 use super::state::Stores;
-use crate::joypad::manual::ManualDrive;
 
 /// Everything a feed needs, cloned into each of them.
 #[derive(Clone)]
@@ -63,13 +60,12 @@ pub(crate) fn spawn_all(
     tasks: &mut JoinSet<()>,
     context: FeedContext,
     input_rx: mpsc::Receiver<InputCommand>,
-    drive: Result<ManualDrive, ManualDriveUnsupported>,
 ) {
     tasks.spawn(snapshot::run(context.clone()));
     tasks.spawn(logs::run(context.clone()));
     tasks.spawn(telemetry::run(context.clone()));
     tasks.spawn(motion::run(context.clone()));
-    tasks.spawn(input::run(context, input_rx, drive));
+    tasks.spawn(input::run(context, input_rx));
 }
 
 /// Run `feed` until the session is cancelled, reporting a failure as source

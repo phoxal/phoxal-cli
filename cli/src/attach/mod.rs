@@ -31,7 +31,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::joypad::manual::ManualDrive;
 use ports::{
     events::AttachmentEvents, input::InputCommands, logs::LogReader, runtimes::RuntimeReader,
 };
@@ -141,8 +140,7 @@ impl Session {
             events: events_tx,
             cancellation: cancellation.clone(),
         };
-        let drive = ManualDrive::derive(connection.connected().manual_drive);
-        feeds::spawn_all(&mut tasks, context, input_rx, drive);
+        feeds::spawn_all(&mut tasks, context, input_rx);
 
         Ok(Self {
             ports: SessionPorts {

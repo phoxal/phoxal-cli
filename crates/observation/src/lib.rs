@@ -32,8 +32,8 @@ pub mod supervisor;
 pub use epoch::AttachmentEpoch;
 pub use event::{AttachmentEvent, ConnectionObservation};
 pub use input::{
-    InputObservation, JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample,
-    ManualDriveUnsupported, MotionObservation, MotionSample,
+    InputObservation, JoypadDevice, JoypadDeviceStatus, JoypadDevicesSample, MotionObservation,
+    MotionSample,
 };
 pub use logs::{
     LogAnchor, LogFilters, LogQuery, LogRead, LogRow, LogSeverity, LogSource, LogWindow,
