@@ -2,11 +2,16 @@
 //!
 //! The supervisor observes; it never spawns. So on a developer's machine the
 //! process that starts the graph is this one, and it is therefore the process
-//! that knows why a runtime is not there - an exec failure, a panic, an exit
-//! status, a log file. That knowledge is the whole reason the launcher exists:
-//! the snapshot can only say *absent*, and "absent because `bin/ddsm115` exited
-//! with status 1, see `.phoxal/run/log/left_drive.log`" is what an operator
-//! actually needs.
+//! that knows why a runtime is not there - an exec failure, an exit status, a
+//! process that never execed at all. That knowledge is the whole reason the
+//! launcher exists: the snapshot can only say *absent*, and "absent because
+//! `bin/ddsm115` exited with status 1" is what an operator actually needs.
+//!
+//! A runtime's own account of itself goes over the bus, so `phoxal logs
+//! <participant>` is where an operator reads why a *running* robot's runtime is
+//! unhappy. The per-runtime file each child's stdio is redirected to is the
+//! crash net beneath that: a panic reaches stderr rather than the bus, and a
+//! runtime that died has no bus retention left once its supervisor stops.
 //!
 //! Every child is its own process group with no inherited pipes and `stdin`
 //! closed, so `phoxal start` can leave a running robot behind and a Ctrl+C in

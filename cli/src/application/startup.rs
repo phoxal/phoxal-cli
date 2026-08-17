@@ -184,6 +184,11 @@ impl Startup {
     /// A bare "timed out" is useless when the client is the one that launched
     /// the runtimes: it knows exactly which of them never appeared and, for the
     /// ones that died, what they exited with and where their log is.
+    ///
+    /// The file, not `phoxal logs`: a startup that times out ends the session
+    /// it launched, supervisor included, so the bus retention that would have
+    /// held the runtime's own lines is gone by the time an operator reads this.
+    /// The child's stdio file is what survives.
     fn timeout_message(
         &self,
         snapshot: Option<&Snapshot>,

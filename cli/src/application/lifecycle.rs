@@ -130,9 +130,13 @@ pub(crate) async fn start_command(
     // exiting - which is the whole point of `start`.
     launched.session.shutdown().await;
     let display = target.project.display();
+    // The robot is left running, so its runtimes' own account of themselves is
+    // still reachable: a runtime logs over the bus, and the supervisor is the
+    // one holding it.
     if let Some(absent) = absent {
-        app.ui
-            .warn(format!("started degraded; not present: {absent}"));
+        app.ui.warn(format!(
+            "started degraded; not present: {absent}. `phoxal logs <participant>` says why"
+        ));
     }
     app.ui.info(format!(
         "robot instance ready; attach with `phoxal attach {display}` or stop with `phoxal stop \
