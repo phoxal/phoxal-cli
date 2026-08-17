@@ -791,7 +791,6 @@ fn handle_modal_key(model: &mut AppModel, key: KeyEvent) -> Vec<Effect> {
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use std::time::Instant;
 
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, InputObservation, JoypadDevice, JoypadDeviceStatus,
@@ -1628,7 +1627,6 @@ mod tests {
                     ProducerId::try_from((1_u128 << 124) | 43).expect("fixture producer"),
                 ),
             },
-            observed_present_at: Some(Instant::now()),
             local: None,
         }
     }

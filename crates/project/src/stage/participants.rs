@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::source::resolver::{BundlePlan, ResolvedPlatformRuntime, official_binary_name};
+use crate::source::resolver::{BundlePlan, ResolvedPlatformRuntime};
 use anyhow::{Context, Result, ensure};
 
 use super::publish::remove_if_present;
@@ -279,7 +279,7 @@ fn materialize_platform_runtime(
         let source = (context.build_override)(crate_dir, &runtime.name)?;
         return link_or_copy(&source, &staged);
     }
-    let cargo_binary = official_binary_name(runtime.kind, &runtime.name);
+    let cargo_binary = runtime.kind.cargo_binary_name(&runtime.name);
     if link_from_officials_source(
         context.officials_source,
         &runtime.package,
@@ -299,7 +299,7 @@ fn queue_component_driver(
     let staged = context
         .bin_dir
         .join(phoxal_cli_catalog::bundle_binary_name(&runtime.name));
-    let cargo_binary = official_binary_name(runtime.kind, &runtime.name);
+    let cargo_binary = runtime.kind.cargo_binary_name(&runtime.name);
     if staged.is_file()
         || link_from_officials_source(
             context.officials_source,

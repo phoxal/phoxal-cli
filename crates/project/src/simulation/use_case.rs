@@ -29,11 +29,7 @@ pub fn prepare_simulation(request: PrepareSimulationRequest) -> Result<PreparedS
     // WEBOTS_HOME is a build-time input of the controller's own crate. It is
     // scoped to this materialization and never reaches a spawned runtime.
     let controller = {
-        let _webots_home = request
-            .webots
-            .home
-            .as_deref()
-            .map(super::webots::controller::WebotsHomeEnvGuard::set);
+        let _webots_home = super::webots::controller::WebotsHomeEnvGuard::set(&request.webots.home);
         super::controller_tool::materialize(request.offline, request.reporter.as_ref())?
     };
 
@@ -60,9 +56,8 @@ pub fn stage_webots(request: StageWebotsRequest) -> Result<WebotsLaunch> {
     )?;
     Ok(WebotsLaunch {
         executable: request.webots_executable,
-        args: webots_launch_args(&staged_world.staged_world_path),
-        cwd: None,
-        world: staged_world.staged_world_path,
+        args: webots_launch_args(&staged_world),
+        world: staged_world,
     })
 }
 

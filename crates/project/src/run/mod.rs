@@ -26,8 +26,3 @@ pub struct PreparedExecution {
     /// it runs, which always come from the same release.
     pub release: crate::deployment::ReleaseLayout,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RunOptions {
-    pub(crate) offline: bool,
-}

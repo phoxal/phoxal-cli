@@ -32,7 +32,7 @@ pub struct PrepareSimulationRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebotsHost {
     pub executable: PathBuf,
-    pub home: Option<PathBuf>,
+    pub home: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +64,5 @@ pub struct StageWebotsRequest {
 pub struct WebotsLaunch {
     pub executable: PathBuf,
     pub args: Vec<String>,
-    pub cwd: Option<PathBuf>,
     pub world: PathBuf,
 }

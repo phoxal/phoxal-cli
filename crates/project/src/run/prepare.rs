@@ -8,7 +8,6 @@
 //! before it: a source root resolves, checks, stages, and packages the
 //! supervisor; a release has nothing to build and is executed as it stands.
 
-use super::RunOptions;
 use super::{PrepareRunRequest, PreparedExecution};
 use crate::build::cargo::{SourceArtifacts, build_selected_source_artifacts};
 use crate::build::profile::StagingBuild;
@@ -32,22 +31,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-/// The output of one staging refresh over a buildable source project: the
-/// resolved graph and its source-participant records the staging step consumed,
-/// the resolved driver policy, and the staged runtime layout root every
-/// executable and the launch plan are then read from. Everything after staging -
-/// spec building, `phoxal build`'s archive - reads only the
-/// staged layout; these fields are the staging-side inputs the source path still
-/// needs (crate directories for cwd/rebuild, the resolved graph for router
-/// config). `plan` is the loader's own validated launch plan, already
-/// constructed against `staged_root` before it was published; callers must reuse it rather than re-running
-/// `loader::validate_layout_plan`, which would be a second, redundant
-/// validation pass over already-validated bytes.
-pub(crate) struct StagedProject {
-    /// The published deployment release - `.phoxal/release/`.
-    pub(crate) release: crate::deployment::ReleaseLayout,
-}
-
 /// One source/package resolution plus the exact options and staging profile
 /// that produced it, ready to be materialized into a runtime layout.
 ///
@@ -61,7 +44,7 @@ pub(crate) struct StagedProject {
 pub(crate) struct ResolvedStagingInput {
     project_root: PathBuf,
     resolved: BundlePlan,
-    options: RunOptions,
+    offline: bool,
     build: StagingBuild,
 }
 
@@ -87,11 +70,11 @@ impl ResolvedStagingInput {
 /// options and resolution-visible staging profile for later materialization.
 pub(crate) fn resolve_staging(
     project_start: &Path,
-    options: RunOptions,
+    offline: bool,
     build: StagingBuild,
     ui: &dyn crate::Reporter,
 ) -> Result<ResolvedStagingInput> {
-    resolve_staging_with_registry_cache(project_start, None, options, build, ui)
+    resolve_staging_with_registry_cache(project_start, None, offline, build, ui)
 }
 
 /// Resolve a frozen source tree while directing immutable registry archives to
@@ -99,7 +82,7 @@ pub(crate) fn resolve_staging(
 pub(crate) fn resolve_staging_with_registry_cache(
     project_start: &Path,
     registry_cache_root: Option<&Path>,
-    options: RunOptions,
+    offline: bool,
     build: StagingBuild,
     ui: &dyn crate::Reporter,
 ) -> Result<ResolvedStagingInput> {
@@ -122,7 +105,7 @@ pub(crate) fn resolve_staging_with_registry_cache(
         || {
             let options = ResolveOptions {
                 official_target_triple: official_target.clone(),
-                offline: options.offline,
+                offline,
             };
             if let Some(registry_cache_root) = registry_cache_root {
                 crate::resolve::project::resolve_with_train_using_registry_cache(
@@ -149,7 +132,7 @@ pub(crate) fn resolve_staging_with_registry_cache(
     Ok(ResolvedStagingInput {
         project_root: project_root.to_path_buf(),
         resolved,
-        options,
+        offline,
         build,
     })
 }
@@ -158,12 +141,12 @@ pub(crate) fn resolve_staging_with_registry_cache(
 /// exact result through [`refresh_staging_resolved`].
 pub(crate) fn refresh_staging(
     project_start: &Path,
-    options: &RunOptions,
+    offline: bool,
     build: &StagingBuild,
     check_source: bool,
     ui: &dyn crate::Reporter,
-) -> Result<StagedProject> {
-    let input = resolve_staging(project_start, options.clone(), build.clone(), ui)?;
+) -> Result<crate::deployment::ReleaseLayout> {
+    let input = resolve_staging(project_start, offline, build.clone(), ui)?;
     refresh_staging_resolved(input, check_source, ui)
 }
 
@@ -181,16 +164,16 @@ pub(crate) fn refresh_staging_resolved(
     input: ResolvedStagingInput,
     check_source: bool,
     ui: &dyn crate::Reporter,
-) -> Result<StagedProject> {
+) -> Result<crate::deployment::ReleaseLayout> {
     crate::progress::ensure_active(ui)?;
     let ResolvedStagingInput {
         project_root,
         resolved,
-        options,
+        offline,
         build,
     } = input;
     let expected_target = build.expected_target()?;
-    let materialize_settings = build.materialize_settings(&project_root, options.offline)?;
+    let materialize_settings = build.materialize_settings(&project_root, offline)?;
 
     // Resolve and materialize the framework supervisor before participant
     // compilation begins. A release that cannot obtain its exact-train
@@ -199,7 +182,7 @@ pub(crate) fn refresh_staging_resolved(
     let supervisor = crate::build::materialise::materialize_supervisor(
         resolved.train.version(),
         build.target(),
-        options.offline,
+        offline,
         build.officials_source(),
         materialize_settings.target_dir.clone(),
         ui,
@@ -222,7 +205,7 @@ pub(crate) fn refresh_staging_resolved(
         build.target(),
         build.source_profile(),
         build.prebuilt_target_dir(),
-        options.offline,
+        offline,
         ui,
     )?;
 
@@ -238,7 +221,7 @@ pub(crate) fn refresh_staging_resolved(
         candidate.path(),
         &resolved,
         &extra_registry_runtimes,
-        options.offline,
+        offline,
         build.officials_source(),
         &materialize_settings,
         ui,
@@ -294,7 +277,7 @@ pub(crate) fn refresh_staging_resolved(
     // Every install, build, check, and validation above succeeded against the
     // candidate alone - complete it with its supervisor and publish it as the
     // live release now, and only now.
-    let release = crate::progress::run_phase(
+    crate::progress::run_phase(
         ui,
         crate::progress_phase::PhaseId::new("publish"),
         "Publishing deployment release",
@@ -302,9 +285,7 @@ pub(crate) fn refresh_staging_resolved(
             crate::stage::finalize_release(candidate, supervisor.path(), &expected_target)
                 .context("failed to publish the staged deployment release")
         },
-    )?;
-
-    Ok(StagedProject { release })
+    )
 }
 
 /// Prepare a run from a buildable source project: refresh the staged deployment
@@ -313,17 +294,16 @@ pub(crate) fn refresh_staging_resolved(
 /// the resolved graph is a staging-side input only.
 pub(crate) fn prepare_source_run(
     project_start: &Path,
-    options: RunOptions,
+    offline: bool,
     ui: &dyn crate::Reporter,
 ) -> Result<crate::deployment::ReleaseLayout> {
-    let staged = refresh_staging(
+    refresh_staging(
         project_start,
-        &options,
+        offline,
         &StagingBuild::host_runtime(),
         true,
         ui,
-    )?;
-    Ok(staged.release)
+    )
 }
 
 /// Prepare a run from an already-built deployment release at `release_root` -
@@ -354,14 +334,11 @@ pub(crate) fn prepare_release_run(
 
 pub fn prepare_run(request: PrepareRunRequest) -> Result<PreparedExecution> {
     crate::progress::ensure_active(request.reporter.as_ref())?;
-    let options = RunOptions {
-        offline: request.offline,
-    };
     let execution_root =
         crate::paths::runtime::pin_installed_release(&request.target.logical_root)?;
     let release = match classify_run_root(&execution_root)? {
         RunRootKind::Source => {
-            prepare_source_run(&execution_root, options, request.reporter.as_ref())?
+            prepare_source_run(&execution_root, request.offline, request.reporter.as_ref())?
         }
         RunRootKind::Release => prepare_release_run(&execution_root, request.reporter.as_ref())?,
     };

@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use phoxal_client::supervisor::execution::{Process, ProcessState, Snapshot};
 use phoxal_runtime_contract::identity::ParticipantId;
@@ -100,14 +99,11 @@ pub type LocalRuntimes = BTreeMap<ParticipantId, LocalRuntime>;
 ///
 /// The row itself is the supervisor's authoritative value and is carried whole
 /// rather than destructured: adding a field to the contract must not mean
-/// editing a projection here. `observed_present_at` is a client-local
-/// wall-clock fact - when this client first saw the runtime hold a lease - and
-/// `local` is present exactly when this client launched the runtime itself.
+/// editing a projection here. `local` is present exactly when this client
+/// launched the runtime itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessObservation {
     pub row: Process,
-    /// When this client first saw the row present. `None` while it never has.
-    pub observed_present_at: Option<Instant>,
     pub local: Option<LocalRuntime>,
 }
 
@@ -116,13 +112,6 @@ impl ProcessObservation {
     #[must_use]
     pub const fn kind(&self) -> ParticipantKind {
         self.row.kind
-    }
-
-    /// Whether the runtime holds a Ready lease, which is exactly whether the
-    /// supervisor learned a producer from its liveliness token.
-    #[must_use]
-    pub const fn present(&self) -> bool {
-        self.row.producer.is_some()
     }
 }
 

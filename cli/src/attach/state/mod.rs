@@ -4,7 +4,6 @@ pub(crate) mod health;
 pub(crate) mod input;
 pub(crate) mod logs;
 pub(crate) mod motion;
-pub(crate) mod processes;
 pub(crate) mod runtimes;
 
 use std::sync::Arc;
@@ -26,7 +25,6 @@ fn contains_ascii_case_insensitive(value: &str, needle: &str) -> bool {
 pub(crate) struct Stores {
     pub logs: Arc<RwLock<logs::LogStore>>,
     pub runtimes: Arc<RwLock<runtimes::RuntimeStore>>,
-    pub processes: Arc<RwLock<processes::ProcessStore>>,
     pub input: Arc<RwLock<input::InputStore>>,
     pub motion: Arc<RwLock<motion::MotionStore>>,
     pub health: Arc<RwLock<health::HealthStore>>,
@@ -37,7 +35,6 @@ impl Stores {
         Self {
             logs: Arc::new(RwLock::new(logs::LogStore::new(epoch))),
             runtimes: Arc::new(RwLock::new(runtimes::RuntimeStore::new(epoch))),
-            processes: Arc::new(RwLock::new(processes::ProcessStore::default())),
             input: Arc::new(RwLock::new(input::InputStore::default())),
             motion: Arc::new(RwLock::new(motion::MotionStore::default())),
             health: Arc::new(RwLock::new(health::HealthStore::default())),

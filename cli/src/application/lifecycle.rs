@@ -149,6 +149,10 @@ pub(crate) struct LaunchedSession {
     /// checklist can say why an absent runtime is absent.
     pub(crate) children: tokio::task::JoinHandle<()>,
     record: SessionRecord,
+    /// The bundle every runtime of this session was launched against. It is a
+    /// live-session fact, not part of the record `stop` reads: what ends a
+    /// session is signalling pids.
+    bundle: PathBuf,
     paths: phoxal_cli_host::paths::RuntimePaths,
     /// Held for the whole session: the bundle being executed is the one this
     /// command just published, and a concurrent build would replace it.
@@ -168,9 +172,9 @@ impl LaunchedSession {
         OwnedSession::new(self.record.clone(), self.paths.clone())
     }
 
-    /// The bundle every recorded process was launched against.
+    /// The bundle every runtime of this session was launched against.
     pub(crate) fn bundle(&self) -> &Path {
-        &self.record.bundle
+        &self.bundle
     }
 }
 
@@ -221,10 +225,7 @@ pub(crate) async fn launch_execution(
         &paths,
     )?;
     let record = SessionRecord {
-        project: target.project.clone(),
         endpoint: target.endpoint.clone(),
-        bundle: release.bundle.clone(),
-        simulation,
         supervisor: RecordedProcess {
             pid: supervisor.pid(),
             log: paths.supervisor_log(),
@@ -258,6 +259,7 @@ pub(crate) async fn launch_execution(
         supervisor,
         children,
         record,
+        bundle: release.bundle,
         paths,
         _lock: lock,
     };
@@ -376,7 +378,7 @@ async fn drive_launched_session(
         children,
         record,
         paths,
-        _lock,
+        ..
     } = launched;
     let owned = OwnedSession::new(record, paths.clone());
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
@@ -897,10 +899,7 @@ mod tests {
 
     fn record() -> SessionRecord {
         SessionRecord {
-            project: PathBuf::from("/tmp/rover"),
             endpoint: "unixsock-stream//tmp/rover/.phoxal/run/supervisor.sock".to_string(),
-            bundle: PathBuf::from("/tmp/rover/.phoxal/release/bundle"),
-            simulation: false,
             supervisor: RecordedProcess {
                 pid: 1,
                 log: PathBuf::from("/tmp/rover/.phoxal/run/supervisor.log"),

@@ -257,14 +257,8 @@ pub(crate) enum SessionDocument {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SessionRecord {
-    /// The project or installed root this session runs out of.
-    pub(crate) project: PathBuf,
     /// The endpoint the supervisor bound and every runtime dialled.
     pub(crate) endpoint: String,
-    /// The bundle every recorded process was launched against.
-    pub(crate) bundle: PathBuf,
-    /// Whether the runtimes were started with `--simulation`.
-    pub(crate) simulation: bool,
     pub(crate) supervisor: RecordedProcess,
     /// Ordered by participant id, like the supervisor's own process rows.
     pub(crate) runtimes: Vec<RecordedRuntime>,
@@ -591,10 +585,7 @@ mod tests {
 
     fn record() -> SessionRecord {
         SessionRecord {
-            project: PathBuf::from("/tmp/rover"),
             endpoint: "unixsock-stream//tmp/rover/.phoxal/run/supervisor.sock".to_string(),
-            bundle: PathBuf::from("/tmp/rover/.phoxal/release/bundle"),
-            simulation: false,
             supervisor: RecordedProcess {
                 pid: 4_242,
                 log: PathBuf::from("/tmp/rover/.phoxal/run/supervisor.log"),

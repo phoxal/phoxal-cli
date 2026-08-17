@@ -33,7 +33,6 @@ use crate::build::profile::StagingBuild;
 use crate::build::shell::shell_quote;
 use crate::check::participant_metadata::expected_target_for_triple;
 use crate::registry_package::{HttpClient, PackageCache, fetch_registry_package};
-use crate::run::RunOptions;
 use anyhow::{Context, Result, bail};
 
 const REMOTE_TOOLCHAIN_PATH: &str = r#"export PATH="$HOME/.cargo/bin:$PATH""#;
@@ -535,18 +534,13 @@ impl Worker {
                 false,
                 self.request.reporter.as_ref(),
             ),
-            BuildStagingInput::Source(build) => {
-                let options = RunOptions {
-                    offline: self.request.offline,
-                };
-                crate::run::prepare::refresh_staging(
-                    project_root,
-                    &options,
-                    &build,
-                    false,
-                    self.request.reporter.as_ref(),
-                )
-            }
+            BuildStagingInput::Source(build) => crate::run::prepare::refresh_staging(
+                project_root,
+                self.request.offline,
+                &build,
+                false,
+                self.request.reporter.as_ref(),
+            ),
         }?;
 
         // The container path staged under the frozen snapshot, which is
@@ -554,10 +548,10 @@ impl Worker {
         // into the real project's `.phoxal/release/` so every backend leaves
         // the same persistent deployment release the command reports; the
         // archive is then written from that published root.
-        let staged_root = if staged.release.root.starts_with(project_root) {
-            staged.release.root.clone()
+        let staged_root = if staged.root.starts_with(project_root) {
+            staged.root.clone()
         } else {
-            publish_staged_root(project_root, target, &staged.release.root)?
+            publish_staged_root(project_root, target, &staged.root)?
         };
 
         let output = self
@@ -584,7 +578,7 @@ pub(crate) fn resolve_container_staging(
     crate::run::prepare::resolve_staging_with_registry_cache(
         snapshot_root,
         Some(registry_cache_root),
-        RunOptions { offline },
+        offline,
         StagingBuild::native_bundle(target.to_string()),
         ui,
     )

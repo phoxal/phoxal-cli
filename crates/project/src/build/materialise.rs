@@ -468,7 +468,6 @@ mod tests {
 
     #[test]
     fn cargo_package_name_matches_official_binary_name_for_every_kind() {
-        use crate::source::resolver::official_binary_name;
         use phoxal_cli_catalog::ArtifactKind;
 
         let cases = [
@@ -482,7 +481,7 @@ mod tests {
         for (catalog_id, kind, short) in cases {
             let spec =
                 MaterializeSpec::new(phoxal_cli_catalog::cargo_package_name(catalog_id), "0.42.0");
-            assert_eq!(spec.cargo_package_name(), official_binary_name(kind, short));
+            assert_eq!(spec.cargo_package_name(), kind.cargo_binary_name(short));
         }
     }
 

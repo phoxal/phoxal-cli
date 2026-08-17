@@ -337,10 +337,7 @@ fn webots_host() -> Result<phoxal_cli_project::WebotsHost> {
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let home = phoxal_cli_project::host::doctor::webots_home_path()
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    Ok(phoxal_cli_project::WebotsHost {
-        executable,
-        home: Some(home),
-    })
+    Ok(phoxal_cli_project::WebotsHost { executable, home })
 }
 
 #[cfg(test)]

@@ -12,15 +12,6 @@ use phoxal_cli_catalog::ArtifactKind;
 
 const ROBOT_FILE: &str = "robot.yaml";
 
-/// The executable name `cargo install` produces for one official package.
-///
-/// This is the *Cargo* name, not the name the binary is staged under in a
-/// bundle: staging renames it to the id it is launched by.
-#[must_use]
-pub fn official_binary_name(kind: ArtifactKind, name: &str) -> String {
-    kind.cargo_binary_name(name)
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolveOptions {
     /// Override the official service/driver target triple. `build --target`
@@ -140,18 +131,14 @@ pub struct ResolvedBrain {
 pub struct ResolvedUserRuntime {
     pub name: String,
     pub path: PathBuf,
-    pub source_hash: String,
 }
 
-/// One workspace runtime crate that is present but not declared in robot.yaml
-/// It is legal, not built, and surfaced as a drift diagnostic.
+/// One workspace `services/` crate that is present but not declared in
+/// robot.yaml. It is legal, not built, and surfaced as a drift diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndeclaredRuntime {
     /// The crate's logical name (its directory name).
     pub name: String,
-    /// "services" - the directory family and the robot.yaml map the
-    /// crate would be declared in.
-    pub family: &'static str,
 }
 
 /// One resolved `robot.components.<instance>` entry. Authored assets have one
@@ -191,24 +178,12 @@ impl ResolvedComponentDriver {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolvedPathOverrideKind {
-    Service,
-}
-
-impl ResolvedPathOverrideKind {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Service => "service",
-        }
-    }
-}
-
+/// One official service whose implementation a workspace `services/` crate
+/// replaces. Only services can be overridden this way: a component driver is
+/// selected by its component instance, not by directory discovery.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ResolvedPathOverride {
     pub key: String,
-    pub kind: ResolvedPathOverrideKind,
     pub artifact_name: String,
     pub path: PathBuf,
 }
@@ -311,14 +286,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn official_binary_name_uses_component_crate_binary_for_component_driver() {
-        assert_eq!(
-            official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
-            "phoxal-component-ddsm115"
-        );
-    }
-
-    #[test]
     fn load_robot_gates_an_unsupported_schema_revision_before_parsing() -> Result<()> {
         let dir = tempfile::tempdir()?;
 
@@ -333,17 +300,5 @@ mod tests {
         assert!(!message.contains("unknown variant"), "{message}");
 
         Ok(())
-    }
-
-    #[test]
-    fn official_binary_name_prefixes_by_artifact_kind() {
-        assert_eq!(
-            official_binary_name(ArtifactKind::Service, "drive"),
-            "phoxal-service-drive"
-        );
-        assert_eq!(
-            official_binary_name(ArtifactKind::ComponentDriver, "ddsm115"),
-            "phoxal-component-ddsm115"
-        );
     }
 }

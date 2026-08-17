@@ -46,33 +46,24 @@ pub struct ControllerLaunch {
 /// live in a `components/` subdirectory of the robot's own PROTO directory).
 const COMPONENT_PROTOS_SUBDIR: &str = "components";
 
-/// One distinct simulated component type compiled into the canonical robot.
-pub struct ComponentTypeToStage<'a> {
-    pub component_type: &'a str,
-}
-
-/// One robot to stage into the simulation world: its bundle (manifest +
-/// component specs + structure), the distinct component types it mounts, and
-/// the stable launch inputs for the controller that substitutes its
-/// component-driver contracts. `component_types` may be empty for a robot
-/// with no mounted components (or none with compiled simulation semantics).
+/// The one robot a simulation world contains: its bundle (manifest + component
+/// specs + structure), the distinct component types it mounts, and the stable
+/// launch inputs for the controller that substitutes its component-driver
+/// contracts. `component_types` may be empty for a robot with no mounted
+/// components (or none with compiled simulation semantics).
 pub struct RobotToStage<'a> {
-    pub robot_id: String,
     pub bundle: &'a RobotBundle,
-    pub component_types: Vec<ComponentTypeToStage<'a>>,
+    /// Each distinct simulated component type compiled into the robot.
+    pub component_types: Vec<&'a str>,
     pub controller_launch: ControllerLaunch,
-}
-
-/// Everything the caller needs to launch the staged world.
-pub struct StagedSimulationWorld {
-    pub staged_world_path: PathBuf,
 }
 
 /// Stage a simulation world for exactly one robot: generate its PROTO (plus
 /// one PROTO per distinct component type), render one static controller-bearing
-/// instance node, and stage the augmented world text.
+/// instance node, and stage the augmented world text. Returns the staged world
+/// path, which is what the caller opens Webots on.
 ///
-/// `staged_protos_dir` is where each generated robot `.proto` file is
+/// `staged_protos_dir` is where the generated robot `.proto` file is
 /// written; component PROTOs go under its `components/` subdirectory (the
 /// relative path the robot PROTO's own `EXTERNPROTO` declarations point at,
 /// `proto::render::proto::component_externprotos`). `mesh_root` is
@@ -84,8 +75,8 @@ pub fn stage_simulation_world(
     staged_protos_dir: &Path,
     mesh_root: &Path,
     staged_world_path: &Path,
-    robots: &[RobotToStage<'_>],
-) -> Result<StagedSimulationWorld> {
+    robot: RobotToStage<'_>,
+) -> Result<PathBuf> {
     std::fs::create_dir_all(staged_protos_dir).with_context(|| {
         format!(
             "failed to create staged protos directory {}",
@@ -110,13 +101,6 @@ pub fn stage_simulation_world(
         })?;
     }
 
-    let mut extern_protos = Vec::with_capacity(robots.len());
-    anyhow::ensure!(
-        robots.len() == 1,
-        "a Webots simulation world must contain exactly one robot"
-    );
-    let mut static_robot_nodes = Vec::with_capacity(1);
-
     let component_protos_dir = staged_protos_dir.join(COMPONENT_PROTOS_SUBDIR);
     std::fs::create_dir_all(&component_protos_dir).with_context(|| {
         format!(
@@ -125,71 +109,54 @@ pub fn stage_simulation_world(
         )
     })?;
 
-    for robot in robots {
-        let proto_name = proto_name_for_robot(robot.bundle.id().as_str())?;
-        let proto_path = staged_protos_dir.join(format!("{proto_name}.proto"));
-        let mesh_url_prefix = relative_mesh_url_prefix(mesh_root, &proto_path)?;
-        let component_solid_links = stage_component_protos(
-            &component_protos_dir,
-            mesh_root,
-            robot.bundle,
-            &robot.component_types,
-        )
+    let robot_id = robot.bundle.id();
+    let proto_name = proto_name_for_robot(robot_id.as_str())?;
+    let proto_path = staged_protos_dir.join(format!("{proto_name}.proto"));
+    let mesh_url_prefix = relative_mesh_url_prefix(mesh_root, &proto_path)?;
+    let component_solid_links = stage_component_protos(
+        &component_protos_dir,
+        mesh_root,
+        robot.bundle,
+        &robot.component_types,
+    )
+    .with_context(|| format!("failed to stage component PROTOs for robot '{robot_id}'"))?;
+
+    let proto_text = generate_robot_proto(
+        robot.bundle,
+        robot.bundle.structure(),
+        &component_solid_links,
+        &proto_name,
+        &mesh_url_prefix,
+    )
+    .with_context(|| format!("failed to generate PROTO for robot '{robot_id}'"))?;
+    std::fs::write(&proto_path, proto_text)
+        .with_context(|| format!("failed to write staged PROTO {}", proto_path.display()))?;
+
+    let extern_proto = externproto_for_generated_proto(&proto_path, staged_world_path)
         .with_context(|| {
-            format!(
-                "failed to stage component PROTOs for robot '{}'",
-                robot.robot_id
-            )
+            format!("failed to compute EXTERNPROTO reference for robot '{robot_id}'")
         })?;
 
-        let proto_text = generate_robot_proto(
-            robot.bundle,
-            robot.bundle.structure(),
-            &component_solid_links,
-            &proto_name,
-            &mesh_url_prefix,
-        )
-        .with_context(|| format!("failed to generate PROTO for robot '{}'", robot.robot_id))?;
-        std::fs::write(&proto_path, proto_text)
-            .with_context(|| format!("failed to write staged PROTO {}", proto_path.display()))?;
+    let instance = RobotInstance {
+        proto_name: proto_name.clone(),
+        def_name: proto_name,
+        robot_id: robot_id.to_string(),
+        controller: Some(WebotsController {
+            controller_name: phoxal_cli_catalog::WEBOTS_CONTROLLER_PACKAGE.to_string(),
+            controller_args: controller_args(&robot.controller_launch)?,
+        }),
+        supervisor: Some(false),
+        synchronization: None,
+    };
+    let instance_node = render_robot_instance_node(
+        robot.bundle,
+        robot.bundle.structure(),
+        &component_solid_links,
+        &instance,
+    )
+    .with_context(|| format!("failed to render instance node for robot '{robot_id}'"))?;
 
-        let extern_proto = externproto_for_generated_proto(&proto_path, staged_world_path)
-            .with_context(|| {
-                format!(
-                    "failed to compute EXTERNPROTO reference for robot '{}'",
-                    robot.robot_id
-                )
-            })?;
-        extern_protos.push(extern_proto);
-
-        let controller_args = controller_args(&robot.controller_launch)?;
-        let instance = RobotInstance {
-            proto_name: proto_name.clone(),
-            def_name: proto_name.clone(),
-            robot_id: robot.robot_id.clone(),
-            controller: Some(WebotsController {
-                controller_name: phoxal_cli_catalog::WEBOTS_CONTROLLER_PACKAGE.to_string(),
-                controller_args,
-            }),
-            supervisor: Some(false),
-            synchronization: None,
-        };
-        let instance_node = render_robot_instance_node(
-            robot.bundle,
-            robot.bundle.structure(),
-            &component_solid_links,
-            &instance,
-        )
-        .with_context(|| {
-            format!(
-                "failed to render instance node for robot '{}'",
-                robot.robot_id
-            )
-        })?;
-        static_robot_nodes.push(instance_node);
-    }
-
-    let staged_text = stage_world(base_world_text, &extern_protos, &static_robot_nodes)
+    let staged_text = stage_world(base_world_text, &[extern_proto], &[instance_node])
         .context("failed to stage simulation world")?;
     std::fs::write(staged_world_path, staged_text).with_context(|| {
         format!(
@@ -198,9 +165,7 @@ pub fn stage_simulation_world(
         )
     })?;
 
-    Ok(StagedSimulationWorld {
-        staged_world_path: staged_world_path.to_path_buf(),
-    })
+    Ok(staged_world_path.to_path_buf())
 }
 
 fn controller_args(launch: &ControllerLaunch) -> Result<Vec<String>> {
@@ -227,7 +192,7 @@ fn stage_component_protos(
     component_protos_dir: &Path,
     mesh_root: &Path,
     bundle: &RobotBundle,
-    component_types: &[ComponentTypeToStage<'_>],
+    component_types: &[&str],
 ) -> Result<BTreeMap<String, Vec<String>>> {
     let mut component_solid_links = BTreeMap::new();
 
@@ -236,39 +201,28 @@ fn stage_component_protos(
         // its simulation are the type's, not the instance's.
         let mounted = bundle
             .components()
-            .find(|instance| {
-                instance.instance().component_type().as_str() == component_type.component_type
-            })
+            .find(|instance| instance.instance().component_type().as_str() == *component_type)
             .ok_or_else(|| {
-                anyhow!(
-                    "component type '{}' is not loaded in the robot bundle",
-                    component_type.component_type
-                )
+                anyhow!("component type '{component_type}' is not loaded in the robot bundle")
             })?;
         let component_model = mounted.component_type();
         let comp_simulation = mounted.simulation().ok_or_else(|| {
-            anyhow!(
-                "component type '{}' has no compiled simulation semantics",
-                component_type.component_type
-            )
+            anyhow!("component type '{component_type}' has no compiled simulation semantics")
         })?;
 
-        let comp_proto_name = proto_name_for_robot(component_type.component_type)?;
+        let comp_proto_name = proto_name_for_robot(component_type)?;
         let comp_proto_path = component_protos_dir.join(format!("{comp_proto_name}.proto"));
         let comp_mesh_url_prefix = relative_mesh_url_prefix(mesh_root, &comp_proto_path)?;
 
         let artifact = proto::generate_component_proto(
-            component_type.component_type,
+            component_type,
             component_model,
             component_model.structure(),
             comp_simulation,
             &comp_mesh_url_prefix,
         )
         .with_context(|| {
-            format!(
-                "failed to generate PROTO for component type '{}'",
-                component_type.component_type
-            )
+            format!("failed to generate PROTO for component type '{component_type}'")
         })?;
         std::fs::write(&comp_proto_path, artifact.proto_text).with_context(|| {
             format!(
@@ -276,10 +230,7 @@ fn stage_component_protos(
                 comp_proto_path.display()
             )
         })?;
-        component_solid_links.insert(
-            component_type.component_type.to_string(),
-            artifact.solid_link_ids,
-        );
+        component_solid_links.insert((*component_type).to_string(), artifact.solid_link_ids);
     }
 
     Ok(component_solid_links)

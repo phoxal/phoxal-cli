@@ -1,23 +1,23 @@
 //! Filesystem staging for generated simulation worlds and meshes.
 
-use crate::simulation::prepare::ComponentTypeToStage;
 use crate::simulation::prepare::ControllerLaunch;
 use crate::simulation::prepare::RobotToStage;
-use crate::simulation::prepare::StagedSimulationWorld;
 use crate::simulation::prepare::stage_simulation_world;
 use crate::simulation::webots::root;
 use anyhow::Context;
 use anyhow::Result;
 use phoxal_bundle::RuntimeBundle;
 use std::path::Path;
+use std::path::PathBuf;
 
-/// Stage a resolved robot and authored world into the Webots filesystem view.
+/// Stage a resolved robot and authored world into the Webots filesystem view,
+/// returning the staged world Webots is opened on.
 pub(crate) fn stage_simulation_for_robot(
     project_root: &Path,
     world_source_path: &Path,
     bundle: &RuntimeBundle,
     connect_endpoint: &str,
-) -> Result<StagedSimulationWorld> {
+) -> Result<PathBuf> {
     // Prepare every generated file in the task-local tree before reconciling
     // it into the ordinary Webots project.
     let base_world_text = std::fs::read_to_string(world_source_path)
@@ -28,11 +28,6 @@ pub(crate) fn stage_simulation_for_robot(
         .context("world source path has no file stem")?;
 
     let robot = bundle.robot();
-    let robot_id = robot.id();
-    anyhow::ensure!(
-        !connect_endpoint.trim().is_empty(),
-        "Webots controller requires the supervisor router endpoint"
-    );
     let controller_launch = ControllerLaunch {
         bundle_root: bundle.root().to_path_buf(),
         connect_endpoint: connect_endpoint.to_string(),
@@ -44,7 +39,6 @@ pub(crate) fn stage_simulation_for_robot(
         .map(|instance| instance.instance().component_type().as_str())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
-        .map(|component_type| ComponentTypeToStage { component_type })
         .collect::<Vec<_>>();
 
     let mesh_root = root::meshes_dir(project_root);
@@ -54,12 +48,11 @@ pub(crate) fn stage_simulation_for_robot(
         &root::protos_dir(project_root),
         &mesh_root,
         &root::world_path(project_root, world_name),
-        &[RobotToStage {
-            robot_id: robot_id.to_string(),
+        RobotToStage {
             bundle: robot,
             component_types,
             controller_launch,
-        }],
+        },
     )
 }
 

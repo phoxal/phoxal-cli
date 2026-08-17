@@ -5,22 +5,17 @@
 //! *participant* it launches is an ordinary staged binary from the bundle, and
 //! the simulator *application* - the GUI, the world - is this process's.
 
+use std::num::NonZeroI32;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-#[cfg(unix)]
-use std::num::NonZeroI32;
-
-#[cfg(unix)]
-use anyhow::bail;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use phoxal_cli_project::WebotsLaunch;
 
 /// How long a SIGTERMed Webots is given to close its world before the
 /// fallback. Webots writes state on the way out, so this is generous.
 const GRACEFUL_BUDGET: Duration = Duration::from_secs(20);
 
-#[cfg(unix)]
 const SHUTDOWN: [(libc::c_int, Duration); 2] = [
     (libc::SIGTERM, GRACEFUL_BUDGET),
     (libc::SIGKILL, Duration::from_secs(1)),
@@ -33,7 +28,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Debug)]
 pub(crate) struct Webots {
     child: Child,
-    #[cfg(unix)]
     process_group: Option<NonZeroI32>,
 }
 
@@ -60,10 +54,6 @@ impl Webots {
             .stdin(Stdio::null())
             .stdout(Stdio::from(file))
             .stderr(Stdio::from(errors));
-        if let Some(cwd) = &spec.cwd {
-            command.current_dir(cwd);
-        }
-        #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
@@ -71,7 +61,6 @@ impl Webots {
         let child = command
             .spawn()
             .with_context(|| format!("failed to launch Webots ({})", spec.executable.display()))?;
-        #[cfg(unix)]
         let process_group = Some(
             NonZeroI32::new(
                 libc::pid_t::try_from(child.id())
@@ -81,7 +70,6 @@ impl Webots {
         );
         Ok(Self {
             child,
-            #[cfg(unix)]
             process_group,
         })
     }
@@ -97,37 +85,6 @@ impl Webots {
     /// outright leaves the host with a crash report to dismiss rather than a
     /// clean exit.
     pub(crate) async fn stop(mut self) -> Result<()> {
-        #[cfg(unix)]
-        {
-            self.stop_unix().await
-        }
-        #[cfg(not(unix))]
-        {
-            if self.child.try_wait()?.is_some() {
-                return Ok(());
-            }
-            let deadline = tokio::time::Instant::now() + GRACEFUL_BUDGET;
-            loop {
-                if self.child.try_wait()?.is_some() {
-                    return Ok(());
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    break;
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
-            tracing::warn!(
-                "Webots did not exit within {}s of SIGTERM; killing it",
-                GRACEFUL_BUDGET.as_secs()
-            );
-            self.child.kill().ok();
-            self.child.wait()?;
-            Ok(())
-        }
-    }
-
-    #[cfg(unix)]
-    async fn stop_unix(&mut self) -> Result<()> {
         let process_group = self
             .process_group
             .context("Webots process group ownership was already released")?;
@@ -162,21 +119,13 @@ impl Drop for Webots {
     /// the graceful path is [`Self::stop`], and this is the last resort for a
     /// panic or an early return that skipped it.
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            if let Some(process_group) = self.process_group.take() {
-                let _ = signal_process_group(process_group, libc::SIGKILL);
-            }
-        }
-        #[cfg(not(unix))]
-        if matches!(self.child.try_wait(), Ok(None)) {
-            self.child.kill().ok();
+        if let Some(process_group) = self.process_group.take() {
+            let _ = signal_process_group(process_group, libc::SIGKILL);
         }
         let _ = self.child.try_wait();
     }
 }
 
-#[cfg(unix)]
 fn signal_process_group(process_group: NonZeroI32, signal: libc::c_int) -> Result<()> {
     // SAFETY: `kill` takes no pointer. The negative pid targets exactly the
     // process group created for the direct Webots child at launch.
@@ -190,7 +139,6 @@ fn signal_process_group(process_group: NonZeroI32, signal: libc::c_int) -> Resul
     Err(error).context("failed to signal the Webots process group")
 }
 
-#[cfg(unix)]
 fn process_group_alive(child: &mut Child, process_group: NonZeroI32) -> Result<bool> {
     // Reap the direct child before probing: an unreaped group-leader zombie can
     // otherwise make `kill(-pgid, 0)` look alive until the graceful budget ends.
@@ -206,7 +154,7 @@ fn process_group_alive(child: &mut Child, process_group: NonZeroI32) -> Result<b
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
