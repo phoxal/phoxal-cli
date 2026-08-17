@@ -43,6 +43,17 @@ fn installed_endpoint(roots: &InstallRoots) -> String {
 /// How long an activated release has to bring its supervisor up and answer.
 const READINESS_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// How long a restored release has to answer before the restore is reported as
+/// failed too.
+///
+/// Deliberately shorter than a fresh activation: the release being restored is
+/// the one this machine was running until moments ago, so it starts from a warm
+/// page cache with nothing to unpack or migrate. The operator is already holding
+/// a failed install at this point, and making them wait out the full activation
+/// budget a second time buys nothing - a previous release that has not answered
+/// within this is not going to.
+const RESTORE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// One completed activation: the release `/var/phoxal` now selects, and the
 /// graph its supervisor reported once it answered.
 #[derive(Debug)]
@@ -198,7 +209,7 @@ impl ServiceControl {
     /// exactly the part of a robot the installed release is answerable for. A
     /// graph missing the drivers for hardware that is not attached to this
     /// machine still comes back from here, because that release is running.
-    async fn observe(&self, endpoint: &str) -> Result<InstalledGraph> {
+    async fn observe(&self, endpoint: &str, budget: Duration) -> Result<InstalledGraph> {
         #[cfg(test)]
         if let Self::Fake {
             operations,
@@ -206,7 +217,17 @@ impl ServiceControl {
             silent_once,
         } = self
         {
-            operations.lock().unwrap().push("observe");
+            // The budget is part of the operation: a restore that waited out a
+            // fresh activation's budget would be a five-minute silence after a
+            // failure the operator is already holding.
+            operations
+                .lock()
+                .unwrap()
+                .push(if budget == RESTORE_TIMEOUT {
+                    "observe restored"
+                } else {
+                    "observe"
+                });
             let mut silent = silent_once.lock().unwrap();
             if *silent {
                 *silent = false;
@@ -215,7 +236,7 @@ impl ServiceControl {
             return Ok(graph.clone());
         }
 
-        let deadline = tokio::time::Instant::now() + READINESS_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + budget;
         loop {
             if let Some(failure) = systemd_failure()? {
                 bail!("phoxal-supervisor.service failed before it answered: {failure}");
@@ -274,18 +295,61 @@ async fn observe_or_restore(
     roots: &InstallRoots,
     service: &ServiceControl,
     previous: Option<&Path>,
-    discard: Option<&Path>,
+    discard: &[&Path],
 ) -> Result<InstalledGraph> {
-    match service.observe(&installed_endpoint(roots)).await {
+    match service
+        .observe(&installed_endpoint(roots), READINESS_TIMEOUT)
+        .await
+    {
         Ok(graph) => Ok(graph),
-        Err(error) => {
-            restore_after_failed_activation(previous, roots, service).await?;
-            if let Some(discard) = discard {
-                discard_failed_release(discard, &roots.releases)?;
-            }
-            Err(error)
+        Err(error) => Err(undo_failed_activation(error, roots, service, previous, discard).await),
+    }
+}
+
+/// Undo an activation that failed: put the previous release back, remove
+/// whatever this attempt left in the releases root, and report every failure as
+/// context on the error that started it.
+///
+/// The activation error is the one the operator has to act on. A restore or a
+/// cleanup that also failed is worse news about that same event, never a
+/// replacement for it - returning the second failure alone would leave the
+/// operator holding "could not remove a directory" with no account of what went
+/// wrong with the install.
+async fn undo_failed_activation(
+    error: anyhow::Error,
+    roots: &InstallRoots,
+    service: &ServiceControl,
+    previous: Option<&Path>,
+    discard: &[&Path],
+) -> anyhow::Error {
+    let mut error = match restore_after_failed_activation(previous, roots, service).await {
+        Ok(()) => error,
+        Err(restore) => error.context(format!(
+            "the previous release was not restored: {restore:#}"
+        )),
+    };
+    for release in discard {
+        if let Err(failed) = discard_failed_release(release, &roots.releases) {
+            error = error.context(format!(
+                "the failed release {} was not removed: {failed:#}",
+                release.display()
+            ));
         }
     }
+    error
+}
+
+/// Make `release` the release `/var/phoxal` selects.
+///
+/// The symlink switch, the units, and the systemd reload are one step and are
+/// never performed apart: the robot's process set is a property of the bundle
+/// now active, so a release that is selected while systemd still describes
+/// another one's runtimes is a robot nobody declared. Install, rollback, and the
+/// restore of a failed activation all activate through here for that reason.
+fn activate(roots: &InstallRoots, service: &ServiceControl, release: &Path) -> Result<()> {
+    atomic_symlink_switch(&roots.active, release)?;
+    regenerate_runtime_units(release, &roots.units)?;
+    service.reload()
 }
 
 fn systemd_failure() -> Result<Option<String>> {
@@ -448,19 +512,19 @@ async fn install_archive(
     if let Err(error) = (|| -> Result<()> {
         std::fs::rename(&candidate, &release)?;
         fsync_dir(&roots.releases)?;
-        atomic_symlink_switch(&roots.active, &release)?;
-        // The robot's process set is a property of the bundle now active, so
-        // the units are regenerated with the symlink rather than left to
-        // describe the release that was there before.
-        regenerate_runtime_units(&release, &roots.units)?;
-        service.reload()?;
-        Ok(())
+        activate(roots, service, &release)
     })() {
         drop(_lock);
-        remove_dir_if_present(&candidate)?;
-        restore_after_failed_activation(previous.as_deref(), roots, service).await?;
-        discard_failed_release(&release, &roots.releases)?;
-        return Err(error);
+        // Either name this attempt could have left behind: the rename may not
+        // have happened at all.
+        return Err(undo_failed_activation(
+            error,
+            roots,
+            service,
+            previous.as_deref(),
+            &[&candidate, &release],
+        )
+        .await);
     }
     drop(_lock);
 
@@ -468,11 +532,16 @@ async fn install_archive(
         .start()
         .context("failed to start phoxal-supervisor.service")
     {
-        restore_after_failed_activation(previous.as_deref(), roots, service).await?;
-        discard_failed_release(&release, &roots.releases)?;
-        return Err(error);
+        return Err(undo_failed_activation(
+            error,
+            roots,
+            service,
+            previous.as_deref(),
+            &[&release],
+        )
+        .await);
     }
-    let graph = observe_or_restore(roots, service, previous.as_deref(), Some(&release))
+    let graph = observe_or_restore(roots, service, previous.as_deref(), &[&release])
         .await
         .context("new release was rolled back: its supervisor never answered")?;
     Ok(Activation { release, graph })
@@ -489,23 +558,26 @@ async fn rollback_release(
     service
         .stop()
         .context("failed to stop phoxal-supervisor.service")?;
-    let identity = ProjectLockIdentity::resolve(&roots.active, ProjectOperation::Install);
-    let _lock = ProjectLock::acquire_path(&roots.state.join("project.lock"), identity)
-        .context("failed to acquire the installed-runtime lock")?;
-    crate::lock::refuse_while_execution_is_live(&roots.active)?;
-    atomic_symlink_switch(&roots.active, &selected)?;
-    // A rollback activates a different bundle, which may declare a different
-    // process set - so its units are regenerated exactly as an install's are.
-    regenerate_runtime_units(&selected, &roots.units)?;
-    service.reload()?;
-    drop(_lock);
+    // The robot is stopped from here. Every step up to the start below can
+    // fail, and each of them leaves a machine whose robot was running a moment
+    // ago with nothing running at all - so the release that was active is put
+    // back and restarted, exactly as a failed install restores it.
+    let activated = (|| -> Result<()> {
+        let identity = ProjectLockIdentity::resolve(&roots.active, ProjectOperation::Install);
+        let _lock = ProjectLock::acquire_path(&roots.state.join("project.lock"), identity)
+            .context("failed to acquire the installed-runtime lock")?;
+        crate::lock::refuse_while_execution_is_live(&roots.active)?;
+        activate(roots, service, &selected)
+    })();
+    if let Err(error) = activated {
+        return Err(undo_failed_activation(error, roots, service, Some(&active), &[]).await);
+    }
     if let Err(error) = service.start().context("failed to start rollback release") {
-        restore_after_failed_activation(Some(&active), roots, service).await?;
-        return Err(error);
+        return Err(undo_failed_activation(error, roots, service, Some(&active), &[]).await);
     }
     // The gate is the same one an install uses, so an operator cannot reach a
     // release through `install` that `rollback` would refuse to return to.
-    let graph = observe_or_restore(roots, service, Some(&active), None)
+    let graph = observe_or_restore(roots, service, Some(&active), &[])
         .await
         .context("rollback target's supervisor never answered; original restored")?;
     Ok(Activation {
@@ -526,14 +598,12 @@ async fn restore_after_failed_activation(
 ) -> Result<()> {
     let _ = service.stop();
     if let Some(previous) = previous {
-        atomic_symlink_switch(&roots.active, previous)?;
-        regenerate_runtime_units(previous, &roots.units)?;
-        service.reload()?;
+        activate(roots, service, previous)?;
         service
             .start()
             .context("failed to restart the previous release")?;
         service
-            .observe(&installed_endpoint(roots))
+            .observe(&installed_endpoint(roots), RESTORE_TIMEOUT)
             .await
             .context("previous release did not recover after rollback")?;
     } else {
@@ -911,7 +981,6 @@ mod tests {
     fn active_halves(roots: &InstallRoots) -> Result<(String, String)> {
         let active = active_release(&roots.active)?.context("nothing is active")?;
         let supervisor = std::fs::read_to_string(active.join(phoxal_cli_project::SUPERVISOR_FILE))?;
-        let _ = &roots.units;
         Ok((
             supervisor
                 .strip_prefix("phoxal-supervisor of ")
@@ -986,7 +1055,7 @@ mod tests {
         // starting them: systemd has to read a unit before it can start it.
         assert_eq!(
             *operations.lock().unwrap(),
-            ["stop", "reload", "start", "observe"]
+            ["stop", "reload", "start", "observe restored"]
         );
         // The restored release's own process set is what systemd is left
         // describing, not the failed one's.
@@ -996,6 +1065,78 @@ mod tests {
                 .join(crate::application::units::runtime_unit_name("drive"))
                 .is_file()
         );
+        Ok(())
+    }
+
+    /// A rollback stops the robot before it activates anything, so every step
+    /// between that stop and the start belongs to the release it stopped: a
+    /// failure there must leave that release running, not the machine silent.
+    #[tokio::test]
+    async fn a_rollback_that_cannot_activate_restarts_the_release_it_stopped() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let roots = roots(&temp);
+        std::fs::create_dir_all(&roots.releases)?;
+        std::fs::create_dir_all(&roots.state)?;
+        std::fs::create_dir_all(&roots.volatile)?;
+        // The rollback target has no bundle, so regenerating its units - the
+        // step that reads the manifest - fails after the robot is already down.
+        std::fs::create_dir(roots.releases.join("20260724T010000.000Z-11111111"))?;
+        let active = release_stamped(&roots, "20260725T010000.000Z-22222222", "active")?;
+        atomic_symlink_switch(&roots.active, &active)?;
+        let operations = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let service = answering(&operations);
+
+        let error = rollback_release(None, &roots, &service)
+            .await
+            .expect_err("a release whose units cannot be generated is not activated");
+
+        assert_eq!(
+            active_halves(&roots)?,
+            ("active".to_string(), "active".to_string()),
+            "{error:#}"
+        );
+        // The robot the rollback stopped is running again by the time the
+        // failure is reported.
+        assert_eq!(
+            *operations.lock().unwrap(),
+            ["stop", "stop", "reload", "start", "observe restored"]
+        );
+        Ok(())
+    }
+
+    /// A restore that fails too is worse news about the same failure, never a
+    /// replacement for it: the account of what actually went wrong survives,
+    /// and so does the removal of the release nobody could reach.
+    #[tokio::test]
+    async fn a_failed_restore_is_reported_beside_the_failure_that_caused_it() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let roots = roots(&temp);
+        std::fs::create_dir_all(&roots.releases)?;
+        std::fs::create_dir_all(&roots.state)?;
+        std::fs::create_dir_all(&roots.volatile)?;
+        // A previous release with no bundle cannot have its units regenerated,
+        // so restoring it fails.
+        let previous = roots.releases.join("20260724T010000.000Z-11111111");
+        std::fs::create_dir(&previous)?;
+        let failed = release_stamped(&roots, "20260725T010000.000Z-22222222", "failed")?;
+        atomic_symlink_switch(&roots.active, &failed)?;
+        let service = ServiceControl::Fake {
+            operations: std::sync::Arc::new(Mutex::new(Vec::new())),
+            graph: graph(1, &[]),
+            silent_once: std::sync::Arc::new(Mutex::new(true)),
+        };
+
+        let error = observe_or_restore(&roots, &service, Some(&previous), &[failed.as_path()])
+            .await
+            .expect_err("a supervisor that never answers is not an installed release");
+        let error = format!("{error:#}");
+
+        assert!(error.contains("never answered"), "{error}");
+        assert!(
+            error.contains("the previous release was not restored"),
+            "{error}"
+        );
+        assert!(!failed.exists(), "the failed release leaves nothing behind");
         Ok(())
     }
 
@@ -1113,7 +1254,7 @@ mod tests {
             silent_once: std::sync::Arc::new(Mutex::new(true)),
         };
 
-        let error = observe_or_restore(&roots, &service, Some(&previous), Some(&failed))
+        let error = observe_or_restore(&roots, &service, Some(&previous), &[failed.as_path()])
             .await
             .expect_err("a supervisor that never answers is not an installed release");
         assert!(format!("{error:#}").contains("never answered"), "{error:#}");
@@ -1127,7 +1268,7 @@ mod tests {
         // starting them: systemd has to read a unit before it can start it.
         assert_eq!(
             *operations.lock().unwrap(),
-            ["observe", "stop", "reload", "start", "observe"]
+            ["observe", "stop", "reload", "start", "observe restored"]
         );
         Ok(())
     }
@@ -1155,7 +1296,7 @@ mod tests {
         };
 
         let observed =
-            observe_or_restore(&roots, &service, Some(&previous), Some(&installed)).await?;
+            observe_or_restore(&roots, &service, Some(&previous), &[installed.as_path()]).await?;
 
         assert_eq!(observed.present, 12);
         assert_eq!(observed.expected(), 20);
