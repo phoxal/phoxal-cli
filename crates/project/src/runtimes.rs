@@ -9,11 +9,11 @@
 //! to decide which systemd units to write. None of them may disagree, so none
 //! of them derives it a second time.
 //!
-//! The *expected presence* set the supervisor publishes is deliberately wider:
-//! it is `brain` plus every services key plus every components key, whether or
-//! not a component has a driver, because a simulated component is present
-//! without any driver process existing. That set is read off the snapshot, not
-//! computed here.
+//! The *expected presence* set the supervisor publishes is the same set,
+//! derived the same way from the same manifest: a component without a driver
+//! block launches no process, so expecting one would hold the graph
+//! permanently incomplete. The supervisor computes it from the manifest it
+//! opened; a client reads it off the snapshot rather than recomputing it here.
 
 use phoxal_model::Robot;
 

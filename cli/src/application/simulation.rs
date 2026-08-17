@@ -57,8 +57,9 @@ struct StartedSimulation {
 /// then wait for the runtimes.
 ///
 /// The wait has to come last. A simulated runtime follows the world clock the
-/// controller publishes, and the controller is what makes every component
-/// instance present, so nothing appears until Webots is open and stepping.
+/// controller publishes, and the controller is what presents the component
+/// instances a driver would otherwise present - the expected set, exactly - so
+/// nothing appears until Webots is open and stepping.
 /// Staging needs the published bundle and Webots needs the endpoint, both of
 /// which exist the moment the launch returns.
 async fn start_simulation(
