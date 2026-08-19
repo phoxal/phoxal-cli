@@ -15,7 +15,7 @@
 //! permanently incomplete. The supervisor computes it from the manifest it
 //! opened; a client reads it off the snapshot rather than recomputing it here.
 
-use phoxal_model::Robot;
+use phoxal::model::Robot;
 
 /// Where in the manifest a runtime's identity came from.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -127,7 +127,7 @@ pub fn robot_binaries(robot: &Robot) -> std::collections::BTreeSet<String> {
 pub fn bundle_runtimes(bundle_root: &std::path::Path) -> anyhow::Result<Vec<RobotRuntime>> {
     use anyhow::Context;
 
-    let bundle = phoxal_bundle::RuntimeBundle::open(bundle_root).with_context(|| {
+    let bundle = phoxal::bundle::RuntimeBundle::open(bundle_root).with_context(|| {
         format!(
             "failed to read the bundle manifest at {}",
             bundle_root.display()
@@ -139,7 +139,7 @@ pub fn bundle_runtimes(bundle_root: &std::path::Path) -> anyhow::Result<Vec<Robo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_model::builder::RobotBuilder;
+    use phoxal::model::builder::RobotBuilder;
 
     /// A rover with two instances of one driven type and one driverless mount.
     ///

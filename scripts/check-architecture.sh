@@ -52,13 +52,13 @@ verify_comment_policy_patterns
 # then cover the whole active repository without exempting its own source.
 RETIRED_IDENTIFIER_PATTERN='phoxal''d|phoxal-''api|phoxal_''api|phoxal-cli-''(client|supervisor)|crates/''client-lib|phoxal\.service'
 
-for required_manifest in cli/Cargo.toml phoxal-client/Cargo.toml; do
+for required_manifest in cli/Cargo.toml; do
   if [[ ! -f "${required_manifest}" ]]; then
     echo "architecture policy failed: missing top-level package ${required_manifest}" >&2
     exit 1
   fi
 done
-for retired_path in client "crates/client"-lib supervisor; do
+for retired_path in client "crates/client"-lib supervisor phoxal-client; do
   if [[ -e "${retired_path}" ]]; then
     echo "architecture policy failed: retired package path ${retired_path} still exists" >&2
     exit 1
@@ -67,51 +67,41 @@ done
 
 fail_if_found "the retired launch environment ABI must not return" \
   'LaunchEnv|EncodedParticipantEnv|encode_participant_env|PHOXAL_(EXECUTION|PARTICIPANT|ROBOT|BUNDLE|CONNECT)' \
-  cli phoxal-client crates
+  cli crates
 fail_if_found "runtime identity is RobotId plus execution-scoped participant identities" \
-  'RobotNamespace|RobotIdentity|RobotKey|ParticipantInstanceKey' cli phoxal-client crates
+  'RobotNamespace|RobotIdentity|RobotKey|ParticipantInstanceKey' cli crates
 fail_if_found "attachments must not reconstruct authored source" \
-  'phoxal_manifest|robot\.yaml' cli/src/attach
+  'phoxal::authoring|robot\.yaml' cli/src/attach
 fail_if_found "raw Zenoh is owned below the typed bus contract" \
-  '(^|[^[:alnum:]_])zenoh::' cli phoxal-client crates
+  '(^|[^[:alnum:]_])zenoh::' cli crates
 fail_if_found "tracker history belongs in GitHub, not Rust source" \
   "${STALE_TRACKER_COMMENT_PATTERN}" \
-  cli phoxal-client crates --glob '*.rs'
+  cli crates --glob '*.rs'
 fail_if_found "comment-only mangled empty-parenthetical narration must not return" \
   "${MANGLED_COMMENT_PATTERN}" \
-  cli phoxal-client crates --glob '*.rs'
+  cli crates --glob '*.rs'
 fail_if_found "the application package stays bin-only" '^\[lib\]' cli/Cargo.toml
-# The remote protocol has one owner. `phoxal` and the crates it renders with
-# reach a running robot through `phoxal-client` and never name a wire crate.
-fail_if_found "remote protocol ownership is phoxal-client's" \
-  '^phoxal-(protocol|bus) *=' cli/Cargo.toml crates/ui/Cargo.toml crates/observation/Cargo.toml
 fail_if_found "the retired catch-all core crate must not return" \
-  'phoxal-cli-core|phoxal_cli_core' Cargo.toml cli phoxal-client crates release-plz.toml
+  'phoxal-cli-core|phoxal_cli_core' Cargo.toml cli crates release-plz.toml
 fail_if_found "the retired CLI-owned supervisor topology must not return" \
   '([Dd]aemon([^[:alnum:]_-]|$)|DaemonEnded|stop_daemon|CLI pair|sibling (supervisor|executable))' \
-  cli phoxal-client crates --glob '*.rs'
+  cli crates --glob '*.rs'
 fail_if_found "retired identifiers must not remain outside immutable history and exact cleanup owners" \
   "${RETIRED_IDENTIFIER_PATTERN}" . \
   --glob '!**/CHANGELOG.md' \
   --glob '!cli/src/application/service.rs' \
   --glob '!crates/host/src/paths.rs'
 
-# `phoxal-client` is a reusable application boundary, not a second CLI layer.
-fail_if_found "phoxal-client must remain extraction-ready" \
-  '^[[:space:]]*[[:alnum:]_-]+[[:space:]]*=.*path[[:space:]]*=|phoxal-cli-' \
-  phoxal-client/Cargo.toml
-fail_if_found "the retired attachment and public transport surfaces must not return" \
-  'Attachment(Port|Config)?|AttachError|pub[[:space:]]+mod[[:space:]]+transport' \
-  phoxal-client/src phoxal-client/tests
-fail_if_found "phoxal-client must not expose raw session construction or access" \
-  '^[[:space:]]*pub([[:space:]]+use)?[^;]*(BusOwner|BusConfig|BusHandle)|pub[[:space:]]+(async[[:space:]]+)?fn[[:space:]]+(bus|session)[[:space:]]*\(' \
-  phoxal-client/src
-fail_if_found "phoxal-client must not contain CLI policy or remediation" \
-  'phoxal self upgrade|phoxal (attach|run|deploy|install|rollback)|systemd|joypad|TUI|exit code|progress reporting' \
-  phoxal-client/src phoxal-client/tests
+# The framework is one library. The retired internal packages and the extracted
+# client crate must not come back as a dependency of anything here; which
+# framework packages actually resolve, and under which consumer profiles, is
+# proven against `cargo metadata` in `cli/tests/framework_boundary.rs`.
+fail_if_found "the framework is consumed as one library" \
+  '^phoxal-(protocol|bus|bundle|manifest|model|runtime-contract|client) *=|phoxal_(protocol|bus|bundle|manifest|model|runtime_contract|client)' \
+  Cargo.toml cli crates
 
-# UI and observation consumers must use `phoxal-client`; bypassing it would
-# couple application policy to the wire owner and defeat extraction.
-fail_if_found "remote client consumers must not bypass phoxal-client" \
-  'phoxal_(bus|protocol)::|phoxal_client::transport|\.bus\(\)' \
+# Raw transport ownership is the framework's and is `pub(crate)` there. Naming
+# one of these would mean the boundary had been reopened.
+fail_if_found "session consumers must not reach for raw transport ownership" \
+  'BusOwner|BusConfig|BusHandle|\.bus\(\)' \
   cli/src crates/ui/src crates/observation/src

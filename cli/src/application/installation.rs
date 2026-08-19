@@ -23,10 +23,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
+use phoxal::identity::RobotId;
+use phoxal::supervisor::api::execution::Snapshot;
 use phoxal_cli_observation::GraphSplit;
 use phoxal_cli_project::BUNDLE_DIR;
-use phoxal_client::supervisor::execution::Snapshot;
-use phoxal_runtime_contract::identity::RobotId;
 
 use super::units;
 use crate::cli::context::AppContext;
@@ -230,18 +230,19 @@ impl ServiceControl {
             if let Some(failure) = systemd_failure()? {
                 bail!("phoxal-supervisor.service failed before it answered: {failure}");
             }
-            let connection = phoxal_client::Connection::connect(
-                &phoxal_client::ConnectOptions::new(endpoint, crate::attach::CLIENT_PARTICIPANT),
-            )
+            let session = phoxal::session::Session::connect(&phoxal::session::ConnectOptions::new(
+                endpoint,
+                crate::attach::CLIENT_PARTICIPANT,
+            ))
             .await;
-            match connection {
-                Ok(connection) => {
-                    let client = connection.client();
-                    let robot = client.connected().robot.clone();
+            match session {
+                Ok(session) => {
+                    let handle = session.handle();
+                    let robot = handle.connected().robot.clone();
                     let observed =
-                        tokio::time::timeout(Duration::from_millis(250), first_snapshot(&client))
+                        tokio::time::timeout(Duration::from_millis(250), first_snapshot(&handle))
                             .await;
-                    let _ = connection.close().await;
+                    let _ = session.close().await;
                     if let Ok(Some(snapshot)) = observed {
                         return Ok(InstalledGraph::observed(&robot, &snapshot));
                     }
@@ -260,10 +261,10 @@ impl ServiceControl {
     }
 }
 
-/// The first snapshot a connection sees, or `None` when the supervisor stops
+/// The first snapshot a session sees, or `None` when the supervisor stops
 /// publishing before there is one.
-async fn first_snapshot(client: &phoxal_client::Client) -> Option<Snapshot> {
-    let mut snapshots = client.snapshots();
+async fn first_snapshot(session: &phoxal::session::SessionHandle) -> Option<Snapshot> {
+    let mut snapshots = session.snapshots();
     loop {
         let observed = snapshots.borrow_and_update().clone();
         if let Some(snapshot) = observed {
@@ -618,7 +619,7 @@ async fn restore_after_failed_activation(
 /// the robot no longer has.
 fn regenerate_runtime_units(release: &Path, unit_root: &Path) -> Result<()> {
     let runtimes = phoxal_cli_project::bundle_runtimes(&release.join(BUNDLE_DIR))?;
-    let generated = units::bundle_units(&runtimes);
+    let generated = units::bundle_units(&runtimes)?;
     std::fs::create_dir_all(unit_root)?;
     for (name, contents) in &generated {
         let path = unit_root.join(name);
@@ -897,7 +898,7 @@ fn active_release_report(verb: &str, release: &Path) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use phoxal_runtime_contract::identity::ParticipantId;
+    use phoxal::identity::ParticipantId;
 
     use super::*;
 
@@ -957,13 +958,13 @@ mod tests {
         )?;
         // A real manifest, because activating a release regenerates the units
         // its process set implies - and that reads this document.
-        let robot = phoxal_model::builder::RobotBuilder::new(tag)
+        let robot = phoxal::model::builder::RobotBuilder::new(tag)
             .service("drive", None)
             .build()
             .expect("a valid canonical robot");
         std::fs::write(
-            release.join(BUNDLE_DIR).join(phoxal_bundle::MANIFEST_FILE),
-            serde_json::to_vec_pretty(&phoxal_model::manifest::ManifestDocument::new(robot))?,
+            release.join(BUNDLE_DIR).join(phoxal::bundle::MANIFEST_FILE),
+            serde_json::to_vec_pretty(&phoxal::model::manifest::ManifestDocument::new(robot))?,
         )?;
         Ok(release)
     }
@@ -972,7 +973,7 @@ mod tests {
     /// unit generator also reads.
     fn active_bundle_tag(roots: &InstallRoots) -> Result<String> {
         let active = active_release(&roots.active)?.context("nothing is active")?;
-        let bundle = phoxal_bundle::RuntimeBundle::open(active.join(BUNDLE_DIR))?;
+        let bundle = phoxal::bundle::RuntimeBundle::open(active.join(BUNDLE_DIR))?;
         Ok(bundle.robot_id().to_string())
     }
 
@@ -1346,8 +1347,8 @@ mod tests {
     /// running release said about itself.
     #[test]
     fn the_graph_is_read_off_the_supervisor_snapshot() {
-        use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
-        use phoxal_runtime_contract::metadata::ParticipantKind;
+        use phoxal::participant::metadata::ParticipantKind;
+        use phoxal::supervisor::api::execution::{Lifecycle, Process, ProcessState};
 
         let process = |name: &str, state| Process {
             participant: ParticipantId::new(name).expect("fixture participant"),

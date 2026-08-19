@@ -18,11 +18,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use phoxal::supervisor::api::execution::{Lifecycle, ProcessState, Snapshot};
 use phoxal_cli_observation::{GraphSplit, LocalRuntimeState, LocalRuntimes};
-use phoxal_client::supervisor::execution::{Lifecycle, ProcessState, Snapshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::attach::Session;
+use crate::attach::Attachment;
 use crate::cli::context::AppContext;
 use crate::cli::exit::ReportedExit;
 use crate::cli::output::diagnostics::{DiagnosticLevel, RuntimeEvent};
@@ -146,11 +146,11 @@ impl Startup {
     /// would refuse a mode the CLI offers.
     pub(crate) async fn await_graph(
         &self,
-        session: &Session,
+        session: &Attachment,
         local: &crate::attach::LocalRuntimeFacts,
         budget: Duration,
     ) -> Result<()> {
-        let mut snapshots = session.snapshots();
+        let mut snapshots = session.handle().snapshots();
         let deadline = tokio::time::Instant::now() + budget;
         loop {
             let observed = snapshots.borrow_and_update().clone();
@@ -165,13 +165,13 @@ impl Startup {
                         bail!("the supervisor stopped publishing snapshots before the graph was ready");
                     }
                 }
-                reason = session.disconnected() => {
+                reason = session.handle().disconnected() => {
                     bail!("the attachment ended before the graph was ready: {reason}")
                 }
                 () = self.cancellation.cancelled() => bail!("startup cancelled"),
                 () = tokio::time::sleep_until(deadline) => bail!(
                     "{}",
-                    self.timeout_message(session.snapshot().as_ref(), &local.read(), budget)
+                    self.timeout_message(session.handle().snapshot().as_ref(), &local.read(), budget)
                 ),
             }
         }
@@ -527,10 +527,10 @@ impl phoxal_cli_project::Reporter for PreparationReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phoxal::identity::{ParticipantId, ProducerId};
+    use phoxal::participant::metadata::ParticipantKind;
+    use phoxal::supervisor::api::execution::Process;
     use phoxal_cli_observation::LocalRuntime;
-    use phoxal_client::supervisor::execution::Process;
-    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
-    use phoxal_runtime_contract::metadata::ParticipantKind;
 
     fn process(participant: &str, state: ProcessState) -> Process {
         Process {

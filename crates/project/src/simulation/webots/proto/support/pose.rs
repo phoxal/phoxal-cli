@@ -10,12 +10,12 @@ pub enum JointType {
     Prismatic,
 }
 
-pub fn has_inertial(link: &phoxal_model::structure::Link) -> bool {
+pub fn has_inertial(link: &phoxal::model::structure::Link) -> bool {
     link.inertial().mass_kg() > 0.0
 }
 
-pub fn convert_joint_type(joint_type: phoxal_model::structure::JointKind) -> Result<JointType> {
-    use phoxal_model::structure::JointKind;
+pub fn convert_joint_type(joint_type: phoxal::model::structure::JointKind) -> Result<JointType> {
+    use phoxal::model::structure::JointKind;
     match joint_type {
         JointKind::Fixed => Ok(JointType::Fixed),
         JointKind::Revolute => Ok(JointType::Revolute),
@@ -28,7 +28,7 @@ pub fn convert_joint_type(joint_type: phoxal_model::structure::JointKind) -> Res
     }
 }
 
-pub fn pose_to_isometry(pose: phoxal_model::structure::Pose) -> nalgebra::Isometry3<f64> {
+pub fn pose_to_isometry(pose: phoxal::model::structure::Pose) -> nalgebra::Isometry3<f64> {
     let [x, y, z] = pose.xyz();
     let [roll, pitch, yaw] = pose.rpy();
     let translation = nalgebra::Translation3::new(x, y, z);

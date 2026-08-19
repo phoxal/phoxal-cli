@@ -1669,12 +1669,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f70749695b063ecbf6b62949ccccde2e733ec3ecbbd71d467dca4e5c6c97cca0"
 
 [[package]]
-name = "glob"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
-
-[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3245,34 +3239,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-bundle"
-version = "0.65.0"
+name = "phoxal"
+version = "0.66.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29f6a69fca65f77e2beeb9ef8bf9edd79f2f4346f5db1bd3261ac972001a5938"
+checksum = "510e2dbd84c97a43884d3f01bd476db815455a315931909d88a7c9e5cae1e0e4"
 dependencies = [
- "phoxal-model",
- "phoxal-runtime-contract",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "phoxal-bus"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85ebc1eacf0cb3742c23c93bb21cb51250b36982028810bc134f7437462b4d3b"
-dependencies = [
+ "anyhow",
+ "clap",
+ "const_format",
  "getrandom 0.3.4",
  "libc",
  "phoxal-macros",
- "phoxal-runtime-contract",
  "rmp-serde",
+ "schemars 1.2.2",
  "serde",
+ "serde_bytes",
  "serde_json",
+ "serde_yaml",
  "thiserror 2.0.20",
  "tokio",
+ "toml 1.1.4+spec-1.1.0",
  "tracing",
+ "tracing-subscriber",
+ "urdf-rs",
  "zenoh",
 ]
 
@@ -3287,16 +3276,12 @@ dependencies = [
  "gilrs",
  "hex",
  "libc",
- "phoxal-bundle",
+ "phoxal",
  "phoxal-cli-catalog",
  "phoxal-cli-host",
  "phoxal-cli-observation",
  "phoxal-cli-project",
  "phoxal-cli-ui",
- "phoxal-client",
- "phoxal-manifest",
- "phoxal-model",
- "phoxal-runtime-contract",
  "reqwest",
  "self-replace",
  "semver",
@@ -3320,15 +3305,14 @@ name = "phoxal-cli-host"
 version = "0.40.0"
 dependencies = [
  "anyhow",
- "phoxal-runtime-contract",
+ "phoxal",
 ]
 
 [[package]]
 name = "phoxal-cli-observation"
 version = "0.40.0"
 dependencies = [
- "phoxal-client",
- "phoxal-runtime-contract",
+ "phoxal",
 ]
 
 [[package]]
@@ -3345,12 +3329,9 @@ dependencies = [
  "nalgebra",
  "object",
  "pathdiff",
- "phoxal-bundle",
+ "phoxal",
  "phoxal-cli-catalog",
  "phoxal-cli-host",
- "phoxal-manifest",
- "phoxal-model",
- "phoxal-runtime-contract",
  "reqwest",
  "semver",
  "serde",
@@ -3369,98 +3350,24 @@ version = "0.40.0"
 dependencies = [
  "anyhow",
  "console",
+ "phoxal",
  "phoxal-cli-observation",
- "phoxal-client",
- "phoxal-runtime-contract",
  "tokio",
  "tracing",
  "tuirealm",
 ]
 
 [[package]]
-name = "phoxal-client"
-version = "0.40.0"
-dependencies = [
- "phoxal-bus",
- "phoxal-protocol",
- "phoxal-runtime-contract",
- "thiserror 2.0.20",
- "tokio",
- "trybuild",
-]
-
-[[package]]
 name = "phoxal-macros"
-version = "0.65.0"
+version = "0.66.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a355ac6605ee6a10d1ceaa9745858c0b7eeb9b819cd05662fe74dfb2808e9da8"
+checksum = "b787e1f7fb43345032ef463510f330451a185bdbdda10b8a6a0266cbc6dcb99a"
 dependencies = [
  "heck",
  "proc-macro2",
  "quote",
  "serde_derive_internals 0.29.1",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "phoxal-manifest"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e4ed05d02201798a20cbed65253d286c5cfc478e4a4a1c61a4781111b23405b"
-dependencies = [
- "phoxal-model",
- "phoxal-runtime-contract",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.20",
- "toml 1.1.4+spec-1.1.0",
- "urdf-rs",
-]
-
-[[package]]
-name = "phoxal-model"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "885f2c11c84c197718e40c145345e6e4d70c0ec587e560d9fcd4545254dd0709"
-dependencies = [
- "phoxal-macros",
- "phoxal-runtime-contract",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "phoxal-protocol"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e3902bc4d04d005a8bb3e0104334996e5aafbe4625d63f0287b7cfb52834aa5"
-dependencies = [
- "phoxal-bus",
- "phoxal-macros",
- "phoxal-model",
- "phoxal-runtime-contract",
- "serde",
- "serde_bytes",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "phoxal-runtime-contract"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53f6444242eac2fe7a3b1c73412462c1acff919604545039908629c6bca5af44"
-dependencies = [
- "const_format",
- "getrandom 0.3.4",
- "libc",
- "serde",
- "serde_bytes",
- "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3623,9 +3530,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.16"
+version = "0.11.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
+checksum = "04759210543be93709136e28212294a659ef5001836ff4eab4d663e4529bba83"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -3857,18 +3764,18 @@ dependencies = [
 
 [[package]]
 name = "ref-cast"
-version = "1.0.26"
+version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "216e8f773d7923bcba9ceb86a86c93cabb3903a11872fc3f138c49630e50b96d"
+checksum = "7e440fb4e4b4147295338efb76001ab9e4efc0e5839df2c47fc5ac2381d365c3"
 dependencies = [
  "ref-cast-impl",
 ]
 
 [[package]]
 name = "ref-cast-impl"
-version = "1.0.26"
+version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c9283685feec7d69af75fb0e858d5e7378f33fe4fc699383b2916ab9273e03c"
+checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4810,12 +4717,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "target-triple"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3a6bfce3d99adfa72d24750a61f782f3036a81e7f86d8841ee1326deaebd171"
-
-[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4826,15 +4727,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "termcolor"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
-dependencies = [
- "winapi-util",
 ]
 
 [[package]]
@@ -5248,21 +5140,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "trybuild"
-version = "1.0.120"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e605bf6b39357663d8ba4e984f8be8da8df6bb32e81031d6889024ea8fd68e4"
-dependencies = [
- "glob",
- "serde",
- "serde_derive",
- "serde_json",
- "target-triple",
- "termcolor",
- "toml 1.1.4+spec-1.1.0",
-]
 
 [[package]]
 name = "tuirealm"
@@ -6743,7 +6620,7 @@ checksum = "aa2b893d79df23bfb12d5461018d408ea19dfafe76c2c7ef6d4eba614f8ff079"
 dependencies = [
  "yoke 0.7.5",
  "zerofrom",
- "zerovec-derive 0.10.3",
+ "zerovec-derive 0.10.4",
 ]
 
 [[package]]
@@ -6754,14 +6631,14 @@ checksum = "94b5c6b5976d66c1d703c4fd17d3f5e43c8cedaacf604961b171adc7130896d8"
 dependencies = [
  "yoke 0.8.3",
  "zerofrom",
- "zerovec-derive 0.11.4",
+ "zerovec-derive 0.11.5",
 ]
 
 [[package]]
 name = "zerovec-derive"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6eafa6dfb17584ea3e2bd6e76e0cc15ad7af12b09abdd1ca55961bed9b1063c6"
+checksum = "3e3c6377872d72510393f688a555d7097b0f741995c7a00f0407f786dd486b2d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6770,9 +6647,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec-derive"
-version = "0.11.4"
+version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47402523226a02bfe5230160dc3ccc089aa6f6f19e7fcbb4e6f824bbb1b4aa62"
+checksum = "9f212a141d820099d57ffafb9569be9617a6f27d3dc881fbee8fb56642f917a9"
 dependencies = [
  "proc-macro2",
  "quote",

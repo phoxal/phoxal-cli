@@ -1,5 +1,5 @@
 use crate::check as graph_check;
-use phoxal_manifest::source::robot::v0::Manifest as RobotManifest;
+use phoxal::authoring::source::robot::v0::Manifest as RobotManifest;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;

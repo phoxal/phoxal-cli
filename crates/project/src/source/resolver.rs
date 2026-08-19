@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use phoxal_manifest::CompiledProject;
-use phoxal_manifest::source::robot::v0::Manifest as Robot;
-use phoxal_model::AssetId;
+use phoxal::authoring::CompiledProject;
+use phoxal::authoring::source::robot::v0::Manifest as Robot;
+use phoxal::model::AssetId;
 
 use phoxal_cli_catalog::ArtifactKind;
 
@@ -63,7 +63,7 @@ pub struct BundlePlan {
 /// process set off the one document it is about to write.
 #[derive(Debug, Clone)]
 pub struct CompiledBundle {
-    pub robot: phoxal_model::Robot,
+    pub robot: phoxal::model::Robot,
     pub assets: BTreeMap<AssetId, Vec<u8>>,
 }
 
@@ -215,29 +215,29 @@ pub fn discover_robot_yaml(start: &Path) -> Result<PathBuf> {
 /// projection point rather than destructuring the versioned enum at every
 /// call site.
 #[must_use]
-pub fn robot_manifest_body(manifest: phoxal_manifest::source::robot::Manifest) -> Robot {
-    let phoxal_manifest::source::robot::Manifest::V0(body) = manifest;
+pub fn robot_manifest_body(manifest: phoxal::authoring::source::robot::Manifest) -> Robot {
+    let phoxal::authoring::source::robot::Manifest::V0(body) = manifest;
     body
 }
 
 /// Parse authored `robot.yaml` text into its exact body.
 pub fn parse_robot_from_string(text: &str) -> Result<Robot> {
     Ok(robot_manifest_body(
-        phoxal_manifest::source::robot::Manifest::parse(text)?,
+        phoxal::authoring::source::robot::Manifest::parse(text)?,
     ))
 }
 
 /// Write an authored `robot.yaml` body back out under its versioned schema
 /// tag.
 pub fn write_robot_to_dir(robot: &Robot, dir: impl AsRef<Path>) -> Result<()> {
-    phoxal_manifest::source::robot::Manifest::V0(robot.clone()).write_to_dir(dir)?;
+    phoxal::authoring::source::robot::Manifest::V0(robot.clone()).write_to_dir(dir)?;
     Ok(())
 }
 
 pub fn load_robot(path: &Path) -> Result<Robot> {
     crate::schema::ensure_supported_revision(path, crate::schema::DocumentKind::Robot)?;
     let robot = robot_manifest_body(
-        phoxal_manifest::source::robot::Manifest::load(path)
+        phoxal::authoring::source::robot::Manifest::load(path)
             .with_context(|| format!("failed to read robot file {}", path.display()))?,
     );
     validate_launch_participant_ids(&robot, path)?;

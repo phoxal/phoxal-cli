@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use phoxal_model::Robot as RobotBundle;
+use phoxal::model::Robot as RobotBundle;
 
 use crate::simulation::webots::proto::{
     self, RobotInstance, WebotsController, externproto_for_generated_proto, generate_robot_proto,

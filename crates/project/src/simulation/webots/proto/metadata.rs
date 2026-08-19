@@ -1,7 +1,7 @@
-use phoxal_model::component::capability::{
+use phoxal::model::component::capability::{
     CameraMode, Capability as PhysicalCapability, EncoderType, LidarOutput,
 };
-use phoxal_model::simulation::{ActuatorType, Capability as SimulationCapability};
+use phoxal::model::simulation::{ActuatorType, Capability as SimulationCapability};
 
 use crate::simulation::webots::proto::scene::WebotsSceneDescription;
 
@@ -219,10 +219,10 @@ fn controller_rate_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_model::component::capability::{
+    use phoxal::model::component::capability::{
         Camera, Encoder, Lidar, Motor, MotorCommand, StructuralTarget,
     };
-    use phoxal_model::simulation;
+    use phoxal::model::simulation;
 
     fn target() -> StructuralTarget {
         StructuralTarget::Link {

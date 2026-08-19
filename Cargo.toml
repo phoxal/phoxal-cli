@@ -8,16 +8,16 @@ documentation = "https://github.com/phoxal/phoxal-cli#readme"
 homepage = "https://github.com/phoxal/phoxal-cli"
 repository = "https://github.com/phoxal/phoxal-cli"
 
-# `cli/` is the one shipped application. `phoxal-client/` is the reusable,
-# unpublished remote-session boundary, and everything under `crates/` is
-# CLI-specific implementation. The framework train owns `phoxal-supervisor`;
-# this workspace only materializes that exact-train package for robot releases.
+# `cli/` is the one shipped application and everything under `crates/` is
+# CLI-specific implementation. The remote-session boundary is no longer one of
+# them: it is `phoxal::session`, owned by the framework train, which also owns
+# `phoxal-supervisor`; this workspace only materializes that exact-train package
+# for robot releases.
 [workspace]
 resolver = "3"
 members = [
     "cli",
     "crates/catalog",
-    "phoxal-client",
     "crates/host",
     "crates/observation",
     "crates/project",
@@ -54,20 +54,16 @@ tracing-subscriber = "0.3.23"
 webots-proto = "0.2.0"
 gilrs = "0.11.2"
 jsonschema = { version = "0.46.6", default-features = false }
-thiserror = "2.0.18"
 
-# The framework train. Every crate in this workspace speaks one train, so the
-# pins live here and nowhere else.
-phoxal-protocol = "0.65"
-phoxal-bundle = "0.65"
-phoxal-bus = "0.65"
-phoxal-manifest = "0.65"
-phoxal-model = "0.65"
-phoxal-runtime-contract = "0.65"
-
-# The external client boundary. Anything in this workspace that speaks to a
-# running robot depends on this and not on the wire crates above.
-phoxal-client = { path = "phoxal-client" }
+# The framework train, as one library. Every crate in this workspace speaks one
+# train, so the pin lives here and nowhere else.
+#
+# `session` is the attachment SDK - `phoxal::session`, the runtime and
+# supervisor contract families, the launch encoder, the participant-metadata
+# reader - and `authoring` is the authored-source layer behind `phoxal build`.
+# The participant profile is deliberately off: the CLI builds and launches
+# participants, it never is one.
+phoxal = { version = "0.66", default-features = false, features = ["session", "authoring"] }
 
 phoxal-cli-catalog = { path = "crates/catalog" }
 phoxal-cli-host = { path = "crates/host" }
@@ -87,3 +83,4 @@ unimplemented = "deny"
 [profile.release]
 lto = false
 codegen-units = 16
+

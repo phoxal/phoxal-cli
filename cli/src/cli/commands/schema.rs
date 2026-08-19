@@ -153,7 +153,7 @@ mod tests {
             EDITOR_COMMENTS.contains(directory),
             "printed comments must name `{directory}`"
         );
-        for kind in phoxal_manifest::source::DocumentKind::ALL {
+        for kind in phoxal::authoring::source::DocumentKind::ALL {
             let name = kind.schema_file_name();
             assert!(
                 EDITOR_COMMENTS.contains(name),

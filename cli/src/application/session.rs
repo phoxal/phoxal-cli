@@ -16,7 +16,7 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use super::launcher::OwnedSession;
-use crate::attach::{Session, SessionPorts};
+use crate::attach::{Attachment, SessionPorts};
 use crate::cli::context::AppContext;
 
 const UI_INGRESS_CAPACITY: usize = 256;
@@ -65,7 +65,7 @@ pub(crate) struct SessionOwnership {
 pub(crate) async fn drive(
     app: &AppContext,
     project: &Path,
-    session: Session,
+    session: Attachment,
     detachable: Detachable,
     ownership: SessionOwnership,
 ) -> Result<AttachmentOutcome> {
@@ -74,7 +74,7 @@ pub(crate) async fn drive(
         supervisor_exit,
     } = ownership;
     let mut owned_supervisor_exit = supervisor_exit;
-    let Session { ports, .. } = &session;
+    let Attachment { ports, .. } = &session;
     let SessionPorts {
         events: _,
         input_commands,

@@ -18,6 +18,9 @@
 //! developed on, so the unit text is proven by reading it rather than by
 //! starting it.
 
+use anyhow::{Context, Result};
+use phoxal::identity::ParticipantId;
+use phoxal::participant::launch::LaunchCommand;
 use phoxal_cli_project::RobotRuntime;
 
 /// The first line every unit this CLI writes carries, and the only ownership
@@ -70,13 +73,32 @@ WantedBy=multi-user.target
 /// One runtime's unit.
 ///
 /// The argv is the process contract and nothing more: the participant id, the
-/// bundle root, and the endpoint the supervisor bound. There is no
-/// `--simulation` here and there never will be - a simulation is a launch
-/// decision an operator makes interactively, and a systemd-managed robot is the
-/// real one.
-#[must_use]
-pub(crate) fn runtime_unit(runtime: &RobotRuntime) -> String {
-    format!(
+/// bundle root, and the endpoint the supervisor bound. It is rendered by the
+/// framework's own launch encoder, so the flags systemd will pass on a device
+/// are the flags the participant's parser accepts, rather than a second
+/// spelling of them kept in this repository. There is no `--simulation` here
+/// and there never will be - a simulation is a launch decision an operator
+/// makes interactively, and a systemd-managed robot is the real one.
+///
+/// # Errors
+///
+/// When the manifest names a runtime whose id is not a launch identity.
+pub(crate) fn runtime_unit(runtime: &RobotRuntime) -> Result<String> {
+    let argv = LaunchCommand::new(
+        participant_id(runtime)?,
+        format!(
+            "{active}/{bundle}",
+            active = phoxal_cli_project::ACTIVE_RUNTIME_ROOT,
+            bundle = phoxal_cli_project::BUNDLE_DIR,
+        ),
+    )
+    .connect(format!(
+        "unixsock-stream/{volatile}/supervisor.sock",
+        volatile = phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
+    ))
+    .argv()
+    .join(" ");
+    Ok(format!(
         r#"{UNIT_MARKER}
 [Unit]
 Description=Phoxal {role} {participant}
@@ -86,8 +108,7 @@ PartOf={supervisor_unit}
 
 [Service]
 Type=simple
-{hardening}ExecStart={active}/{bundle}/bin/{binary} --participant-id {participant} \
- --bundle-root {active}/{bundle} --connect unixsock-stream/{volatile}/supervisor.sock
+{hardening}ExecStart={active}/{bundle}/bin/{binary} {argv}
 
 [Install]
 WantedBy={target}
@@ -99,9 +120,22 @@ WantedBy={target}
         hardening = hardening(),
         active = phoxal_cli_project::ACTIVE_RUNTIME_ROOT,
         bundle = phoxal_cli_project::BUNDLE_DIR,
-        volatile = phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
         target = TARGET_UNIT,
-    )
+    ))
+}
+
+/// One runtime's launch identity, as the framework spells it.
+///
+/// The manifest a bundle carries was written by the compiler out of validated
+/// model ids, so this parse describes a corrupt bundle rather than an operator
+/// mistake.
+fn participant_id(runtime: &RobotRuntime) -> Result<ParticipantId> {
+    ParticipantId::new(runtime.participant_id.clone()).with_context(|| {
+        format!(
+            "the installed manifest names a runtime '{}' whose id is not a launch identity",
+            runtime.participant_id
+        )
+    })
 }
 
 /// The target that names the whole robot, so `service start`/`stop`/`status`
@@ -169,19 +203,22 @@ fn run_directory() -> String {
 ///
 /// The supervisor's own unit is deliberately not here: `service install`
 /// writes it once, and it does not change when the robot does.
-#[must_use]
-pub(crate) fn bundle_units(runtimes: &[RobotRuntime]) -> Vec<(String, String)> {
+///
+/// # Errors
+///
+/// When the manifest names a runtime whose id is not a launch identity.
+pub(crate) fn bundle_units(runtimes: &[RobotRuntime]) -> Result<Vec<(String, String)>> {
     let mut units = runtimes
         .iter()
         .map(|runtime| {
-            (
+            Ok((
                 runtime_unit_name(&runtime.participant_id),
-                runtime_unit(runtime),
-            )
+                runtime_unit(runtime)?,
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     units.push((TARGET_UNIT.to_string(), target_unit(runtimes)));
-    units
+    Ok(units)
 }
 
 /// Whether `name` is a unit file this CLI generates per bundle, so a robot that
@@ -206,7 +243,8 @@ mod tests {
     /// section that lets `systemctl enable` make that true.
     #[test]
     fn the_target_can_be_enabled_so_a_reboot_brings_the_runtimes_back() {
-        let units = bundle_units(&[runtime("brain", "brain", RuntimeRole::Brain)]);
+        let units = bundle_units(&[runtime("brain", "brain", RuntimeRole::Brain)])
+            .expect("the fixture ids are launch identities");
         let (_, target) = units
             .iter()
             .find(|(name, _)| name == TARGET_UNIT)
@@ -226,7 +264,9 @@ mod tests {
         for (name, contents) in bundle_units(&[
             runtime("brain", "brain", RuntimeRole::Brain),
             runtime("left_drive", "ddsm115", RuntimeRole::Driver),
-        ]) {
+        ])
+        .expect("the fixture ids are launch identities")
+        {
             assert!(
                 !contents.contains("RuntimeDirectory="),
                 "{name} must not declare the supervisor's run directory"
@@ -300,10 +340,11 @@ mod tests {
     /// unit must never carry.
     #[test]
     fn a_runtime_unit_carries_exactly_the_process_contract() {
-        let unit = runtime_unit(&runtime("left_drive", "ddsm115", RuntimeRole::Driver));
+        let unit = runtime_unit(&runtime("left_drive", "ddsm115", RuntimeRole::Driver))
+            .expect("the fixture id is a launch identity");
         assert!(
             unit.contains(
-                "ExecStart=/var/phoxal/bundle/bin/ddsm115 --participant-id left_drive \\\n \
+                "ExecStart=/var/phoxal/bundle/bin/ddsm115 --participant-id left_drive \
                  --bundle-root /var/phoxal/bundle --connect \
                  unixsock-stream//run/phoxal/supervisor.sock"
             ),
@@ -327,7 +368,7 @@ mod tests {
     #[test]
     fn every_runtime_unit_lives_and_dies_with_the_supervisor() {
         for runtime in rover() {
-            let unit = runtime_unit(&runtime);
+            let unit = runtime_unit(&runtime).expect("the fixture ids are launch identities");
             for required in [
                 "After=phoxal-supervisor.service",
                 "BindsTo=phoxal-supervisor.service",
@@ -342,8 +383,10 @@ mod tests {
     /// are two units running the same executable under different ids.
     #[test]
     fn two_instances_of_one_driver_type_are_two_units_of_one_binary() {
-        let left = runtime_unit(&runtime("left_drive", "ddsm115", RuntimeRole::Driver));
-        let right = runtime_unit(&runtime("right_drive", "ddsm115", RuntimeRole::Driver));
+        let left = runtime_unit(&runtime("left_drive", "ddsm115", RuntimeRole::Driver))
+            .expect("the fixture id is a launch identity");
+        let right = runtime_unit(&runtime("right_drive", "ddsm115", RuntimeRole::Driver))
+            .expect("the fixture id is a launch identity");
         assert!(
             left.contains("bin/ddsm115 --participant-id left_drive"),
             "{left}"
@@ -359,7 +402,7 @@ mod tests {
     /// them, and every one of it claims this CLI's ownership on its first line.
     #[test]
     fn the_generated_set_is_one_unit_per_runtime_plus_the_target() {
-        let units = bundle_units(&rover());
+        let units = bundle_units(&rover()).expect("the fixture ids are launch identities");
         let names = units
             .iter()
             .map(|(name, _)| name.as_str())

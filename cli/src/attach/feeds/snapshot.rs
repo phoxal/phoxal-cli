@@ -6,17 +6,17 @@
 
 use std::sync::Arc;
 
+use phoxal::session::DisconnectReason;
+use phoxal::supervisor::api::execution::Snapshot;
 use phoxal_cli_observation::{
     AttachmentEvent, ConnectionObservation, LocalRuntimes, ObservationSource, ProcessObservation,
     ProcessTable, SourceStatus, SupervisorObservation,
 };
-use phoxal_client::DisconnectReason;
-use phoxal_client::supervisor::execution::Snapshot;
 
 use super::FeedContext;
 
 pub(crate) async fn run(context: FeedContext) {
-    let mut snapshots = context.client.snapshots();
+    let mut snapshots = context.session.snapshots();
     context
         .health(ObservationSource::Supervisor, SourceStatus::Live)
         .await;
@@ -29,7 +29,7 @@ pub(crate) async fn run(context: FeedContext) {
         }
         tokio::select! {
             () = context.cancellation.cancelled() => return,
-            reason = context.client.disconnected() => {
+            reason = context.session.disconnected() => {
                 // The first terminal cause latches for the connection. Tell the
                 // UI before the event stream ends so it renders the real cause
                 // rather than replacing it with a generic empty-stream error.
@@ -38,7 +38,7 @@ pub(crate) async fn run(context: FeedContext) {
             }
             changed = snapshots.changed() => {
                 if changed.is_err() {
-                    announce_lost(&context, context.client.disconnected().await).await;
+                    announce_lost(&context, context.session.disconnected().await).await;
                     return;
                 }
             }
@@ -104,7 +104,7 @@ fn observation(context: &FeedContext, snapshot: &Snapshot) -> SupervisorObservat
     SupervisorObservation {
         revision: snapshot.revision,
         execution: context.epoch.execution,
-        robot: context.client.connected().robot.clone(),
+        robot: context.session.connected().robot.clone(),
         project: context.project.clone(),
         lifecycle: snapshot.lifecycle,
     }
@@ -112,11 +112,11 @@ fn observation(context: &FeedContext, snapshot: &Snapshot) -> SupervisorObservat
 
 #[cfg(test)]
 mod tests {
+    use phoxal::bus::BusFault;
+    use phoxal::identity::ParticipantId;
+    use phoxal::participant::metadata::ParticipantKind;
+    use phoxal::supervisor::api::execution::{Lifecycle, Process, ProcessState};
     use phoxal_cli_observation::{LocalRuntime, LocalRuntimeState};
-    use phoxal_client::BusFault;
-    use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
-    use phoxal_runtime_contract::identity::ParticipantId;
-    use phoxal_runtime_contract::metadata::ParticipantKind;
 
     use super::*;
 
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn every_disconnect_reason_reaches_the_tui_unchanged() {
         for reason in [
-            DisconnectReason::ConnectionClosed,
+            DisconnectReason::SessionClosed,
             DisconnectReason::SupervisorIdentityLost,
             DisconnectReason::SnapshotStreamFailed {
                 detail: "snapshot subscriber closed".to_string(),

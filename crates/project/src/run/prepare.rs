@@ -385,7 +385,7 @@ fn classify_run_root(root: &Path) -> Result<RunRootKind> {
 /// re-validates config over the staged layout.
 fn run_source_check(
     staged_root: &Path,
-    robot: &phoxal_manifest::source::robot::v0::Manifest,
+    robot: &phoxal::authoring::source::robot::v0::Manifest,
     resolved: &BundlePlan,
     source_participants: &[crate::check::source::SourceParticipant],
     source_artifacts: &SourceArtifacts,

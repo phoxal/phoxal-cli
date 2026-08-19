@@ -405,7 +405,7 @@ impl Worker {
                 )
             })?;
             let requirements =
-                phoxal_manifest::build_requirements::BuildRequirements::from_manifest(
+                phoxal::authoring::build_requirements::BuildRequirements::from_manifest(
                     &source,
                     &manifest_path.display().to_string(),
                 )?;
@@ -428,7 +428,7 @@ impl Worker {
             )?
             .manifest()?;
             let requirements =
-                phoxal_manifest::build_requirements::BuildRequirements::from_manifest(
+                phoxal::authoring::build_requirements::BuildRequirements::from_manifest(
                     &source,
                     &format!("{}@{}", package.package, package.train),
                 )?;

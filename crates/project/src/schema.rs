@@ -11,7 +11,7 @@
 //! tag and a malformed document are not version problems at all and are left to
 //! the strict parser, which already reports them precisely.
 //!
-//! The supported tags are read from the `phoxal-runtime-contract` enums rather
+//! The supported tags are read from the framework's own enums rather
 //! than restated, so a framework rename cannot leave this gate advertising a
 //! spelling nothing speaks.
 

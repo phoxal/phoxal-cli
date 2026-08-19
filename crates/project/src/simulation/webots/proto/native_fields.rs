@@ -3,7 +3,7 @@
 //! Only values that map to real Webots node fields belong here.
 
 use anyhow::{Result, anyhow};
-use phoxal_model::simulation::Capability as SimulationCapability;
+use phoxal::model::simulation::Capability as SimulationCapability;
 
 /// A semantic value for a native Webots field.
 #[derive(Debug, Clone, PartialEq)]
@@ -176,11 +176,11 @@ pub fn native_webots_fields_for_capability(
                     field_name: "projection".to_string(),
                     value: NativeValue::String(
                         match projection {
-                            phoxal_model::simulation::CameraProjection::Planar => "planar",
-                            phoxal_model::simulation::CameraProjection::Cylindrical => {
+                            phoxal::model::simulation::CameraProjection::Planar => "planar",
+                            phoxal::model::simulation::CameraProjection::Cylindrical => {
                                 "cylindrical"
                             }
-                            phoxal_model::simulation::CameraProjection::Spherical => "spherical",
+                            phoxal::model::simulation::CameraProjection::Spherical => "spherical",
                         }
                         .to_string(),
                     ),
@@ -304,7 +304,7 @@ pub fn native_webots_fields_for_capability(
 
 /// Emits the native Webots motor-specific fields (acceleration, controlPID).
 pub fn native_webots_motor_fields(
-    cfg: &phoxal_model::simulation::Motor,
+    cfg: &phoxal::model::simulation::Motor,
 ) -> Result<NativeWebotsFields> {
     let mut fields = NativeWebotsFields::default();
     if let Some(acc) = cfg.acceleration_radps2 {

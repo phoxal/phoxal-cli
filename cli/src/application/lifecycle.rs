@@ -23,9 +23,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use phoxal::bus::BusError;
+use phoxal::session::{ConnectError, ConnectOptions, Session};
+use phoxal::supervisor::api::execution::Snapshot;
 use phoxal_cli_observation::GraphSplit;
-use phoxal_client::supervisor::execution::Snapshot;
-use phoxal_client::{BusError, ConnectError, ConnectOptions, Connection};
 
 use super::launcher::{
     self, LaunchedRuntime, OwnedSession, RecordedProcess, RecordedRuntime, Selection, SessionRecord,
@@ -34,7 +35,7 @@ use super::session::{self, Detachable, SessionOwnership};
 use super::startup::Startup;
 use super::summary::{SessionSummary, attachment_ending};
 use super::supervisor::{self, LaunchedSupervisor};
-use crate::attach::{CLIENT_PARTICIPANT, LocalRuntimeFacts, Session};
+use crate::attach::{Attachment, CLIENT_PARTICIPANT, LocalRuntimeFacts};
 use crate::cli::context::AppContext;
 use crate::cli::exit::ReportedExit;
 use crate::cli::output::welcome::{Mode, StepId};
@@ -147,7 +148,7 @@ pub(crate) async fn start_command(
 
 /// One launched session: everything this client started, plus its attachment.
 pub(crate) struct LaunchedSession {
-    pub(crate) session: Session,
+    pub(crate) session: Attachment,
     supervisor: LaunchedSupervisor,
     /// Re-reads this client's own children so the dashboard and the startup
     /// checklist can say why an absent runtime is absent.
@@ -168,6 +169,7 @@ impl LaunchedSession {
     /// `None` when the whole robot is up.
     fn absent_runtimes(&self) -> Option<String> {
         self.session
+            .handle()
             .snapshot()
             .and_then(|snapshot| GraphSplit::from(&snapshot).absent_line())
     }
@@ -254,7 +256,7 @@ pub(crate) async fn launch_execution(
     let local = LocalRuntimeFacts::default();
     let children = tokio::spawn(watch_children(runtimes, local.clone()));
     let launched = LaunchedSession {
-        session: Session::open(
+        session: Attachment::open(
             &target.endpoint,
             target.project.display().to_string(),
             local,
@@ -433,8 +435,7 @@ async fn watch_children(mut runtimes: Vec<LaunchedRuntime>, local: LocalRuntimeF
                     status: format!("could not be inspected: {error}"),
                 },
             };
-            let Ok(participant) =
-                phoxal_runtime_contract::identity::ParticipantId::new(runtime.participant.clone())
+            let Ok(participant) = phoxal::identity::ParticipantId::new(runtime.participant.clone())
             else {
                 continue;
             };
@@ -483,9 +484,9 @@ fn already_live_message(target: &Target) -> String {
 /// A robot that answered and disagreed about the framework is emphatically not
 /// "no execution here": reading it as one would start a second supervisor beside a
 /// robot that is already running.
-async fn probe(endpoint: &str) -> Result<Option<Connection>> {
-    match Connection::connect(&ConnectOptions::new(endpoint, CLIENT_PARTICIPANT)).await {
-        Ok(connection) => Ok(Some(connection)),
+async fn probe(endpoint: &str) -> Result<Option<Session>> {
+    match Session::connect(&ConnectOptions::new(endpoint, CLIENT_PARTICIPANT)).await {
+        Ok(session) => Ok(Some(session)),
         Err(error) => {
             let error = anyhow::Error::new(error);
             if classify_connect_at(endpoint, &error) == ConnectFailure::RetryableAbsence {
@@ -602,12 +603,11 @@ pub(crate) async fn await_supervisor(
         if let Some(status) = launched.exited()? {
             bail!(launched.early_exit_message(status));
         }
-        match Connection::connect(&ConnectOptions::new(&target.endpoint, CLIENT_PARTICIPANT)).await
-        {
-            Ok(connection) => {
+        match Session::connect(&ConnectOptions::new(&target.endpoint, CLIENT_PARTICIPANT)).await {
+            Ok(session) => {
                 // This probe exists to learn that the supervisor is answering;
-                // the session opens its own attachment.
-                let _ = connection.close().await;
+                // the attachment opens its own session.
+                let _ = session.close().await;
                 return Ok(());
             }
             Err(error) => {
@@ -647,7 +647,7 @@ async fn open_existing(
     app: &AppContext,
     requested_target: Option<&Path>,
     endpoint: Option<String>,
-) -> Result<(Target, Session)> {
+) -> Result<(Target, Attachment)> {
     let target = match endpoint {
         Some(endpoint) => Target::at_endpoint(
             endpoint,
@@ -655,7 +655,7 @@ async fn open_existing(
         ),
         None => Target::resolve(requested_target, app.project.root())?,
     };
-    let session = Session::open(
+    let session = Attachment::open(
         &target.endpoint,
         target.project.display().to_string(),
         LocalRuntimeFacts::default(),
@@ -736,6 +736,7 @@ pub(crate) async fn status_command(
 ) -> Result<()> {
     let (target, session) = open_existing(app, requested_target, endpoint).await?;
     let snapshot = session
+        .handle()
         .snapshot()
         .context("the supervisor answered connect but published no snapshot")?;
     let record = SessionRecord::read(&target.paths());
@@ -754,7 +755,7 @@ pub(crate) async fn status_command(
 /// this CLI did not launch.
 pub(crate) fn render_status(
     snapshot: &Snapshot,
-    connected: &phoxal_client::Connected,
+    connected: &phoxal::session::ConnectedExecution,
     record: Option<&SessionRecord>,
 ) -> Vec<String> {
     let mut lines = vec![
@@ -781,7 +782,10 @@ pub(crate) async fn logs_command(
     follow: bool,
 ) -> Result<()> {
     let (_, session) = open_existing(app, requested_target, endpoint).await?;
-    let page = session.logs(participant.clone(), 256, None).await?;
+    let page = session
+        .handle()
+        .logs(participant.clone(), 256, None)
+        .await?;
     let records = page.records;
     if records.is_empty() {
         eprintln!("no retained log records");
@@ -802,8 +806,8 @@ pub(crate) async fn logs_command(
 /// is what following it was for; Ctrl+C is the operator saying they have seen
 /// enough. Neither is an error, and both leave through the same return so the
 /// session is shut down rather than abandoned at process exit.
-async fn follow_logs(session: &Session, participant: Option<&str>) {
-    let stream = match session.follow_logs().await {
+async fn follow_logs(session: &Attachment, participant: Option<&str>) {
+    let stream = match session.handle().follow_logs().await {
         Ok(stream) => stream,
         Err(error) => {
             eprintln!("failed to follow the log stream: {error:#}");
@@ -832,7 +836,7 @@ async fn follow_logs(session: &Session, participant: Option<&str>) {
     }
 }
 
-fn render_log(record: &phoxal_client::supervisor::logs::Record) -> String {
+fn render_log(record: &phoxal::supervisor::api::logs::Record) -> String {
     let mut line = format!(
         "[{}] {:?}: {}",
         record.participant_id, record.level, record.message
@@ -869,10 +873,10 @@ pub(crate) fn report_outcome(
 
 #[cfg(test)]
 mod tests {
-    use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
-    use phoxal_client::{BusError, QueryError};
-    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId, RobotId};
-    use phoxal_runtime_contract::metadata::ParticipantKind;
+    use phoxal::bus::{BusError, QueryError};
+    use phoxal::identity::{ParticipantId, ProducerId, RobotId};
+    use phoxal::participant::metadata::ParticipantKind;
+    use phoxal::supervisor::api::execution::{Lifecycle, Process, ProcessState};
 
     use super::*;
 
@@ -891,11 +895,11 @@ mod tests {
         }
     }
 
-    fn connected() -> phoxal_client::Connected {
-        phoxal_client::Connected {
-            execution: phoxal_runtime_contract::identity::ExecutionId::mint(),
+    fn connected() -> phoxal::session::ConnectedExecution {
+        phoxal::session::ConnectedExecution {
+            execution: phoxal::identity::ExecutionId::mint(),
             robot: RobotId::new("rover").expect("fixture robot"),
-            framework: phoxal_runtime_contract::version::FrameworkVersion::CURRENT,
+            framework: phoxal::version::FrameworkVersion::CURRENT,
         }
     }
 
@@ -949,9 +953,9 @@ mod tests {
 
     fn mismatch() -> anyhow::Error {
         ConnectError::IncompatibleFramework {
-            remote: phoxal_runtime_contract::version::FrameworkVersion::new(0, 57, 0),
-            client: phoxal_runtime_contract::version::FrameworkVersion::new(0, 56, 2),
-            refusal: phoxal_client::CompatibilityRefusal::RemoteNewer,
+            remote: phoxal::version::FrameworkVersion::new(0, 57, 0),
+            local: phoxal::version::FrameworkVersion::new(0, 56, 2),
+            refusal: phoxal::session::CompatibilityRefusal::RemoteNewer,
         }
         .into()
     }
@@ -969,7 +973,7 @@ mod tests {
             ConnectFailure::RetryableAbsence
         );
 
-        let execution = phoxal_runtime_contract::identity::ExecutionId::mint();
+        let execution = phoxal::identity::ExecutionId::mint();
         for fatal in [
             ConnectError::MultipleExecutions {
                 endpoint: "tcp/127.0.0.1:7447".to_string(),
@@ -1064,12 +1068,12 @@ mod tests {
             ConnectError::MultipleExecutions {
                 endpoint: "tcp/127.0.0.1:7447".to_string(),
                 count: 2,
-                executions: vec![phoxal_runtime_contract::identity::ExecutionId::mint()],
+                executions: vec![phoxal::identity::ExecutionId::mint()],
             },
             ConnectError::IncompatibleFramework {
-                remote: phoxal_runtime_contract::version::FrameworkVersion::new(0, 57, 0),
-                client: phoxal_runtime_contract::version::FrameworkVersion::new(0, 56, 2),
-                refusal: phoxal_client::CompatibilityRefusal::RemoteNewer,
+                remote: phoxal::version::FrameworkVersion::new(0, 57, 0),
+                local: phoxal::version::FrameworkVersion::new(0, 56, 2),
+                refusal: phoxal::session::CompatibilityRefusal::RemoteNewer,
             },
             ConnectError::UnreadableBootstrap {
                 detail: "phoxal/supervisor-connect/v1".to_string(),
@@ -1088,7 +1092,7 @@ mod tests {
     fn a_mismatch_reaches_the_operator_without_the_start_one_advice() {
         let described = format!("{:#}", describe_missing_execution(mismatch(), &target()));
         assert!(described.contains("remote framework 0.57.0"), "{described}");
-        assert!(described.contains("client framework 0.56.2"), "{described}");
+        assert!(described.contains("local framework 0.56.2"), "{described}");
         assert!(!described.contains("Start one with"), "{described}");
     }
 
@@ -1154,7 +1158,7 @@ mod tests {
             );
         }
         assert!(
-            existing_half.contains("Session::open"),
+            existing_half.contains("Attachment::open"),
             "the existing-execution commands attach and nothing else"
         );
     }

@@ -8,7 +8,7 @@ publish = ["phoxal-internal"]
 
 [dependencies]
 anyhow = { workspace = true }
-phoxal-runtime-contract = { workspace = true }
+phoxal = { workspace = true }
 
 [lints]
 workspace = true

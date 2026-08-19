@@ -6,7 +6,7 @@ use crate::simulation::prepare::stage_simulation_world;
 use crate::simulation::webots::root;
 use anyhow::Context;
 use anyhow::Result;
-use phoxal_bundle::RuntimeBundle;
+use phoxal::bundle::RuntimeBundle;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -57,8 +57,8 @@ pub(crate) fn stage_simulation_for_robot(
 }
 
 fn stage_compiled_geometry_assets(
-    robot: &phoxal_model::Robot,
-    assets: &phoxal_bundle::ParticipantAssets,
+    robot: &phoxal::model::Robot,
+    assets: &phoxal::bundle::ParticipantAssets,
     mesh_root: &Path,
 ) -> Result<()> {
     // Geometry staging runs before `stage_simulation_world`, while the fresh
@@ -99,7 +99,7 @@ fn stage_compiled_geometry_assets(
 }
 
 fn validate_unique_geometry_destinations<'a>(
-    assets: impl IntoIterator<Item = &'a phoxal_model::AssetId>,
+    assets: impl IntoIterator<Item = &'a phoxal::model::AssetId>,
 ) -> Result<()> {
     let mut destinations = std::collections::BTreeMap::new();
     for asset in assets {
@@ -125,8 +125,8 @@ mod tests {
 
     #[test]
     fn distinct_geometry_ids_cannot_overwrite_one_staged_path() -> Result<()> {
-        let prefixed = phoxal_model::AssetId::new("meshes/wheel/body.stl".to_string())?;
-        let unprefixed = phoxal_model::AssetId::new("wheel/body.stl".to_string())?;
+        let prefixed = phoxal::model::AssetId::new("meshes/wheel/body.stl".to_string())?;
+        let unprefixed = phoxal::model::AssetId::new("wheel/body.stl".to_string())?;
         let error = validate_unique_geometry_destinations([&prefixed, &unprefixed])
             .expect_err("both identifiers normalize to one Webots path");
         assert!(error.to_string().contains("same staged path"));

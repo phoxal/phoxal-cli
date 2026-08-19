@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use phoxal_runtime_contract::rendezvous::RuntimeRendezvous;
+use phoxal::supervisor::rendezvous::RuntimeRendezvous;
 
 /// The single CLI executable distributed by this repository.
 pub const CLIENT_BINARY: &str = "phoxal";

@@ -1,7 +1,7 @@
 //! The execution-level observation, projected from one supervisor snapshot.
 
-use phoxal_client::supervisor::execution::Lifecycle;
-use phoxal_runtime_contract::identity::{ExecutionId, RobotId};
+use phoxal::identity::{ExecutionId, RobotId};
+use phoxal::supervisor::api::execution::Lifecycle;
 
 /// What an attached client knows about the execution as a whole.
 ///

@@ -4,8 +4,8 @@ use std::path::Path;
 
 pub use crate::source::host_target_triple;
 use anyhow::{Context, Result, anyhow};
+use phoxal::authoring::source::robot::v0::Manifest as Robot;
 use phoxal_cli_catalog::{ArtifactKind, Catalog, OfficialRuntime};
-use phoxal_manifest::source::robot::v0::Manifest as Robot;
 
 /// The provider every official Phoxal package uses in catalog identities.
 const PHOXAL_PROVIDER: &str = "phoxal";
@@ -157,7 +157,7 @@ pub(crate) fn resolve_with_locked_project_using_registry_cache(
         .collect::<BTreeMap<_, _>>();
     let robot_manifest = project_root.join("robot.yaml");
     let compiled = CompiledBundle::from_project(
-        phoxal_manifest::SourceSet {
+        phoxal::authoring::SourceSet {
             project_root: project_root.to_path_buf(),
             robot_manifest,
             component_roots,
@@ -214,11 +214,11 @@ fn short_name(package: &str, kind: ArtifactKind) -> String {
 
 /// The official service identities the manifest compiler merges into the
 /// authored `services:` map.
-fn official_service_ids() -> Vec<phoxal_model::identity::ServiceId> {
+fn official_service_ids() -> Vec<phoxal::model::identity::ServiceId> {
     Catalog::official()
         .service_identities()
         .into_iter()
-        .filter_map(|id| phoxal_model::identity::ServiceId::new(id).ok())
+        .filter_map(|id| phoxal::model::identity::ServiceId::new(id).ok())
         .collect()
 }
 
@@ -550,7 +550,7 @@ pub fn resolve_target_triple(selector: &str) -> Result<String> {
     })
 }
 
-fn join_errors(errors: Vec<phoxal_manifest::source::robot::v0::ValidationError>) -> String {
+fn join_errors(errors: Vec<phoxal::authoring::source::robot::v0::ValidationError>) -> String {
     errors
         .iter()
         .map(ToString::to_string)

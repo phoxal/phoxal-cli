@@ -5,7 +5,7 @@ use webots_proto::r2025a::{
 use crate::simulation::webots::proto::scene::WebotsSceneDescription;
 use crate::simulation::webots::proto::support::paths::staged_geometry_path;
 use crate::simulation::webots::proto::types::StagedCollision;
-use phoxal_model::structure::Geometry;
+use phoxal::model::structure::Geometry;
 
 impl WebotsSceneDescription {
     pub fn render_visual(

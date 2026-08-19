@@ -8,7 +8,7 @@ use crate::check::source::SourceParticipantKind;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_runtime_contract::version::FrameworkVersion;
+use phoxal::version::FrameworkVersion;
 use std::path::Path;
 
 /// Read a source participant's report from the exact executable Cargo selected
@@ -60,9 +60,9 @@ pub(crate) fn report_source_build_progress(ui: Option<&dyn crate::Reporter>, mes
 /// The expected `artifact.kind` label for a [`SourceParticipant`]'s kind.
 pub(crate) fn expected_kind_for_source_participant(kind: SourceParticipantKind) -> &'static str {
     match kind.shared_kind() {
-        phoxal_runtime_contract::metadata::ParticipantKind::Brain => "brain",
-        phoxal_runtime_contract::metadata::ParticipantKind::Service => "service",
-        phoxal_runtime_contract::metadata::ParticipantKind::Driver => "driver",
+        phoxal::participant::metadata::ParticipantKind::Brain => "brain",
+        phoxal::participant::metadata::ParticipantKind::Service => "service",
+        phoxal::participant::metadata::ParticipantKind::Driver => "driver",
     }
 }
 

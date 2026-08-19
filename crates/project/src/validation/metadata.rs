@@ -6,7 +6,7 @@ use crate::source::resolver::ResolvedPlatformRuntime;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use phoxal_runtime_contract::version::FrameworkVersion;
+use phoxal::version::FrameworkVersion;
 use std::path::Path;
 
 /// Extract one official runtime's participant report straight from its
@@ -102,9 +102,8 @@ mod tests {
     fn meta(id: &str) -> participant_metadata::ParticipantMeta {
         participant_metadata::ParticipantMeta {
             framework: participant_metadata::FIXTURE_FRAMEWORK,
-            id: phoxal_runtime_contract::identity::ParticipantArtifactId::new(id)
-                .expect("fixture artifact id"),
-            kind: phoxal_runtime_contract::metadata::ParticipantKind::Service,
+            id: phoxal::identity::ParticipantArtifactId::new(id).expect("fixture artifact id"),
+            kind: phoxal::participant::metadata::ParticipantKind::Service,
             config_schema: serde_json::json!({"type": "object", "properties": {"speed": {"type": "integer"}}}),
         }
     }

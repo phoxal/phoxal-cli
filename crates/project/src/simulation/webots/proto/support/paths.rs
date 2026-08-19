@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 
 #[must_use]
-pub fn staged_geometry_path(asset: &phoxal_model::AssetId) -> &str {
+pub fn staged_geometry_path(asset: &phoxal::model::AssetId) -> &str {
     asset
         .as_str()
         .strip_prefix("meshes/")

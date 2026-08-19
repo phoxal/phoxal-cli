@@ -113,11 +113,11 @@ impl LogStore {
 
 #[cfg(test)]
 mod tests {
+    use phoxal::identity::ExecutionId;
     use phoxal_cli_observation::{
         LogFilters, LogQuery, ObservationQuery, QueryToken, StoreRevision,
     };
     use phoxal_cli_observation::{LogSeverity, LogSource};
-    use phoxal_runtime_contract::identity::ExecutionId;
 
     use super::*;
 

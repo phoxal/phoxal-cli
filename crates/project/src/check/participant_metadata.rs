@@ -1,7 +1,7 @@
 //! Project participant metadata: reading a binary's embedded contract, and
 //! validating it against the framework the project selected.
 //!
-//! A `#[phoxal::brain]`/`service`/`driver`/`simulator` attribute embeds one JSON
+//! A `#[phoxal::brain]`/`service`/`driver` attribute embeds one JSON
 //! manifest per participant binary in a dedicated linker section -
 //! `__DATA,__phoxal_meta` on Mach-O,
 //! `.phoxal_meta` everywhere else (`phoxal-macros/src/authoring.rs`'s
@@ -29,8 +29,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use object::{Object, ObjectSection};
-use phoxal_runtime_contract::metadata::{ParticipantContract, ParticipantMetadata};
-use phoxal_runtime_contract::version::FrameworkVersion;
+use phoxal::participant::metadata::{ParticipantContract, ParticipantMetadata};
+use phoxal::version::FrameworkVersion;
 
 /// One binary's embedded contract: the tagged `V0` document destructured into
 /// the fields callers actually branch on.
@@ -55,7 +55,7 @@ pub const SECTION_NAMES: [&str; 2] = [".phoxal_meta", "__phoxal_meta"];
 /// name in [`SECTION_NAMES`] in turn. `Ok(None)` means the object file parsed
 /// fine but carries no such section at all. Every binary this module is asked
 /// to inspect is expected to be a compiled `#[phoxal::brain]`/`service`/
-/// `driver`/`simulator` participant, so a missing section is NOT a valid
+/// `driver` participant, so a missing section is NOT a valid
 /// "no participant attribute" shape here - see
 /// [`extract_participant_metadata_from_bytes`], which turns `None` into a
 /// hard error rather than a synthesized identity. A malformed/unrecognized
@@ -96,8 +96,8 @@ pub fn extract_participant_metadata_from_bytes(
     let bytes = read_meta_section(object_bytes, describe)?.ok_or_else(|| {
         anyhow::anyhow!(
             "{describe} carries no phoxal participant metadata section ({}); it is not a \
-             compiled #[phoxal::brain]/#[phoxal::service]/#[phoxal::driver]/#[phoxal::simulator] \
-             participant binary, or it is stale and needs rebuilding",
+             compiled #[phoxal::brain]/#[phoxal::service]/#[phoxal::driver] participant \
+             binary, or it is stale and needs rebuilding",
             SECTION_NAMES.join(" or ")
         )
     })?;
@@ -405,7 +405,7 @@ pub(crate) fn synthesize_host_participant_object(payload: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal_runtime_contract::metadata::ParticipantKind;
+    use phoxal::participant::metadata::ParticipantKind;
 
     #[test]
     fn malformed_object_file_fails_with_a_clear_error() -> Result<()> {
@@ -468,8 +468,8 @@ mod tests {
     /// to satisfy.
     fn current_record(id: &str) -> serde_json::Value {
         serde_json::to_value(
-            phoxal_runtime_contract::emit::ParticipantMetadataRecord::V0 {
-                contract: phoxal_runtime_contract::emit::ParticipantContractRecord {
+            phoxal::participant::metadata::ParticipantMetadataRecord::V0 {
+                contract: phoxal::participant::metadata::ParticipantContractRecord {
                     framework: FIXTURE_FRAMEWORK,
                     id,
                     kind: ParticipantKind::Service,

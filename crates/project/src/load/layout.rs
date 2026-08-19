@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::check::participant_metadata::{ExpectedTarget, inspect_selected_binary_for_target};
 use crate::runtimes::robot_binaries;
 use anyhow::{Context, Result};
-use phoxal_bundle::RuntimeBundle;
+use phoxal::bundle::RuntimeBundle;
 
 /// Open the one persisted document and prove every executable the robot
 /// launches is present, built for the requested target, and declaring the
@@ -21,7 +21,7 @@ pub(crate) fn validate_runtime_bundle(
 ) -> Result<RuntimeBundle> {
     let bundle = RuntimeBundle::open(root).context("failed to read manifest.json")?;
     for binary in robot_binaries(bundle.robot()) {
-        let path = root.join(phoxal_bundle::BIN_DIR).join(&binary);
+        let path = root.join(phoxal::bundle::BIN_DIR).join(&binary);
         let embedded = inspect_selected_binary_for_target(&path, &expected)
             .with_context(|| format!("failed to inspect bundle runtime '{binary}'"))?;
         anyhow::ensure!(
