@@ -1,7 +1,9 @@
 //! Config responsibilities for check.
 
 use crate::check as graph_check;
+use anyhow::{Context, Result};
 use phoxal::authoring::source::robot::v0::Manifest as RobotManifest;
+use phoxal::model::connection::ConnectionKind;
 use serde_json::Value;
 
 pub(crate) fn validate_user_service_config(
@@ -15,25 +17,101 @@ pub(crate) fn validate_user_service_config(
     let config = robot
         .and_then(|robot| robot.services.get(service_id))
         .and_then(|service| service.config.clone());
-    validate_user_runtime_config(service_id, schema, config.as_ref(), "services")
+    validate_authored_config(
+        graph_check::ConfigOwner::UserService,
+        service_id,
+        schema,
+        config.as_ref(),
+        &format!("services.{service_id}.config"),
+    )
 }
 
-/// Validate one declared user runtime's authored config against its embedded
-/// schema, with the declaring map (`services`) in the diagnostic path.
-/// The config value is passed in, never looked up again.
-pub(crate) fn validate_user_runtime_config(
+/// Validate one driven component instance's whole `driver:` block against the
+/// contract its driver binary embeds: the driver-owned `config` against that
+/// binary's emitted schema, and the authored `connection` against the one kind
+/// the binary declared it accepts.
+///
+/// Both halves are the same failure seen at two moments. A driver launched
+/// against a block it cannot read refuses to start before its bus opens, so
+/// every path that already holds the binary's contract - `validate`, `build`,
+/// `run` - owes the operator that answer while the project is still on the
+/// desk.
+///
+/// # Errors
+///
+/// When the authored document declares no `driver:` block for an instance a
+/// driver participant was nonetheless resolved for. That is resolution
+/// disagreeing with the document it resolved from, not a user mistake.
+pub(crate) fn validate_component_driver_block(
+    instance: &str,
+    artifact_id: &str,
+    schema: Option<&Value>,
+    declared_connection: Option<ConnectionKind>,
+    robot: Option<&RobotManifest>,
+) -> Result<Vec<graph_check::Problem>> {
+    // No authored document in hand means there is nothing to compare the
+    // binary against; the callers that check driver blocks always carry one.
+    let Some(robot) = robot else {
+        return Ok(Vec::new());
+    };
+    let driver = robot
+        .robot
+        .components
+        .get(instance)
+        .and_then(|component| component.driver.as_ref())
+        .with_context(|| {
+            format!(
+                "component driver '{artifact_id}' was resolved for component instance \
+                 '{instance}', but the authored robot document declares no driver block under \
+                 robot.components.{instance}"
+            )
+        })?;
+
+    let mut problems = Vec::new();
+    if let Some(problem) = validate_authored_config(
+        graph_check::ConfigOwner::ComponentDriver,
+        instance,
+        schema,
+        driver.config.as_ref(),
+        &format!("components.{instance}.driver.config"),
+    ) {
+        problems.push(problem);
+    }
+    // A driver that declared no kind takes the whole connection and decides
+    // for itself, so there is nothing to disagree with.
+    if let Some(declared) = declared_connection
+        && driver.connection.kind() != declared
+    {
+        problems.push(graph_check::Problem::ConnectionKindMismatch {
+            instance: instance.to_string(),
+            artifact_id: artifact_id.to_string(),
+            declared,
+            authored: driver.connection.kind(),
+        });
+    }
+    Ok(problems)
+}
+
+/// Validate one authored config value against the embedded schema of the
+/// binary that will read it, reporting failures under `path` - the exact
+/// authored location an operator edits (`services.avoid.config`,
+/// `components.left_drive.driver.config`). The config value is passed in,
+/// never looked up again.
+pub(crate) fn validate_authored_config(
+    owner: graph_check::ConfigOwner,
     runtime_id: &str,
     schema: Option<&Value>,
     config: Option<&Value>,
-    family: &str,
+    path: &str,
 ) -> Option<graph_check::Problem> {
     let schema = schema?;
     let config = config.cloned().unwrap_or(Value::Null);
-    let errors = validate_json_schema(schema, &config, &format!("{family}.{runtime_id}.config"));
+    let errors = validate_json_schema(schema, &config, path);
     if errors.is_empty() {
         None
     } else {
         Some(graph_check::Problem::InvalidConfig {
+            owner,
             runtime_id: runtime_id.to_string(),
             errors,
         })
@@ -66,13 +144,16 @@ pub(crate) fn validate_json_schema(schema: &Value, value: &Value, path: &str) ->
 
 #[cfg(test)]
 mod tests {
-    use crate::check::Problem;
     use crate::check::source::SourceParticipant;
+    use crate::check::{ConfigOwner, Problem};
     use crate::validation::{
-        CheckGraphContext, CheckOutcome, RawArtifact, RawParticipantReport, run_check_with_context,
+        CheckGraphContext, CheckOutcome, PlatformArtifactRef, RawArtifact, RawParticipantReport,
+        run_check_with_context,
     };
     use anyhow::{Result, bail};
     use phoxal::authoring::source::robot::v0::Manifest as Robot;
+    use phoxal::model::connection::ConnectionKind;
+    use phoxal_cli_catalog::ArtifactKind;
     use serde_json::Value;
     use std::path::PathBuf;
 
@@ -96,6 +177,7 @@ robot:
       mount_link: left_wheel
       driver:
         connection: { type: can, bus: 0, node_id: 1 }
+        config: { reduction: 20 }
     right_drive:
       component: ddsm115
       mount_link: right_wheel
@@ -124,6 +206,7 @@ services:
                 id: id.to_string(),
             },
             config_schema: None,
+            connection: None,
         }
     }
 
@@ -145,6 +228,7 @@ services:
                 "properties": { "gain": { "type": "number", "format": "double" } },
                 "required": ["gain"]
             })),
+            connection: None,
         };
         assert_eq!(
             emitted.config_schema,
@@ -178,7 +262,11 @@ services:
                 .problems
                 .iter()
                 .find(|problem| matches!(problem, Problem::InvalidConfig { .. })),
-            Some(Problem::InvalidConfig { runtime_id, errors })
+            Some(Problem::InvalidConfig {
+                owner: ConfigOwner::UserService,
+                runtime_id,
+                errors,
+            })
                 if runtime_id == "avoid"
                     && errors.iter().any(|error| error.contains("gain"))
         ));
@@ -190,7 +278,11 @@ services:
                 .problems
                 .iter()
                 .find(|problem| matches!(problem, Problem::InvalidConfig { .. })),
-            Some(Problem::InvalidConfig { runtime_id, errors })
+            Some(Problem::InvalidConfig {
+                owner: ConfigOwner::UserService,
+                runtime_id,
+                errors,
+            })
                 if runtime_id == "avoid"
                     && errors.iter().any(|error| error.contains("gain"))
         ));
@@ -271,7 +363,11 @@ services:
                 .problems
                 .iter()
                 .find(|problem| matches!(problem, Problem::InvalidConfig { .. })),
-            Some(Problem::InvalidConfig { runtime_id, errors })
+            Some(Problem::InvalidConfig {
+                owner: ConfigOwner::UserService,
+                runtime_id,
+                errors,
+            })
                 if runtime_id == "required"
                     && errors.iter().any(|error| error.contains("null"))
         ));
@@ -331,7 +427,13 @@ services:
             },
         )?;
 
-        let [Problem::InvalidConfig { runtime_id, errors }] = outcome.report.problems.as_slice()
+        let [
+            Problem::InvalidConfig {
+                owner: ConfigOwner::UserService,
+                runtime_id,
+                errors,
+            },
+        ] = outcome.report.problems.as_slice()
         else {
             panic!(
                 "expected one InvalidConfig problem, got {:?}",
@@ -353,6 +455,252 @@ services:
                 .any(|error| error.to_ascii_lowercase().contains("additional properties")),
             "{errors:?}"
         );
+        Ok(())
+    }
+
+    fn fixture_robot() -> Result<Robot> {
+        crate::source::resolver::parse_robot_from_string(LAUNCH_PLAN_FIXTURE_ROBOT)
+    }
+
+    /// The report a compiled `ddsm115` driver binary emits.
+    fn raw_driver(
+        connection: Option<ConnectionKind>,
+        config_schema: Option<Value>,
+    ) -> RawParticipantReport {
+        RawParticipantReport {
+            artifact: RawArtifact {
+                kind: "driver".to_string(),
+                id: "ddsm115".to_string(),
+            },
+            config_schema,
+            connection,
+        }
+    }
+
+    /// The two ways one component driver reaches the check engine.
+    #[derive(Clone, Copy, Debug)]
+    enum Arrival {
+        /// A registry-materialized artifact, fetched once and keyed per
+        /// declaring instance.
+        RegistryRef,
+        /// A workspace `components/<id>` crate, built from source.
+        WorkspaceSource,
+    }
+
+    const ARRIVALS: [Arrival; 2] = [Arrival::RegistryRef, Arrival::WorkspaceSource];
+
+    /// Drive the check engine with one `ddsm115` driver bound to `left_drive`,
+    /// arriving the stated way. Both shapes carry the same binary and the same
+    /// authored block, so any verdict that differs between them is a second
+    /// code path, which is exactly what must not exist.
+    fn check_left_drive(
+        arrival: Arrival,
+        robot: &Robot,
+        report: &RawParticipantReport,
+    ) -> Result<CheckOutcome> {
+        match arrival {
+            Arrival::RegistryRef => run_check_with_context(
+                &[PlatformArtifactRef {
+                    name: "ddsm115".to_string(),
+                    kind: ArtifactKind::ComponentDriver,
+                    binary_name: "ddsm115".to_string(),
+                    instances: vec!["left_drive".to_string()],
+                }],
+                &[],
+                CheckGraphContext { robot: Some(robot) },
+                |_| Ok(report.clone()),
+                |participant| bail!("no source participant is built here ({})", participant.name),
+            ),
+            Arrival::WorkspaceSource => run_check_with_context(
+                &[],
+                &[SourceParticipant::component_driver_with_artifact_id(
+                    "left_drive",
+                    "ddsm115",
+                    PathBuf::from("/fake/project/components/ddsm115"),
+                )],
+                CheckGraphContext { robot: Some(robot) },
+                |image_ref| bail!("no platform artifact is fetched here ({image_ref})"),
+                |_| Ok(report.clone()),
+            ),
+        }
+    }
+
+    fn driver_config_problems(outcome: &CheckOutcome) -> Vec<&Problem> {
+        outcome
+            .report
+            .problems
+            .iter()
+            .filter(|problem| {
+                matches!(
+                    problem,
+                    Problem::InvalidConfig {
+                        owner: ConfigOwner::ComponentDriver,
+                        ..
+                    }
+                )
+            })
+            .collect()
+    }
+
+    /// The authored `driver.config` is the driver binary's own configuration
+    /// and is validated against the schema that binary embeds, under the
+    /// authored path an operator edits.
+    #[test]
+    fn a_driver_config_is_validated_against_the_binarys_own_schema() -> Result<()> {
+        let robot = fixture_robot()?;
+        let accepts_reduction = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": { "reduction": { "type": "integer" } },
+            "required": ["reduction"],
+            "additionalProperties": false,
+        });
+        let wants_a_port = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": { "port": { "type": "string" } },
+            "required": ["port"],
+            "additionalProperties": false,
+        });
+
+        for arrival in ARRIVALS {
+            let outcome = check_left_drive(
+                arrival,
+                &robot,
+                &raw_driver(None, Some(accepts_reduction.clone())),
+            )?;
+            assert!(
+                outcome.is_ok(),
+                "{arrival:?}: the authored block satisfies its schema: {outcome:?}"
+            );
+
+            let outcome = check_left_drive(
+                arrival,
+                &robot,
+                &raw_driver(None, Some(wants_a_port.clone())),
+            )?;
+            let [
+                Problem::InvalidConfig {
+                    owner: ConfigOwner::ComponentDriver,
+                    runtime_id,
+                    errors,
+                },
+            ] = driver_config_problems(&outcome).as_slice()
+            else {
+                panic!("{arrival:?}: expected one driver config problem: {outcome:?}");
+            };
+            assert_eq!(runtime_id, "left_drive");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.starts_with("components.left_drive.driver.config")),
+                "{arrival:?}: {errors:?}"
+            );
+            assert!(
+                errors.iter().any(|error| error.contains("port")),
+                "{arrival:?}: {errors:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A driver whose `Config` is `()` embeds the unit schema, and an authored
+    /// `config:` under its instance is exactly as wrong as an authored config
+    /// on a no-config service. There is no exemption for drivers.
+    #[test]
+    fn a_configless_driver_rejects_an_authored_config_block() -> Result<()> {
+        let robot = fixture_robot()?;
+        let unit = serde_json::json!({"type": "null"});
+        for arrival in ARRIVALS {
+            let outcome = check_left_drive(arrival, &robot, &raw_driver(None, Some(unit.clone())))?;
+            assert!(
+                !driver_config_problems(&outcome).is_empty(),
+                "{arrival:?}: a configless driver must reject an authored config: {outcome:?}"
+            );
+
+            // `right_drive` authors no `config:` at all, which is `null` - the
+            // same rule a no-config service follows.
+            let outcome = run_check_with_context(
+                &[PlatformArtifactRef {
+                    name: "ddsm115".to_string(),
+                    kind: ArtifactKind::ComponentDriver,
+                    binary_name: "ddsm115".to_string(),
+                    instances: vec!["right_drive".to_string()],
+                }],
+                &[],
+                CheckGraphContext {
+                    robot: Some(&robot),
+                },
+                |_| Ok(raw_driver(None, Some(unit.clone()))),
+                |participant| bail!("no source participant is built here ({})", participant.name),
+            )?;
+            assert!(outcome.is_ok(), "{outcome:?}");
+        }
+        Ok(())
+    }
+
+    /// A driver states the one connection kind it accepts; an instance that
+    /// authors another one dies at startup before its bus opens, so the check
+    /// engine has to reject the pairing here instead.
+    #[test]
+    fn an_authored_connection_kind_the_driver_rejects_is_a_problem() -> Result<()> {
+        let robot = fixture_robot()?;
+        for arrival in ARRIVALS {
+            let outcome = check_left_drive(
+                arrival,
+                &robot,
+                &raw_driver(Some(ConnectionKind::Serial), None),
+            )?;
+            let [
+                Problem::ConnectionKindMismatch {
+                    instance,
+                    artifact_id,
+                    declared,
+                    authored,
+                },
+            ] = outcome.report.problems.as_slice()
+            else {
+                panic!("{arrival:?}: expected one connection problem: {outcome:?}");
+            };
+            assert_eq!(instance, "left_drive");
+            assert_eq!(artifact_id, "ddsm115");
+            assert_eq!(*declared, ConnectionKind::Serial);
+            assert_eq!(*authored, ConnectionKind::Can);
+
+            // The kind the fixture authors, and a driver that declared none
+            // and therefore accepts whatever the document says.
+            for accepted in [Some(ConnectionKind::Can), None] {
+                let outcome = check_left_drive(arrival, &robot, &raw_driver(accepted, None))?;
+                assert!(outcome.is_ok(), "{arrival:?}/{accepted:?}: {outcome:?}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolution produced a driver for an instance the document does not
+    /// declare one for. That is the two halves disagreeing, not an authoring
+    /// mistake, so it fails hard rather than passing quietly.
+    #[test]
+    fn a_resolved_driver_for_an_undriven_instance_is_an_internal_inconsistency() -> Result<()> {
+        let mut robot = fixture_robot()?;
+        robot
+            .robot
+            .components
+            .get_mut("left_drive")
+            .expect("the fixture instance")
+            .driver = None;
+
+        for arrival in ARRIVALS {
+            let error = check_left_drive(arrival, &robot, &raw_driver(None, None))
+                .expect_err("a driver with no authored block must fail hard");
+            let message = format!("{error:#}");
+            assert!(message.contains("left_drive"), "{arrival:?}: {message}");
+            assert!(message.contains("ddsm115"), "{arrival:?}: {message}");
+            assert!(
+                message.contains("no driver block"),
+                "{arrival:?}: {message}"
+            );
+        }
         Ok(())
     }
 }

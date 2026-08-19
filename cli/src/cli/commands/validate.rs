@@ -65,15 +65,19 @@ impl Validate {
                     }
                     println!("components:");
                     for component in &report.components {
+                        // A driven instance says whether its `driver:` block
+                        // was actually checked against the driver binary's
+                        // contract: `validate` never stages, so a registry
+                        // driver this project has not built yet goes
+                        // unchecked and must say so.
+                        let driver = match (component.has_driver, component.driver_checked) {
+                            (false, _) => "no-driver",
+                            (true, true) => "driver, checked",
+                            (true, false) => "driver, unchecked",
+                        };
                         println!(
-                            "  - {} ({}) from {}",
-                            component.instance,
-                            if component.has_driver {
-                                "driver"
-                            } else {
-                                "no-driver"
-                            },
-                            component.source
+                            "  - {} ({driver}) from {}",
+                            component.instance, component.source
                         );
                     }
                 }

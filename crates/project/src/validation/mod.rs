@@ -1,5 +1,6 @@
 use crate::check as graph_check;
 use phoxal::authoring::source::robot::v0::Manifest as RobotManifest;
+use phoxal::model::connection::ConnectionKind;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,6 +37,11 @@ pub struct ValidationComponent {
     pub instance: String,
     pub source: String,
     pub has_driver: bool,
+    /// Whether this instance's `driver:` block was checked against the driver
+    /// binary's own embedded contract. `validate` never stages and never
+    /// installs, so a registry driver whose binary this project has not built
+    /// yet is reported unchecked rather than silently assumed good.
+    pub driver_checked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -58,6 +64,10 @@ pub struct ValidationReport {
 pub struct RawParticipantReport {
     pub artifact: RawArtifact,
     pub config_schema: Option<Value>,
+    /// The one connection kind the binary declared it accepts, carried
+    /// straight from its embedded contract so the driver-block check can
+    /// compare it against what an instance authors.
+    pub connection: Option<ConnectionKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,13 +98,14 @@ mod participants;
 mod use_case;
 
 pub(crate) use participants::{
-    PlatformArtifactRef, check_artifact_refs_from_resolved, component_driver_runtimes_by_ref,
+    PlatformArtifactRef, check_artifact_refs_from_resolved,
+    component_driver_platform_refs_from_resolved, component_driver_runtimes_by_ref,
     source_participants_from_resolved,
 };
 mod graph;
 pub use graph::run_check_with_context;
 mod config;
-pub(crate) use config::validate_user_service_config;
+pub(crate) use config::{validate_component_driver_block, validate_user_service_config};
 mod metadata;
 pub(crate) use metadata::{
     extract_participant_report_from_staged_runtime, raw_participant_report_from_extracted_metadata,

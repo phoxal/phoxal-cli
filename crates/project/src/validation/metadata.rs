@@ -47,8 +47,9 @@ pub(crate) fn extract_participant_report_from_staged_runtime(
 /// the artifact identity the caller already expects - the shared tail of staged
 /// runtime and selected-source artifact inspection.
 ///
-/// The embedded metadata carries the participant's declared identity, kind, and
-/// config schema. The caller's expectations are claims made
+/// The embedded metadata carries the participant's declared identity, kind,
+/// config schema, and declared connection kind. The caller's expectations are
+/// claims made
 /// from context (a resolved runtime name, a registry package, an
 /// `expected_artifact_id` field) that could disagree with it, for instance if
 /// two staged binaries were swapped on disk. This function is the one place
@@ -92,6 +93,7 @@ pub(crate) fn raw_participant_report_from_extracted_metadata(
             id: meta.id.to_string(),
         },
         config_schema: Some(meta.config_schema),
+        connection: meta.connection,
     })
 }
 
@@ -104,6 +106,7 @@ mod tests {
             framework: participant_metadata::FIXTURE_FRAMEWORK,
             id: phoxal::identity::ParticipantArtifactId::new(id).expect("fixture artifact id"),
             kind: phoxal::participant::metadata::ParticipantKind::Service,
+            connection: None,
             config_schema: serde_json::json!({"type": "object", "properties": {"speed": {"type": "integer"}}}),
         }
     }

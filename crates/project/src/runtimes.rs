@@ -3,11 +3,16 @@
 //! There is exactly one derivation of "what runs", and it is a pure function of
 //! the compiled robot the manifest carries: the mandatory `brain`, every
 //! `services` entry, and every `components` entry that declares a `driver:`
-//! block. Staging uses it to decide which executables land in `bin/`,
-//! validation to decide which configuration to check against which embedded
-//! schema, the local launcher to decide which children to spawn, and `install`
-//! to decide which systemd units to write. None of them may disagree, so none
-//! of them derives it a second time.
+//! block. Staging uses it to decide which executables land in `bin/`, the
+//! local launcher to decide which children to spawn, and `install` to decide
+//! which systemd units to write. None of them may disagree, so none of them
+//! derives it a second time.
+//!
+//! What each process is *configured* with is not here. Configuration is
+//! checked against the schema its own binary embeds, from the authored
+//! document the operator edits (`crate::validation`), and read at runtime by
+//! the process itself out of the bundle; a third copy passing through this
+//! launch set would only be a fourth thing to keep in agreement.
 //!
 //! The *expected presence* set the supervisor publishes is the same set,
 //! derived the same way from the same manifest: a component without a driver
@@ -59,11 +64,6 @@ pub struct RobotRuntime {
     /// *type*, because one driver binary serves every instance of a type.
     pub binary: String,
     pub role: RuntimeRole,
-    /// The configuration this runtime reads out of the manifest for itself:
-    /// `services.<id>.config` for a service, the `driver:` block for a driver.
-    /// The CLI carries it only to validate it against the binary's embedded
-    /// schema; the process reads its own copy from the bundle.
-    pub config: Option<serde_json::Value>,
 }
 
 /// Every process the compiled robot launches, ordered by participant id.
@@ -77,27 +77,24 @@ pub fn robot_runtimes(robot: &Robot) -> Vec<RobotRuntime> {
         participant_id: BRAIN_ID.to_string(),
         binary: BRAIN_ID.to_string(),
         role: RuntimeRole::Brain,
-        config: None,
     }];
-    for (id, service) in robot.services() {
+    for (id, _) in robot.services() {
         runtimes.push(RobotRuntime {
             participant_id: id.as_str().to_string(),
             binary: phoxal_cli_catalog::bundle_binary_name(id.as_str()),
             role: RuntimeRole::Service,
-            config: service.config().cloned(),
         });
     }
-    for component in robot.components() {
-        let Some(driver) = component.instance().driver() else {
-            continue;
-        };
+    for component in robot
+        .components()
+        .filter(|component| component.instance().driver().is_some())
+    {
         runtimes.push(RobotRuntime {
             participant_id: component.id().as_str().to_string(),
             binary: phoxal_cli_catalog::bundle_binary_name(
                 component.instance().component_type().as_str(),
             ),
             role: RuntimeRole::Driver,
-            config: Some(driver.clone()),
         });
     }
     runtimes.sort_by(|left, right| left.participant_id.cmp(&right.participant_id));
@@ -139,33 +136,32 @@ pub fn bundle_runtimes(bundle_root: &std::path::Path) -> anyhow::Result<Vec<Robo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoxal::model::builder::RobotBuilder;
+    use phoxal::model::builder::{ComponentBuilder, RobotBuilder};
+    use phoxal::model::connection::{Connection, Serial};
 
     /// A rover with two instances of one driven type and one driverless mount.
-    ///
-    /// The model builder deliberately states no `driver:` block - a driver
-    /// block is authored data the compiler copies through, not a model
-    /// invariant - so the two driven instances get theirs by round-tripping the
-    /// robot through the wire form every reader of a manifest uses.
     fn rover() -> Robot {
-        let robot = RobotBuilder::new("rover")
+        let driven = |port: &'static str| {
+            move |mounted: ComponentBuilder| {
+                mounted.driver(
+                    Connection::Serial(Serial {
+                        port: port.to_owned(),
+                        baud: 115_200,
+                    }),
+                    Some(serde_json::json!({ "reduction": 20 })),
+                )
+            }
+        };
+        RobotBuilder::new("rover")
             .service("mission", Some(serde_json::json!({ "speed": 1 })))
             .service("drive", None)
             .component_type("ddsm115", |wheel| wheel.motor("motor", "wheel_joint"))
             .component_type("caster", |caster| caster.motor("motor", "caster_joint"))
-            .component("left_drive", "ddsm115")
-            .component("right_drive", "ddsm115")
+            .component_with("left_drive", "ddsm115", driven("/dev/ttyUSB0"))
+            .component_with("right_drive", "ddsm115", driven("/dev/ttyUSB1"))
             .component("free_wheel", "caster")
             .build()
-            .expect("a valid canonical robot");
-        let mut wire = serde_json::to_value(&robot).expect("a robot serializes");
-        for (instance, port) in [
-            ("left_drive", "/dev/ttyUSB0"),
-            ("right_drive", "/dev/ttyUSB1"),
-        ] {
-            wire["components"][instance]["driver"] = serde_json::json!({ "port": port });
-        }
-        serde_json::from_value(wire).expect("a robot round-trips through its wire form")
+            .expect("a valid canonical robot")
     }
 
     /// The launchable set is the brain, every service, and exactly the
@@ -208,26 +204,6 @@ mod tests {
         assert_eq!(
             robot_binaries(&rover()).into_iter().collect::<Vec<_>>(),
             vec!["brain", "ddsm115", "drive", "mission"]
-        );
-    }
-
-    /// Each runtime carries the configuration it will read for itself, so
-    /// validation checks the same bytes the process will.
-    #[test]
-    fn each_runtime_carries_the_configuration_it_reads() {
-        let runtimes = robot_runtimes(&rover());
-        let config = |id: &str| {
-            runtimes
-                .iter()
-                .find(|runtime| runtime.participant_id == id)
-                .and_then(|runtime| runtime.config.clone())
-        };
-        assert_eq!(config("mission"), Some(serde_json::json!({ "speed": 1 })));
-        assert_eq!(config("drive"), None);
-        assert_eq!(config("brain"), None);
-        assert_eq!(
-            config("left_drive"),
-            Some(serde_json::json!({ "port": "/dev/ttyUSB0" }))
         );
     }
 }

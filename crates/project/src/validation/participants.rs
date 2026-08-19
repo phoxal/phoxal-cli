@@ -240,6 +240,7 @@ mod tests {
                 id: "brain".to_string(),
             },
             config_schema: schema,
+            connection: None,
         }
     }
 
@@ -256,6 +257,7 @@ mod tests {
                 id: id.to_string(),
             },
             config_schema: None,
+            connection: None,
         }
     }
 
