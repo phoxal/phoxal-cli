@@ -8,6 +8,7 @@
 //! [`refuse_while_execution_is_live`] is the one place that asks it.
 
 use anyhow::{Context, Result, bail};
+use phoxal::supervisor::rendezvous::{try_advisory_lock, unlock_advisory};
 use serde::{Deserialize, Serialize};
 
 use std::fs::{self, File, OpenOptions};
@@ -100,7 +101,7 @@ impl ProjectLock {
             .truncate(false)
             .open(path)
             .with_context(|| format!("failed to open project-operation lock {}", path.display()))?;
-        if let Err(error) = phoxal_cli_host::advisory::try_advisory_lock(&file, true) {
+        if let Err(error) = try_advisory_lock(&file, true) {
             let active = read_identity(&mut file).ok();
             if let Some(active) = active {
                 bail!(
@@ -176,10 +177,10 @@ pub fn execution_holder(root: &Path) -> Result<Option<ExecutionHolder>> {
             });
         }
     };
-    if phoxal_cli_host::advisory::try_advisory_lock(&file, true).is_ok() {
+    if try_advisory_lock(&file, true).is_ok() {
         // Free. Release the probe at once: holding it would block the very
         // supervisor this command is about to launch.
-        let _ = phoxal_cli_host::advisory::unlock_advisory(&file);
+        let _ = unlock_advisory(&file);
         return Ok(None);
     }
     let mut recorded = String::new();
@@ -222,7 +223,7 @@ impl Drop for ProjectLock {
     fn drop(&mut self) {
         // The inode is intentionally permanent. Unlinking a locked file lets a
         // competing process create and lock a different inode at the same path.
-        let _ = phoxal_cli_host::advisory::unlock_advisory(&self.file);
+        let _ = unlock_advisory(&self.file);
     }
 }
 
@@ -344,7 +345,7 @@ mod tests {
             .write(true)
             .truncate(false)
             .open(&lock_path)?;
-        phoxal_cli_host::advisory::try_advisory_lock(&held, true)
+        try_advisory_lock(&held, true)
             .expect("the supervisor-style holder takes the supervisor lock");
         writeln!(held, "4242")?;
         held.sync_data()?;
@@ -365,8 +366,7 @@ mod tests {
         drop(build);
 
         // Released: the probe finds it free and the mutation proceeds.
-        phoxal_cli_host::advisory::unlock_advisory(&held)
-            .expect("the holder releases the supervisor lock");
+        unlock_advisory(&held).expect("the holder releases the supervisor lock");
         refuse_while_execution_is_live(&project)?;
         Ok(())
     }

@@ -19,7 +19,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use phoxal_manifest::source::DocumentKind;
+use phoxal::authoring::source::DocumentKind;
 
 /// The project-relative directory the generated editor schemas are written to.
 pub(crate) const SCHEMA_DIR_RELATIVE: &str = ".phoxal/schemas";

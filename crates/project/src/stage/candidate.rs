@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use crate::source::resolver::BundlePlan;
 use anyhow::{Context, Result, ensure};
-use phoxal_bundle::{ASSETS_DIR, BIN_DIR};
+use phoxal::bundle::{ASSETS_DIR, BIN_DIR};
 
 /// An unpublished deployment-release candidate.
 pub(crate) struct StagedCandidate {
@@ -159,7 +159,7 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
 /// need a plausible compiler output without staging a whole bundle.
 #[cfg(test)]
 pub(crate) fn compile_test_bundle(
-    source_manifest: &phoxal_manifest::source::robot::v0::Manifest,
+    source_manifest: &phoxal::authoring::source::robot::v0::Manifest,
 ) -> Result<crate::source::resolver::CompiledBundle> {
     let source = tempfile::tempdir()?;
     let component = source.path().join("components/wheel");
@@ -200,9 +200,9 @@ robot:
         source.path().join("robot.yaml"),
     )?)?;
     fixture.services = source_manifest.services.clone();
-    phoxal_manifest::source::robot::Manifest::V0(fixture).write_to_dir(source.path())?;
+    phoxal::authoring::source::robot::Manifest::V0(fixture).write_to_dir(source.path())?;
     let bundle = crate::source::resolver::CompiledBundle::from_project(
-        phoxal_manifest::SourceSet {
+        phoxal::authoring::SourceSet {
             project_root: source.path().to_path_buf(),
             robot_manifest: source.path().join("robot.yaml"),
             component_roots: std::collections::BTreeMap::from([("wheel".to_string(), component)]),

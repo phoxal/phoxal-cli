@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
-use phoxal_runtime_contract::version::FrameworkVersion;
+use phoxal::version::FrameworkVersion;
 use serde::Deserialize;
 
 /// The framework a robot project selects, read from its committed Cargo graph.

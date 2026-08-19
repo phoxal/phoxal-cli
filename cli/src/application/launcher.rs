@@ -26,6 +26,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use phoxal::identity::ParticipantId;
+use phoxal::participant::launch::LaunchCommand;
 use serde::{Deserialize, Serialize};
 
 /// How often a signalled process is re-checked while waiting for it to go.
@@ -114,21 +116,31 @@ impl LaunchedRuntime {
 /// Everything one launched runtime needs on its command line.
 ///
 /// There is nothing else. No execution id - the router's session id is the
-/// execution, and `phoxal-bus` reads it. No time origin - real robot time zero
-/// is the host boot. No shutdown grace - a runtime exits on SIGTERM.
-fn argv(runtime: &str, bundle_root: &Path, endpoint: &str, simulation: bool) -> Vec<String> {
-    let mut argv = vec![
-        "--participant-id".to_string(),
-        runtime.to_string(),
-        "--bundle-root".to_string(),
-        bundle_root.display().to_string(),
-        "--connect".to_string(),
-        endpoint.to_string(),
-    ];
-    if simulation {
-        argv.push("--simulation".to_string());
-    }
-    argv
+/// execution, and the framework bus reads it. No time origin - real robot time
+/// zero is the host boot. No shutdown grace - a runtime exits on SIGTERM.
+///
+/// The flags themselves are the framework's, rendered by the encoder that sits
+/// beside the parser every participant binary compiles, so the two halves of
+/// the launch contract cannot drift apart across repositories. What stays here
+/// is the only decision this launcher makes about them: whether this run
+/// follows a simulated world clock.
+///
+/// # Errors
+///
+/// When the bundle names a runtime whose id is not a launch identity.
+fn argv(
+    runtime: &str,
+    bundle_root: &Path,
+    endpoint: &str,
+    simulation: bool,
+) -> Result<Vec<String>> {
+    let participant = ParticipantId::new(runtime.to_string()).with_context(|| {
+        format!("the bundle names a runtime '{runtime}' whose id is not a launch identity")
+    })?;
+    Ok(LaunchCommand::new(participant, bundle_root)
+        .connect(endpoint)
+        .simulation(simulation)
+        .argv())
 }
 
 /// Where one runtime's output is retained for this session.
@@ -199,7 +211,7 @@ fn spawn_one(
     use std::os::unix::process::CommandExt;
 
     let executable = bundle_root
-        .join(phoxal_bundle::BIN_DIR)
+        .join(phoxal::bundle::BIN_DIR)
         .join(&runtime.binary);
     let file = create_log(log)?;
     let errors = file
@@ -212,7 +224,7 @@ fn spawn_one(
             bundle_root,
             endpoint,
             simulation,
-        ))
+        )?)
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(errors));
@@ -517,7 +529,8 @@ mod tests {
             Path::new("/srv/bundle"),
             "tcp/127.0.0.1:7447",
             false,
-        );
+        )
+        .expect("the fixture id is a launch identity");
         assert_eq!(
             plain,
             vec![
@@ -541,7 +554,8 @@ mod tests {
             Path::new("/srv/bundle"),
             "tcp/127.0.0.1:7447",
             true,
-        );
+        )
+        .expect("the fixture id is a launch identity");
         assert_eq!(simulated.last().map(String::as_str), Some("--simulation"));
     }
 

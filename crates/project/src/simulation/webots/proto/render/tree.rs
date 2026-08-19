@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow};
-use phoxal_model::structure::{Joint, JointKind};
+use phoxal::model::structure::{Joint, JointKind};
 use webots_proto::r2025a::{
     HingeJoint, HingeJointParameters, JointParameters, Node, Physics, Pose, SliderJoint, Solid,
 };

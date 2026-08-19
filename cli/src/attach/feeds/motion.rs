@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use phoxal::api;
 use phoxal_cli_observation::{AttachmentEvent, MotionObservation, ObservationSource, SourceStatus};
-use phoxal_client::robot as api;
 
 use super::FeedContext;
 
@@ -21,8 +21,8 @@ pub(crate) async fn run(context: FeedContext) {
 
 async fn feed(context: &FeedContext) -> Result<()> {
     let state_view = context
-        .client
-        .state_view(api::topic::client().motion().state())
+        .session
+        .state_view(api::topics().motion().state().client())
         .await?;
     context.health(SOURCE, SourceStatus::Live).await;
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(20));

@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use phoxal::api;
+use phoxal::bus::SetpointPublisher;
 use phoxal_cli_observation::{AttachmentEvent, ObservationSource, SourceStatus};
-use phoxal_client::SetpointPublisher;
-use phoxal_client::robot as api;
 use tokio::sync::mpsc;
 
 use super::FeedContext;
@@ -31,8 +31,8 @@ pub(crate) async fn run(context: FeedContext, mut commands: mpsc::Receiver<Input
 
 async fn feed(context: &FeedContext, commands: &mut mpsc::Receiver<InputCommand>) -> Result<()> {
     let publisher = context
-        .client
-        .setpoint_publisher(api::topic::client().motion().manual())
+        .session
+        .setpoint_publisher(api::topics().motion().manual().client())
         .context("failed to attach the manual command publisher")?;
 
     let mut joypad = Joypad::open();
@@ -124,7 +124,7 @@ fn queue_stop(pending_stops: &mut usize) {
 /// Send one queued stop, keeping the countdown intact if the publish failed so
 /// the next tick tries again.
 fn publish_stop(
-    publisher: &SetpointPublisher<api::endpoint::motion::ManualEndpoint>,
+    publisher: &SetpointPublisher<api::motion::ManualCommand>,
     pending_stops: &mut usize,
 ) {
     publish_stop_with(pending_stops, |command| publisher.send(command).is_ok());
@@ -145,7 +145,7 @@ fn publish_stop_with(
 }
 
 /// Drain the whole stop budget at once, for an exit that has no next tick.
-fn publish_stop_repeats(publisher: &SetpointPublisher<api::endpoint::motion::ManualEndpoint>) {
+fn publish_stop_repeats(publisher: &SetpointPublisher<api::motion::ManualCommand>) {
     for attempt in 0..STOP_REPEAT_COUNT {
         if let Err(error) = publisher.send(stop()) {
             tracing::warn!(

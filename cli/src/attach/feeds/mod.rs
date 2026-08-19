@@ -12,8 +12,8 @@ pub(crate) mod telemetry;
 
 use std::sync::Arc;
 
+use phoxal::session::SessionHandle;
 use phoxal_cli_observation::{AttachmentEpoch, AttachmentEvent, ObservationSource, SourceStatus};
-use phoxal_client::Client;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -24,7 +24,7 @@ use super::state::Stores;
 /// Everything a feed needs, cloned into each of them.
 #[derive(Clone)]
 pub(crate) struct FeedContext {
-    pub(crate) client: Client,
+    pub(crate) session: SessionHandle,
     pub(crate) epoch: AttachmentEpoch,
     /// Where this client believes the execution's bundle lives, for display.
     pub(crate) project: String,

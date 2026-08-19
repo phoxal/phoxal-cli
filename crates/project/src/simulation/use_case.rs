@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use phoxal_bundle::RuntimeBundle;
+use phoxal::bundle::RuntimeBundle;
 
 use super::{PrepareSimulationRequest, PreparedSimulation, StageWebotsRequest, WebotsLaunch};
 

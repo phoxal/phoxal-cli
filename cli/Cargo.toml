@@ -13,7 +13,10 @@ publish = ["phoxal-internal"]
 # The project/build/deploy tool and the disposable attached client.
 # It is bin-only: the shipped executable is `phoxal`, and
 # nothing links this package as a library, so its unit tests live in
-# `#[cfg(test)]` modules inside the binary crate.
+# `#[cfg(test)]` modules inside the binary crate. The one thing under `tests/`
+# links nothing of it: it reads the workspace's own resolved dependency graph
+# back out of `cargo metadata`, which is a fact about the manifests rather than
+# about any compiled code.
 [[bin]]
 name = "phoxal"
 path = "src/main.rs"
@@ -36,14 +39,9 @@ tar = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
-# Everything remote goes through the client boundary; the wire crates below
-# are reached only for authored-source, bundle, and local identity work.
-phoxal-client = { workspace = true }
-
-phoxal-bundle = { workspace = true }
-phoxal-manifest = { workspace = true }
-phoxal-model = { workspace = true }
-phoxal-runtime-contract = { workspace = true }
+# The framework train: `phoxal::session` for everything remote, and the
+# bundle/authoring/identity modules beside it for local work.
+phoxal = { workspace = true }
 
 phoxal-cli-catalog = { workspace = true }
 phoxal-cli-host = { workspace = true }

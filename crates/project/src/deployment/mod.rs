@@ -90,7 +90,7 @@ pub(crate) fn materialize(
 /// bundle does not verify.
 pub fn validate_release(root: &Path) -> Result<ReleaseLayout> {
     let layout = validate_layout(root)?;
-    phoxal_bundle::RuntimeBundle::open(&layout.bundle).with_context(|| {
+    phoxal::bundle::RuntimeBundle::open(&layout.bundle).with_context(|| {
         format!(
             "failed to read the bundle {} this release executes",
             layout.bundle.display()
@@ -120,13 +120,13 @@ pub fn is_release_root(root: &Path) -> bool {
 /// When `root` is a bundle root rather than a release root.
 pub fn refuse_bundle_shaped_release(root: &Path) -> Result<()> {
     ensure!(
-        !root.join(phoxal_bundle::MANIFEST_FILE).is_file(),
+        !root.join(phoxal::bundle::MANIFEST_FILE).is_file(),
         "{} is a bundle, not a deployment release: it carries {} at its root instead of \
          `{SUPERVISOR_FILE}` and `{BUNDLE_DIR}/`. This archive predates supervisor-owning releases, \
          where a release carries the supervisor that runs it; rebuild it with this CLI (`phoxal \
          build`) and install the result",
         root.display(),
-        phoxal_bundle::MANIFEST_FILE,
+        phoxal::bundle::MANIFEST_FILE,
     );
     Ok(())
 }
@@ -227,7 +227,7 @@ mod tests {
 
     /// A release whose bundle directory is empty: enough for every layout rule,
     /// which is what this module owns. The bundle's own content is
-    /// phoxal-bundle's contract, proven where that contract lives.
+    /// `phoxal::bundle`'s contract, proven where that contract lives.
     fn staged_release(root: &Path) -> Vec<u8> {
         fs::create_dir_all(root.join(BUNDLE_DIR)).expect("bundle directory");
         let bytes = host_supervisor(&root.join(SUPERVISOR_FILE));
@@ -354,7 +354,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path().join("extracted");
         fs::create_dir_all(root.join("bin")).expect("bin directory");
-        fs::write(root.join(phoxal_bundle::MANIFEST_FILE), b"{}").expect("manifest document");
+        fs::write(root.join(phoxal::bundle::MANIFEST_FILE), b"{}").expect("manifest document");
 
         let error = refuse_bundle_shaped_release(&root)
             .expect_err("a bundle root is not a release root")

@@ -384,7 +384,7 @@ fn accept_runtimes(
 
 /// The participant id a supervisor log or telemetry record is stamped with,
 /// for the process key that denotes the same participant.
-fn participant_id(key: &phoxal_runtime_contract::identity::ParticipantId) -> String {
+fn participant_id(key: &phoxal::identity::ParticipantId) -> String {
     key.to_string()
 }
 
@@ -812,15 +812,15 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use phoxal::identity::ExecutionId;
+    use phoxal::identity::RobotId;
+    use phoxal::identity::{ParticipantId, ProducerId};
+    use phoxal::supervisor::api::execution::{Lifecycle, Process, ProcessState};
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, InputObservation, JoypadDevice, JoypadDeviceStatus,
         JoypadDevicesSample, LogSeverity, LogSource, LogWindow, ObservationWindow,
         ProcessObservation, SupervisorObservation,
     };
-    use phoxal_client::supervisor::execution::{Lifecycle, Process, ProcessState};
-    use phoxal_runtime_contract::identity::ExecutionId;
-    use phoxal_runtime_contract::identity::RobotId;
-    use phoxal_runtime_contract::identity::{ParticipantId, ProducerId};
 
     use super::*;
 
@@ -1669,7 +1669,7 @@ mod tests {
         ProcessObservation {
             row: Process {
                 participant,
-                kind: phoxal_runtime_contract::metadata::ParticipantKind::Service,
+                kind: phoxal::participant::metadata::ParticipantKind::Service,
                 state: ProcessState::Present,
                 producer: Some(
                     ProducerId::try_from((1_u128 << 124) | 43).expect("fixture producer"),

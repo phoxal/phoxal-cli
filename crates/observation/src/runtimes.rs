@@ -1,11 +1,6 @@
-use phoxal_client::supervisor::telemetry::Record;
+use phoxal::supervisor::api::telemetry::Record;
 
 use crate::{ObservationQuery, ObservationWindow, WindowDirection};
-
-pub use phoxal_client::runtime::telemetry::{
-    BufferKind as RuntimeBufferKind, Direction as RuntimeDirection, Step as RuntimeStepSample,
-    Topic as RuntimeTopicSample,
-};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimePerformanceSample {
@@ -124,17 +119,14 @@ pub type RuntimeWindow = ObservationWindow<RuntimeRow>;
 
 #[cfg(test)]
 mod tests {
+    use phoxal::runtime::api::telemetry::{BufferKind, Direction, Step, Topic};
+
     use super::*;
 
-    fn topic(
-        buffer_kind: RuntimeBufferKind,
-        capacity: u64,
-        current: u64,
-        high: u64,
-    ) -> RuntimeTopicSample {
-        RuntimeTopicSample {
+    fn topic(buffer_kind: BufferKind, capacity: u64, current: u64, high: u64) -> Topic {
+        Topic {
             topic: "v1/test".to_string(),
-            direction: RuntimeDirection::Publish,
+            direction: Direction::Publish,
             buffer_kind,
             count: 20,
             rate_millihz: 10_000,
@@ -158,7 +150,7 @@ mod tests {
                 participant_id: "drive".to_string(),
                 truncated: 0,
                 window_ns: 2_000_000_000,
-                step: Some(RuntimeStepSample {
+                step: Some(Step {
                     target_period_ns: 20_000_000,
                     completed: 100,
                     errors: 0,
@@ -170,10 +162,10 @@ mod tests {
                     overruns: 0,
                 }),
                 topics: vec![
-                    topic(RuntimeBufferKind::Outbound, 10, 4, 8),
-                    topic(RuntimeBufferKind::Outbound, 10, 2, 5),
+                    topic(BufferKind::Outbound, 10, 4, 8),
+                    topic(BufferKind::Outbound, 10, 2, 5),
                 ],
-                overflow: Some(topic(RuntimeBufferKind::Mixed, 0, 99, 99)),
+                overflow: Some(topic(BufferKind::Mixed, 0, 99, 99)),
             },
         };
         let summary = sample.summary();
@@ -196,7 +188,7 @@ mod tests {
                 truncated: 0,
                 window_ns: 1_000_000_000,
                 step: None,
-                topics: vec![topic(RuntimeBufferKind::Subscriber, 0, 0, 0)],
+                topics: vec![topic(BufferKind::Subscriber, 0, 0, 0)],
                 overflow: None,
             },
         };
@@ -217,7 +209,7 @@ mod tests {
                 truncated: 0,
                 window_ns: 1,
                 step: None,
-                topics: vec![topic(RuntimeBufferKind::Subscriber, 2, u64::MAX, u64::MAX)],
+                topics: vec![topic(BufferKind::Subscriber, 2, u64::MAX, u64::MAX)],
                 overflow: None,
             },
         };

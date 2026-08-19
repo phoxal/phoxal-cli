@@ -19,8 +19,8 @@ mod registry;
 use std::collections::HashSet;
 
 use gilrs::{Button, EventType, Gamepad, Gilrs};
+use phoxal::api;
 use phoxal_cli_observation::JoypadDevicesSample;
-use phoxal_client::robot as api;
 
 use registry::{PadHandle, Registry, RegistryChange};
 

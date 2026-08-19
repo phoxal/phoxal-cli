@@ -16,8 +16,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use phoxal_bundle::RuntimeBundle;
-use phoxal_model::manifest::ManifestDocument;
+use phoxal::bundle::RuntimeBundle;
+use phoxal::model::manifest::ManifestDocument;
 
 use crate::source::resolver::BundlePlan;
 
@@ -46,7 +46,7 @@ pub(crate) fn write_manifest_document(root: &Path, resolved: &BundlePlan) -> Res
 
     let document = ManifestDocument::new(resolved.compiled.robot.clone());
     let bytes = serde_json::to_vec_pretty(&document)?;
-    std::fs::write(root.join(phoxal_bundle::MANIFEST_FILE), bytes)
+    std::fs::write(root.join(phoxal::bundle::MANIFEST_FILE), bytes)
         .context("failed to write manifest.json")?;
     RuntimeBundle::open(root).context("failed to open the staged bundle candidate")
 }
@@ -60,11 +60,11 @@ pub(crate) fn write_manifest_document(root: &Path, resolved: &BundlePlan) -> Res
 /// brain happens to be the launch identity too.
 fn verify_staged_binaries(
     root: &Path,
-    robot: &phoxal_model::Robot,
-    framework: phoxal_runtime_contract::version::FrameworkVersion,
+    robot: &phoxal::model::Robot,
+    framework: phoxal::version::FrameworkVersion,
 ) -> Result<()> {
     for binary in crate::runtimes::robot_binaries(robot) {
-        let path = root.join(phoxal_bundle::BIN_DIR).join(&binary);
+        let path = root.join(phoxal::bundle::BIN_DIR).join(&binary);
         let contract =
             crate::check::participant_metadata::extract_participant_metadata_for_project(
                 &path, framework,
@@ -84,13 +84,13 @@ fn verify_staged_binaries(
 mod tests {
     use std::path::Path;
 
-    use phoxal_model::builder::RobotBuilder;
+    use phoxal::model::builder::RobotBuilder;
 
     use crate::check::participant_metadata::{
         FIXTURE_FRAMEWORK, synthesize_host_participant_object,
     };
 
-    fn robot() -> phoxal_model::Robot {
+    fn robot() -> phoxal::model::Robot {
         RobotBuilder::new("rover")
             .service("drive", None)
             .build()
@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn a_binary_declaring_another_identity_is_refused_at_its_bundle_name() {
         let staged = tempfile::tempdir().expect("a staging root");
-        let bin = staged.path().join(phoxal_bundle::BIN_DIR);
+        let bin = staged.path().join(phoxal::bundle::BIN_DIR);
         stage_binary(&bin, "brain", "brain", "brain");
         stage_binary(&bin, "drive", "odometry", "service");
 
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn a_missing_binary_is_named_while_the_bundle_is_still_a_candidate() {
         let staged = tempfile::tempdir().expect("a staging root");
-        let bin = staged.path().join(phoxal_bundle::BIN_DIR);
+        let bin = staged.path().join(phoxal::bundle::BIN_DIR);
         stage_binary(&bin, "brain", "brain", "brain");
 
         let error = super::verify_staged_binaries(staged.path(), &robot(), FIXTURE_FRAMEWORK)

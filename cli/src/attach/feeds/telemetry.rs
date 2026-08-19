@@ -6,12 +6,12 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use phoxal::runtime::api::telemetry::{Cursor, Topic};
+use phoxal::supervisor::api::telemetry;
 use phoxal_cli_observation::{
     AttachmentEvent, ObservationSource, RuntimeFeedStatus, RuntimePerformanceSample, SourceStatus,
     StoreChanged, sanitize_terminal_text,
 };
-use phoxal_client::runtime::telemetry::{Cursor, Topic};
-use phoxal_client::supervisor::telemetry;
 
 use super::FeedContext;
 use crate::reconcile::{ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
@@ -29,8 +29,8 @@ pub(crate) async fn run(context: FeedContext) {
 }
 
 async fn feed(context: &FeedContext) -> Result<()> {
-    let client = &context.client;
-    let subscriber = client.follow_telemetry().await?;
+    let session = &context.session;
+    let subscriber = session.follow_telemetry().await?;
     let mut reconciler = Reconciler::new(BUFFER);
     let mut backoff = RetryBackoff::new(Duration::from_millis(10), Duration::from_millis(250));
 
@@ -41,7 +41,7 @@ async fn feed(context: &FeedContext) -> Result<()> {
             records,
             capacity_evictions,
             ..
-        } = client.telemetry(None, PAGE, None).await?;
+        } = session.telemetry(None, PAGE, None).await?;
         let evictions = capacity_evictions;
         let anchor = cursor;
         let installed = records

@@ -96,8 +96,8 @@ pub(crate) fn test_metadata_payload(
     let kind = serde_json::from_value(serde_json::Value::String(kind.to_string()))
         .expect("the fixture names a participant kind this train has");
     serde_json::to_vec(
-        &phoxal_runtime_contract::emit::ParticipantMetadataRecord::V0 {
-            contract: phoxal_runtime_contract::emit::ParticipantContractRecord {
+        &phoxal::participant::metadata::ParticipantMetadataRecord::V0 {
+            contract: phoxal::participant::metadata::ParticipantContractRecord {
                 framework: crate::check::participant_metadata::FIXTURE_FRAMEWORK,
                 id,
                 kind,

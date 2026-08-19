@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use phoxal_client::supervisor::execution::{Process, ProcessState, Snapshot};
-use phoxal_runtime_contract::identity::ParticipantId;
-use phoxal_runtime_contract::metadata::ParticipantKind;
+use phoxal::identity::ParticipantId;
+use phoxal::participant::metadata::ParticipantKind;
+use phoxal::supervisor::api::execution::{Process, ProcessState, Snapshot};
 
 /// How much of a robot is up, read off one snapshot.
 ///
@@ -119,7 +119,7 @@ pub type ProcessTable = BTreeMap<ParticipantId, ProcessObservation>;
 
 #[cfg(test)]
 mod tests {
-    use phoxal_client::supervisor::execution::Lifecycle;
+    use phoxal::supervisor::api::execution::Lifecycle;
 
     use super::*;
 

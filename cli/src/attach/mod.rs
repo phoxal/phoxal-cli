@@ -1,9 +1,10 @@
 //! The disposable attachment session.
 //!
-//! One [`Session`] is one attachment to one execution: it opens a
-//! [`phoxal_client::Connection`] and runs the feeds the terminal application
-//! renders. Everything remote arrives through `phoxal_client`; this crate
-//! names no wire crate of its own.
+//! One [`Attachment`] is one attachment to one execution: it opens a
+//! [`phoxal::session::Session`] and runs the feeds the terminal application
+//! renders. Everything remote arrives through that session; this module owns
+//! the feeds, the local child facts, and the ports, and nothing of the
+//! transport below them.
 //!
 //! There is no private IPC anywhere below. Every fact this
 //! session has comes off the execution-scoped Zenoh supervisor API or out of
@@ -22,11 +23,10 @@ pub(crate) mod state;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context, Result};
+use phoxal::session::{ConnectOptions, Session, SessionHandle};
 use phoxal_cli_observation::{
     AttachmentEpoch, AttachmentEvent, ConnectionObservation, LocalRuntimes,
 };
-use phoxal_client::supervisor::{self, logs};
-use phoxal_client::{Client, ConnectOptions, Connection, DisconnectReason, StreamReceiver};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -77,18 +77,27 @@ pub(crate) struct SessionPorts {
 }
 
 /// One live attachment plus the feeds that project it.
-pub(crate) struct Session {
+pub(crate) struct Attachment {
     pub(crate) ports: SessionPorts,
-    connection: Connection,
-    client: Client,
+    session: Session,
+    handle: SessionHandle,
     local: LocalRuntimeFacts,
     cancellation: CancellationToken,
     tasks: JoinSet<()>,
 }
 
-impl Session {
-    pub(crate) fn connected(&self) -> &phoxal_client::Connected {
-        self.connection.connected()
+impl Attachment {
+    pub(crate) fn connected(&self) -> &phoxal::session::ConnectedExecution {
+        self.session.connected()
+    }
+
+    /// The typed session operations this attachment was opened on.
+    ///
+    /// Snapshots, log pages, the live log stream, and the terminal reason are
+    /// the framework session's own vocabulary, so a caller that wants one asks
+    /// it rather than a second spelling of it here.
+    pub(crate) const fn handle(&self) -> &SessionHandle {
+        &self.handle
     }
 
     /// What this client knows about the runtimes it launched itself.
@@ -106,10 +115,9 @@ impl Session {
         project: String,
         local: LocalRuntimeFacts,
     ) -> Result<Self> {
-        let connection =
-            Connection::connect(&ConnectOptions::new(endpoint, CLIENT_PARTICIPANT)).await?;
-        let client = connection.client();
-        let epoch = AttachmentEpoch::new(connection.execution());
+        let session = Session::connect(&ConnectOptions::new(endpoint, CLIENT_PARTICIPANT)).await?;
+        let handle = session.handle();
+        let epoch = AttachmentEpoch::new(session.execution());
         let stores = Stores::new(epoch);
         let (events_tx, events_rx) = mpsc::channel(EVENT_CAPACITY);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CAPACITY);
@@ -132,7 +140,7 @@ impl Session {
         let cancellation = CancellationToken::new();
         let mut tasks = JoinSet::new();
         let context = feeds::FeedContext {
-            client: client.clone(),
+            session: handle.clone(),
             epoch,
             project,
             local: local.clone(),
@@ -149,49 +157,12 @@ impl Session {
                 logs: LogReader::new(stores.logs.clone()),
                 runtimes: RuntimeReader::new(stores.runtimes.clone()),
             },
-            connection,
-            client,
+            session,
+            handle,
             local,
             cancellation,
             tasks,
         })
-    }
-
-    /// Observe the highest-revision snapshot this session has installed.
-    pub(crate) fn snapshots(
-        &self,
-    ) -> tokio::sync::watch::Receiver<Option<supervisor::execution::Snapshot>> {
-        self.client.snapshots()
-    }
-
-    /// The most recent snapshot, without awaiting.
-    pub(crate) fn snapshot(&self) -> Option<supervisor::execution::Snapshot> {
-        self.client.snapshot()
-    }
-
-    /// Resolve with the first structured cause that ended the connection.
-    pub(crate) async fn disconnected(&self) -> DisconnectReason {
-        self.client.disconnected().await
-    }
-
-    /// One backward page of the supervisor's bounded log history.
-    pub(crate) async fn logs(
-        &self,
-        participant_id: Option<String>,
-        limit: u32,
-        before_sequence: Option<u64>,
-    ) -> Result<logs::Snapshot> {
-        Ok(self
-            .client
-            .logs(participant_id, limit, before_sequence)
-            .await?)
-    }
-
-    /// The live log stream that continues a [`Self::logs`] page.
-    pub(crate) async fn follow_logs(
-        &self,
-    ) -> Result<StreamReceiver<supervisor::endpoint::logs::FollowEndpoint>> {
-        Ok(self.client.follow_logs().await?)
     }
 
     /// Detach: stop every feed, then close the session. The supervisor is
@@ -210,7 +181,7 @@ impl Session {
     pub(crate) async fn close(mut self) -> Result<()> {
         self.cancellation.cancel();
         self.tasks.shutdown().await;
-        self.connection.close().await?;
+        self.session.close().await?;
         Ok(())
     }
 }

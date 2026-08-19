@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use phoxal_runtime_contract::metadata::ParticipantKind;
+use phoxal::participant::metadata::ParticipantKind;
 
 /// The canonical participant identity, staged `bin/` name, and authored
 /// reserved name of the one mandatory root brain.

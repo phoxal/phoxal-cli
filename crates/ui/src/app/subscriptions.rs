@@ -176,13 +176,13 @@ fn input_epoch(input: &SessionInput) -> Option<AttachmentEpoch> {
 mod tests {
     use std::sync::Arc;
 
+    use phoxal::identity::ExecutionId;
+    use phoxal::identity::RobotId;
+    use phoxal::supervisor::api::execution::Lifecycle;
     use phoxal_cli_observation::{
         AttachmentEpoch, AttachmentEvent, LogWindow, QueryToken, StoreChanged, StoreRevision,
         SupervisorObservation,
     };
-    use phoxal_client::supervisor::execution::Lifecycle;
-    use phoxal_runtime_contract::identity::ExecutionId;
-    use phoxal_runtime_contract::identity::RobotId;
 
     use super::*;
 

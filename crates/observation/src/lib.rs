@@ -3,11 +3,12 @@
 //! This crate deliberately contains no stores, tasks, channels, transports,
 //! reconciliation, commands, or rendering.
 //!
-//! Every remote fact an observation carries comes in as a `phoxal_client`
-//! type, so this crate names no wire crate directly.
-//! `phoxal-runtime-contract` stays a direct dependency because identities and
-//! participant kinds are shared domain primitives that also appear in
-//! observations this crate composes locally.
+//! Every remote fact an observation carries is named by its canonical
+//! `phoxal` path - `phoxal::supervisor::api`, `phoxal::runtime::api`,
+//! `phoxal::identity` - and is carried whole rather than re-aliased here. What
+//! this crate owns is the composition: projections, derived summaries,
+//! sanitization, windows, and the local facts a client knows about the
+//! runtimes it launched itself.
 
 #![cfg_attr(
     test,
@@ -44,9 +45,8 @@ pub use processes::{
 };
 pub use revision::{ObservationQuery, ObservationWindow, QueryToken, StoreChanged, StoreRevision};
 pub use runtimes::{
-    RuntimeBufferKind, RuntimeDirection, RuntimeFeedStatus, RuntimePerformanceSample,
-    RuntimePerformanceSummary, RuntimeQuery, RuntimeRead, RuntimeRow, RuntimeStepSample,
-    RuntimeTopicSample, RuntimeWindow,
+    RuntimeFeedStatus, RuntimePerformanceSample, RuntimePerformanceSummary, RuntimeQuery,
+    RuntimeRead, RuntimeRow, RuntimeWindow,
 };
 pub use source_health::{ObservationSource, SourceHealth, SourceStatus};
 pub use supervisor::SupervisorObservation;

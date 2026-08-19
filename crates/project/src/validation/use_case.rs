@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use crate::check::source::SourceParticipant;
 use crate::source::train::LockedProject;
 use anyhow::{Context, Result, anyhow, bail};
+use phoxal::authoring::source::robot::v0::Manifest as Robot;
 use phoxal_cli_catalog::{ArtifactKind, Catalog};
-use phoxal_manifest::source::robot::v0::Manifest as Robot;
 
 use super::{ValidateRequest, ValidationComponent, ValidationReport, ValidationSource};
 use crate::validation::{
@@ -35,7 +35,7 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
             let bundle = crate::load::layout::validate_runtime_bundle(&release.bundle, expected)
                 .context("runtime archive failed verification")?;
             return Ok(ValidationReport {
-                robot_path: release.bundle.join(phoxal_bundle::MANIFEST_FILE),
+                robot_path: release.bundle.join(phoxal::bundle::MANIFEST_FILE),
                 robot: bundle.robot_id().to_string(),
                 train: String::new(),
                 platform_services: Vec::new(),
@@ -279,7 +279,7 @@ fn check_declared_configs(
     )
 }
 
-fn join_errors(errors: Vec<phoxal_manifest::source::robot::v0::ValidationError>) -> String {
+fn join_errors(errors: Vec<phoxal::authoring::source::robot::v0::ValidationError>) -> String {
     errors
         .iter()
         .map(ToString::to_string)

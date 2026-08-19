@@ -112,17 +112,17 @@ impl RuntimeStore {
 
 #[cfg(test)]
 mod tests {
+    use phoxal::identity::ExecutionId;
     use phoxal_cli_observation::{
         ObservationQuery, QueryToken, RuntimeFeedStatus, RuntimePerformanceSample, RuntimeQuery,
         StoreRevision,
     };
-    use phoxal_runtime_contract::identity::ExecutionId;
 
     use super::*;
 
     fn sample(id: &str, sequence: u64) -> RuntimePerformanceSample {
         RuntimePerformanceSample {
-            record: phoxal_client::supervisor::telemetry::Record {
+            record: phoxal::supervisor::api::telemetry::Record {
                 sequence,
                 participant_id: id.to_string(),
                 truncated: 0,

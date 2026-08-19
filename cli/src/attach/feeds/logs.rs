@@ -8,14 +8,14 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use phoxal::bus::StreamReceiver;
+use phoxal::runtime::api::logs::{Level, Timestamp};
+use phoxal::runtime::api::telemetry::Cursor;
+use phoxal::supervisor::api::logs;
 use phoxal_cli_observation::{
     AttachmentEvent, LogRow, LogSeverity, LogSource, ObservationSource, SourceStatus, StoreChanged,
     bounded_log_text,
 };
-use phoxal_client::StreamReceiver;
-use phoxal_client::runtime::logs::{Level, Timestamp};
-use phoxal_client::runtime::telemetry::Cursor;
-use phoxal_client::supervisor::{self, logs};
 
 use super::FeedContext;
 use crate::reconcile::{ReconcileOutcome, Reconciler, RetryBackoff, Sequenced};
@@ -31,14 +31,14 @@ pub(crate) async fn run(context: FeedContext) {
 }
 
 async fn feed(context: &FeedContext) -> Result<()> {
-    let client = &context.client;
-    let subscriber = client.follow_logs().await?;
+    let session = &context.session;
+    let subscriber = session.follow_logs().await?;
     let mut reconciler = Reconciler::new(BUFFER);
     let mut backoff = RetryBackoff::new(Duration::from_millis(10), Duration::from_millis(250));
 
     'query: loop {
         reconciler.begin_query();
-        let page = client.logs(None, PAGE, None).await?;
+        let page = session.logs(None, PAGE, None).await?;
         let logs::Snapshot {
             cursor, records, ..
         } = page;
@@ -110,10 +110,7 @@ async fn apply(context: &FeedContext, outcome: ReconcileOutcome<Follow>) -> Resu
     Ok(())
 }
 
-async fn requery(
-    subscriber: &StreamReceiver<supervisor::endpoint::logs::FollowEndpoint>,
-    backoff: &mut RetryBackoff,
-) {
+async fn requery(subscriber: &StreamReceiver<logs::Follow>, backoff: &mut RetryBackoff) {
     while subscriber.try_recv().is_ok_and(|item| item.is_some()) {}
     tokio::time::sleep(backoff.next_delay()).await;
 }

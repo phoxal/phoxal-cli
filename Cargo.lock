@@ -1669,12 +1669,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f70749695b063ecbf6b62949ccccde2e733ec3ecbbd71d467dca4e5c6c97cca0"
 
 [[package]]
-name = "glob"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
-
-[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3245,38 +3239,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoxal-bundle"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29f6a69fca65f77e2beeb9ef8bf9edd79f2f4346f5db1bd3261ac972001a5938"
-dependencies = [
- "phoxal-model",
- "phoxal-runtime-contract",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "phoxal-bus"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85ebc1eacf0cb3742c23c93bb21cb51250b36982028810bc134f7437462b4d3b"
-dependencies = [
- "getrandom 0.3.4",
- "libc",
- "phoxal-macros",
- "phoxal-runtime-contract",
- "rmp-serde",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "zenoh",
-]
-
-[[package]]
 name = "phoxal-cli"
 version = "0.40.0"
 dependencies = [
@@ -3287,16 +3249,12 @@ dependencies = [
  "gilrs",
  "hex",
  "libc",
- "phoxal-bundle",
+ "phoxal",
  "phoxal-cli-catalog",
  "phoxal-cli-host",
  "phoxal-cli-observation",
  "phoxal-cli-project",
  "phoxal-cli-ui",
- "phoxal-client",
- "phoxal-manifest",
- "phoxal-model",
- "phoxal-runtime-contract",
  "reqwest",
  "self-replace",
  "semver",
@@ -3320,15 +3278,14 @@ name = "phoxal-cli-host"
 version = "0.40.0"
 dependencies = [
  "anyhow",
- "phoxal-runtime-contract",
+ "phoxal",
 ]
 
 [[package]]
 name = "phoxal-cli-observation"
 version = "0.40.0"
 dependencies = [
- "phoxal-client",
- "phoxal-runtime-contract",
+ "phoxal",
 ]
 
 [[package]]
@@ -3345,12 +3302,9 @@ dependencies = [
  "nalgebra",
  "object",
  "pathdiff",
- "phoxal-bundle",
+ "phoxal",
  "phoxal-cli-catalog",
  "phoxal-cli-host",
- "phoxal-manifest",
- "phoxal-model",
- "phoxal-runtime-contract",
  "reqwest",
  "semver",
  "serde",
@@ -3369,98 +3323,11 @@ version = "0.40.0"
 dependencies = [
  "anyhow",
  "console",
+ "phoxal",
  "phoxal-cli-observation",
- "phoxal-client",
- "phoxal-runtime-contract",
  "tokio",
  "tracing",
  "tuirealm",
-]
-
-[[package]]
-name = "phoxal-client"
-version = "0.40.0"
-dependencies = [
- "phoxal-bus",
- "phoxal-protocol",
- "phoxal-runtime-contract",
- "thiserror 2.0.20",
- "tokio",
- "trybuild",
-]
-
-[[package]]
-name = "phoxal-macros"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a355ac6605ee6a10d1ceaa9745858c0b7eeb9b819cd05662fe74dfb2808e9da8"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "serde_derive_internals 0.29.1",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "phoxal-manifest"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e4ed05d02201798a20cbed65253d286c5cfc478e4a4a1c61a4781111b23405b"
-dependencies = [
- "phoxal-model",
- "phoxal-runtime-contract",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.20",
- "toml 1.1.4+spec-1.1.0",
- "urdf-rs",
-]
-
-[[package]]
-name = "phoxal-model"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "885f2c11c84c197718e40c145345e6e4d70c0ec587e560d9fcd4545254dd0709"
-dependencies = [
- "phoxal-macros",
- "phoxal-runtime-contract",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "phoxal-protocol"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e3902bc4d04d005a8bb3e0104334996e5aafbe4625d63f0287b7cfb52834aa5"
-dependencies = [
- "phoxal-bus",
- "phoxal-macros",
- "phoxal-model",
- "phoxal-runtime-contract",
- "serde",
- "serde_bytes",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "phoxal-runtime-contract"
-version = "0.65.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53f6444242eac2fe7a3b1c73412462c1acff919604545039908629c6bca5af44"
-dependencies = [
- "const_format",
- "getrandom 0.3.4",
- "libc",
- "serde",
- "serde_bytes",
- "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4810,12 +4677,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "target-triple"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3a6bfce3d99adfa72d24750a61f782f3036a81e7f86d8841ee1326deaebd171"
-
-[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4826,15 +4687,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "termcolor"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
-dependencies = [
- "winapi-util",
 ]
 
 [[package]]
@@ -5248,21 +5100,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "trybuild"
-version = "1.0.120"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e605bf6b39357663d8ba4e984f8be8da8df6bb32e81031d6889024ea8fd68e4"
-dependencies = [
- "glob",
- "serde",
- "serde_derive",
- "serde_json",
- "target-triple",
- "termcolor",
- "toml 1.1.4+spec-1.1.0",
-]
 
 [[package]]
 name = "tuirealm"

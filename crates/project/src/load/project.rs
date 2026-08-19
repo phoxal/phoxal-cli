@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 pub(crate) struct LoadedProject {
     pub(crate) root: PathBuf,
     pub(crate) robot_path: PathBuf,
-    pub(crate) robot: phoxal_manifest::source::robot::v0::Manifest,
+    pub(crate) robot: phoxal::authoring::source::robot::v0::Manifest,
 }
 
 pub(crate) fn load(start: &Path) -> Result<LoadedProject> {

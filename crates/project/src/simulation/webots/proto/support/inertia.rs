@@ -87,7 +87,7 @@ impl MassPropertiesAccumulator {
 }
 
 pub fn transform_inertial(
-    inertial: phoxal_model::structure::Inertial,
+    inertial: phoxal::model::structure::Inertial,
     transform: &Isometry3<f64>,
 ) -> ResolvedInertial {
     let [ixx, ixy, ixz, iyy, iyz, izz] = inertial.inertia().values();

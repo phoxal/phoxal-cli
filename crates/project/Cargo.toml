@@ -17,10 +17,7 @@ libc = { workspace = true }
 nalgebra = { workspace = true }
 object = { workspace = true }
 pathdiff = { workspace = true }
-phoxal-bundle = { workspace = true }
-phoxal-manifest = { workspace = true }
-phoxal-model = { workspace = true }
-phoxal-runtime-contract = { workspace = true }
+phoxal = { workspace = true }
 phoxal-cli-catalog = { workspace = true }
 phoxal-cli-host = { workspace = true }
 reqwest = { workspace = true }

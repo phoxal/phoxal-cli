@@ -1,7 +1,7 @@
 //! Config responsibilities for check.
 
 use crate::check as graph_check;
-use phoxal_manifest::source::robot::v0::Manifest as RobotManifest;
+use phoxal::authoring::source::robot::v0::Manifest as RobotManifest;
 use serde_json::Value;
 
 pub(crate) fn validate_user_service_config(
@@ -72,7 +72,7 @@ mod tests {
         CheckGraphContext, CheckOutcome, RawArtifact, RawParticipantReport, run_check_with_context,
     };
     use anyhow::{Result, bail};
-    use phoxal_manifest::source::robot::v0::Manifest as Robot;
+    use phoxal::authoring::source::robot::v0::Manifest as Robot;
     use serde_json::Value;
     use std::path::PathBuf;
 
