@@ -50,7 +50,7 @@ pub const REGISTRY_INDEX: &str = "sparse+https://phoxal.github.io/registry/";
 pub const WEBOTS_CONTROLLER_PACKAGE: &str = "phoxal-simulator-webots-controller";
 
 /// The exact controller version this CLI release drives Webots with.
-pub const WEBOTS_CONTROLLER_VERSION: &str = "0.63.1";
+pub const WEBOTS_CONTROLLER_VERSION: &str = "0.64.0";
 
 /// What an official catalog entry is, which decides its canonical staged binary
 /// name.
