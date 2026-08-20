@@ -63,7 +63,7 @@ jsonschema = { version = "0.46.6", default-features = false }
 # reader - and `authoring` is the authored-source layer behind `phoxal build`.
 # The participant profile is deliberately off: the CLI builds and launches
 # participants, it never is one.
-phoxal = { version = "0.66", default-features = false, features = ["session", "authoring"] }
+phoxal = { version = "0.67", default-features = false, features = ["session", "authoring"] }
 
 phoxal-cli-catalog = { path = "crates/catalog" }
 phoxal-cli-host = { path = "crates/host" }
