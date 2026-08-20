@@ -53,9 +53,6 @@ pub(crate) fn resolve_with_train_using_registry_cache(
     options: ResolveOptions,
     resolved_train: impl FnOnce(&str),
 ) -> Result<BundlePlan> {
-    // Declaration invariants are the very first check: an invalid
-    // workspace lock must not mask a dual/official declaration error.
-    validate_runtime_declarations(robot)?;
     let project = crate::source::train::resolve_locked_project(project_root, options.offline)?;
     resolved_train(project.train.version());
     resolve_with_locked_project_using_registry_cache(
@@ -65,29 +62,6 @@ pub(crate) fn resolve_with_train_using_registry_cache(
         options,
         &project,
     )
-}
-
-/// Reject an authored `services:` map that cannot become a manifest before any
-/// resolution work is done.
-///
-/// The compiler merges the official set into the authored one, so a document
-/// that claims `brain` or an official identity would silently produce a
-/// different robot than its author wrote. Naming it here is what keeps the
-/// diagnostic about `robot.yaml` rather than about a compiled document.
-pub(crate) fn validate_runtime_declarations(robot: &Robot) -> Result<()> {
-    let catalog = Catalog::official();
-    for id in robot.services.keys() {
-        anyhow::ensure!(
-            id != crate::runtimes::BRAIN_ID,
-            "services.{id} is reserved for the mandatory root brain"
-        );
-        anyhow::ensure!(
-            !catalog.is_official_service(id),
-            "robot.yaml declares services.{id}, but '{id}' is an official service; official \
-             runtimes are catalog-owned, always run, and take no robot.yaml declaration"
-        );
-    }
-    Ok(())
 }
 
 /// Resolve against a locked workspace the caller has already loaded. `check`
@@ -493,10 +467,16 @@ fn apply_workspace_runtimes(
                 .map(|override_| override_.artifact_name.as_str()),
         )
         .collect::<std::collections::BTreeSet<_>>();
+    // An official identity under `services:` is a configuration entry for a
+    // service that runs whether or not the document mentions it, so it owes no
+    // workspace crate. A declared official whose source this project DOES
+    // override took the path-override branch above and is already discovered.
+    let catalog = Catalog::official();
     let missing = robot
         .services
         .keys()
         .filter(|name| !discovered_services.contains(name.as_str()))
+        .filter(|name| !catalog.is_official_service(name))
         .collect::<Vec<_>>();
     anyhow::ensure!(
         missing.is_empty(),
@@ -880,20 +860,43 @@ robot:
         Ok(())
     }
 
+    /// The reserved brain identity is the framework's rule, enforced by the
+    /// document grammar itself: a `services.brain` entry never becomes a
+    /// `Robot` at all, so no resolution-time guard can be reached by one and
+    /// the CLI must not carry a second copy of the rule.
     #[test]
-    fn an_invalid_declaration_fails_before_locked_project_resolution() -> anyhow::Result<()> {
-        // The declaration validator is the first operation in `resolve`:
-        // an official identity in a map must fail with the declaration error even
-        // when there is no Cargo project at all (which would otherwise be the
-        // first failure) - proving the ordering, not just the presence, of the
-        // check.
-        let robot = minimal_robot("services:\n  drive: {}\n")?;
-        let error = resolve(&robot, Path::new("/nonexistent"), ResolveOptions::default())
-            .expect_err("an official identity in services: must fail resolution");
-        let message = format!("{error:#}");
+    fn the_reserved_brain_identity_is_rejected_by_the_document_grammar() {
+        let error = minimal_robot("services:\n  brain: {}\n")
+            .expect_err("the reserved brain identity must not parse");
         assert!(
-            message.contains("official service"),
-            "the declaration error must win over the missing-project error: {message}"
+            format!("{error:#}").contains("reserved for the mandatory root brain"),
+            "{error:#}"
+        );
+    }
+
+    /// An official identity under `services:` is how an operator configures a
+    /// service that runs either way. It is not a declaration of anything new,
+    /// so it must resolve with no `services/<id>` workspace crate present.
+    #[test]
+    fn a_declared_official_service_needs_no_workspace_crate() -> anyhow::Result<()> {
+        let robot = minimal_robot("services:\n  drive:\n    config: { rate_hz: 50 }\n")?;
+        let project = locked_project_root()?;
+
+        write_compiler_sources(project.path(), &robot)?;
+        let resolved = resolve_fixture(&robot, project.path(), ResolveOptions::default())?;
+
+        assert!(
+            resolved.user_runtimes.is_empty(),
+            "a configured official is not a user service: {:?}",
+            resolved.user_runtimes
+        );
+        assert!(
+            resolved
+                .platform_runtimes
+                .iter()
+                .any(|runtime| runtime.name == "drive" && runtime.path_override.is_none()),
+            "the official still resolves from the catalog: {:?}",
+            resolved.platform_runtimes
         );
         Ok(())
     }

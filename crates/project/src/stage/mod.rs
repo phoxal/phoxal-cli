@@ -87,10 +87,14 @@ pub(crate) use candidate::compile_test_bundle;
 /// train it declares is the fixture train, which is also the one
 /// [`test_project_train`] locks - together they keep a synthesized binary on
 /// the line its fixture project targets.
+/// `connection` is the one kind `#[phoxal::driver(connection = ...)]` declares,
+/// and is `None` for every service and brain - which is what the callers here
+/// synthesize.
 #[cfg(test)]
 pub(crate) fn test_metadata_payload(
     id: &str,
     kind: &str,
+    connection: Option<phoxal::model::connection::ConnectionKind>,
     config_schema: serde_json::Value,
 ) -> Vec<u8> {
     let kind = serde_json::from_value(serde_json::Value::String(kind.to_string()))
@@ -101,6 +105,7 @@ pub(crate) fn test_metadata_payload(
                 framework: crate::check::participant_metadata::FIXTURE_FRAMEWORK,
                 id,
                 kind,
+                connection,
                 config_schema,
             },
         },

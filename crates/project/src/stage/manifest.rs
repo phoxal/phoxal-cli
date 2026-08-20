@@ -104,6 +104,7 @@ mod tests {
             synthesize_host_participant_object(&crate::stage::test_metadata_payload(
                 declares,
                 kind,
+                None,
                 serde_json::json!({"type": "null"}),
             )),
         )

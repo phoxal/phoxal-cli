@@ -45,9 +45,7 @@ impl Validate {
                                 "found": true,
                             })
                         }).collect::<Vec<_>>(),
-                        "services": report.services.iter().map(|name| {
-                            serde_json::json!({"name": name, "declared": true})
-                        }).collect::<Vec<_>>(),
+                        "services": report.services,
                         "components": report.components,
                     });
                     println!("{}", serde_json::to_string_pretty(&json)?);
@@ -61,19 +59,34 @@ impl Validate {
                     }
                     println!("services:");
                     for service in &report.services {
-                        println!("  - {service} (declared)");
+                        // Every entry here is declared; what differs is where
+                        // the service comes from - an official runs whether or
+                        // not it is listed, and a declaration only configures
+                        // it - and whether that config was actually read
+                        // against the binary's own schema.
+                        let origin = if service.official { "official" } else { "user" };
+                        let config = if service.config_checked {
+                            "config checked"
+                        } else {
+                            "config unchecked"
+                        };
+                        println!("  - {} ({origin}, {config})", service.id);
                     }
                     println!("components:");
                     for component in &report.components {
+                        // A driven instance says whether its `driver:` block
+                        // was actually checked against the driver binary's
+                        // contract: `validate` never stages, so a registry
+                        // driver this project has not built yet goes
+                        // unchecked and must say so.
+                        let driver = match (component.has_driver, component.driver_checked) {
+                            (false, _) => "no-driver",
+                            (true, true) => "driver, checked",
+                            (true, false) => "driver, unchecked",
+                        };
                         println!(
-                            "  - {} ({}) from {}",
-                            component.instance,
-                            if component.has_driver {
-                                "driver"
-                            } else {
-                                "no-driver"
-                            },
-                            component.source
+                            "  - {} ({driver}) from {}",
+                            component.instance, component.source
                         );
                     }
                 }

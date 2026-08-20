@@ -221,14 +221,16 @@ impl Catalog {
     }
 
     /// The officials that run on the robot. Every one of them is mandatory: an
-    /// official participant is always started and takes no authored
-    /// configuration.
+    /// official participant is always started, whether or not a document
+    /// mentions it. A `services:` entry naming one is a configuration entry,
+    /// never a declaration that it runs.
     pub fn native(&self) -> impl Iterator<Item = &'static OfficialRuntime> {
         NATIVE.iter()
     }
 
-    /// Whether `identity` is an official service short name, so an authored
-    /// `services:` entry claiming it can be rejected with a precise diagnostic.
+    /// Whether `identity` is an official service short name, so a `services:`
+    /// entry claiming it is read as configuration for a catalog-owned service
+    /// rather than as a declaration owing a workspace crate.
     #[must_use]
     pub fn is_official_service(&self, identity: &str) -> bool {
         self.native().any(|official| {

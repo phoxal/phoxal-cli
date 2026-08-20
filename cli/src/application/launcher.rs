@@ -510,7 +510,6 @@ mod tests {
             participant_id: id.to_string(),
             binary: id.to_string(),
             role,
-            config: None,
         }
     }
 

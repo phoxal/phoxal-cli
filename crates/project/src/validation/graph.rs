@@ -2,14 +2,15 @@
 
 use super::{
     CheckGraphContext, CheckOutcome, PlatformArtifactRef, RawParticipantReport,
-    ensure_brain_declares_unit_config, validate_artifact_identity,
-    validate_source_artifact_identity, validate_user_service_config,
+    ensure_brain_declares_unit_config, validate_artifact_identity, validate_component_driver_block,
+    validate_declared_service_config, validate_source_artifact_identity,
 };
 use crate::check as graph_check;
 use crate::check::source::SourceParticipant;
 use crate::check::source::SourceParticipantKind;
 use anyhow::Context;
 use anyhow::Result;
+use phoxal_cli_catalog::ArtifactKind;
 
 pub fn run_check_with_context(
     resolved_platform_artifact_refs: &[PlatformArtifactRef],
@@ -45,18 +46,40 @@ pub fn run_check_with_context(
                 )
             })?;
         if artifact.instances.is_empty() {
+            // An official service always runs; what the document may say about
+            // it is its `config`, and that is checked here against the schema
+            // the fetched binary carries - the same slot, the same helper, and
+            // the same sentence a project's own service gets.
+            if artifact.kind == ArtifactKind::Service
+                && let Some(problem) = validate_declared_service_config(
+                    &artifact.name,
+                    participant.config_schema.as_ref(),
+                    context.robot,
+                )
+            {
+                config_problems.push(problem);
+            }
             participants.push(participant);
         } else {
             // A registry-materialized component driver is installed once but
             // launched once per instance that declares it - key each
             // instance's graph membership by its own id, exactly like a
             // workspace-built driver source participant does (see
-            // `SourceParticipantKind::ComponentDriver` below).
+            // `SourceParticipantKind::ComponentDriver` below). The driver
+            // block is per instance too, so it is checked here rather than
+            // once for the shared binary.
             for instance in &artifact.instances {
                 let mut instance_participant = participant.clone();
                 instance_participant.participant_id = instance.clone();
                 instance_participant.scope =
                     graph_check::ParticipantScope::ComponentInstance(instance.clone());
+                config_problems.extend(validate_component_driver_block(
+                    instance,
+                    &instance_participant.artifact_id,
+                    instance_participant.config_schema.as_ref(),
+                    instance_participant.connection,
+                    context.robot,
+                )?);
                 participants.push(instance_participant);
             }
         }
@@ -94,13 +117,24 @@ pub fn run_check_with_context(
             participant_apis.participant_id = participant.name.clone();
             participant_apis.scope =
                 graph_check::ParticipantScope::ComponentInstance(participant.name.clone());
-        } else if participant.kind == SourceParticipantKind::UserService
-            && let Some(problem) = validate_user_service_config(
+            config_problems.extend(validate_component_driver_block(
                 &participant.name,
+                &participant_apis.artifact_id,
                 participant_apis.config_schema.as_ref(),
+                participant_apis.connection,
                 context.robot,
-            )
-        {
+            )?);
+        } else if matches!(
+            participant.kind,
+            SourceParticipantKind::UserService | SourceParticipantKind::OfficialService
+        ) && let Some(problem) = validate_declared_service_config(
+            &participant.name,
+            participant_apis.config_schema.as_ref(),
+            context.robot,
+        ) {
+            // A path-overridden official is still a service the document may
+            // configure, and the schema to check that config against is the
+            // override's own - the binary that will actually read it.
             config_problems.push(problem);
         }
         participants.push(participant_apis);
@@ -148,6 +182,7 @@ mod tests {
                 id: id.to_string(),
             },
             config_schema: None,
+            connection: None,
         }
     }
 

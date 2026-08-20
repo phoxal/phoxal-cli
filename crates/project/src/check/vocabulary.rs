@@ -1,11 +1,18 @@
 //! Project participant classification and graph-report vocabulary.
 
+use phoxal::model::connection::ConnectionKind;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParticipantApis {
     pub participant_id: String,
     pub artifact_id: String,
     pub participant_kind: ParticipantKind,
     pub config_schema: Option<serde_json::Value>,
+    /// The one connection kind this binary declared it accepts
+    /// (`#[phoxal::driver(connection = ...)]`), or `None` when it declared
+    /// none - which is every service and brain, and a driver that takes the
+    /// whole connection and decides for itself.
+    pub connection: Option<ConnectionKind>,
     pub scope: ParticipantScope,
 }
 
@@ -41,11 +48,40 @@ pub enum ParticipantScope {
     ComponentInstance(String),
 }
 
+/// Which authored slot a rejected configuration was read from.
+///
+/// A `services.<id>.config` and a component instance's
+/// `robot.components.<id>.driver.config` are both authored configuration
+/// validated against an embedded schema, and a diagnostic that calls a driven
+/// instance a "user runtime" names the wrong thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigOwner {
+    /// A declared `services.<id>` entry. One variant covers both flavours on
+    /// purpose: a `services:` key is either a service this project owns the
+    /// source of or an official one the document is configuring, and the
+    /// authored slot, the schema it is checked against, and the sentence an
+    /// operator reads are identical either way.
+    Service,
+    /// A driven `robot.components.<id>` entry's `driver:` block.
+    ComponentDriver,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     InvalidConfig {
+        owner: ConfigOwner,
         runtime_id: String,
         errors: Vec<String>,
+    },
+    /// A driven instance authors a connection its driver binary does not
+    /// accept. The binary refuses this at startup, before its bus opens, so
+    /// catching it here is the difference between a red `validate` and a robot
+    /// whose drivers all die at Ready.
+    ConnectionKindMismatch {
+        instance: String,
+        artifact_id: String,
+        declared: ConnectionKind,
+        authored: ConnectionKind,
     },
 }
 

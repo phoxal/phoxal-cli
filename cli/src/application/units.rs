@@ -286,7 +286,6 @@ mod tests {
             participant_id: participant.to_string(),
             binary: binary.to_string(),
             role,
-            config: None,
         }
     }
 

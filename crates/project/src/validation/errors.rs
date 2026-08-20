@@ -24,11 +24,104 @@ pub(super) fn format_report_error(report: &graph_check::Report) -> String {
 
 pub(super) fn format_problem(problem: &graph_check::Problem) -> String {
     match problem {
-        graph_check::Problem::InvalidConfig { runtime_id, errors } => {
+        graph_check::Problem::InvalidConfig {
+            owner: graph_check::ConfigOwner::Service,
+            runtime_id,
+            errors,
+        } => {
             format!(
-                "invalid config for user runtime {runtime_id}: {}",
+                "invalid config for service {runtime_id}: {}",
                 errors.join("; ")
             )
         }
+        graph_check::Problem::InvalidConfig {
+            owner: graph_check::ConfigOwner::ComponentDriver,
+            runtime_id,
+            errors,
+        } => {
+            format!(
+                "invalid driver config for component instance {runtime_id}: {}",
+                errors.join("; ")
+            )
+        }
+        graph_check::Problem::ConnectionKindMismatch {
+            instance,
+            artifact_id,
+            declared,
+            authored,
+        } => {
+            format!(
+                "component instance {instance} authors a '{}' connection, but its driver \
+                 {artifact_id} accepts only '{}'",
+                authored.as_str(),
+                declared.as_str(),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_problem;
+    use crate::check::{ConfigOwner, Problem};
+    use phoxal::model::connection::ConnectionKind;
+
+    /// A driven instance is not a service, and the rendered line is the
+    /// whole of what an operator gets, so each owner has to name its own
+    /// subject. Both service flavours share one line: `services.<id>.config` is
+    /// the slot either way, and an operator does not need to be told which half
+    /// of the merged set the id came from to fix it.
+    #[test]
+    fn an_invalid_config_names_the_thing_that_actually_declared_it() {
+        assert_eq!(
+            format_problem(&Problem::InvalidConfig {
+                owner: ConfigOwner::Service,
+                runtime_id: "avoid".to_string(),
+                errors: vec!["services.avoid.config: \"gain\" is a required property".to_string()],
+            }),
+            "invalid config for service avoid: services.avoid.config: \"gain\" is a required \
+             property"
+        );
+        assert_eq!(
+            format_problem(&Problem::InvalidConfig {
+                owner: ConfigOwner::Service,
+                runtime_id: "safety".to_string(),
+                errors: vec![
+                    "services.safety.config/margin_m: \"wide\" is not of type \"number\""
+                        .to_string()
+                ],
+            }),
+            "invalid config for service safety: services.safety.config/margin_m: \"wide\" is not \
+             of type \"number\""
+        );
+        assert_eq!(
+            format_problem(&Problem::InvalidConfig {
+                owner: ConfigOwner::ComponentDriver,
+                runtime_id: "left_drive".to_string(),
+                errors: vec![
+                    "components.left_drive.driver.config/reduction: \"fast\" is not of type \
+                     \"integer\""
+                        .to_string()
+                ],
+            }),
+            "invalid driver config for component instance left_drive: \
+             components.left_drive.driver.config/reduction: \"fast\" is not of type \"integer\""
+        );
+    }
+
+    /// The mismatch line has to carry all four facts, because the fix is
+    /// either editing that instance's connection or wiring a different driver.
+    #[test]
+    fn a_connection_mismatch_names_the_instance_driver_and_both_kinds() {
+        assert_eq!(
+            format_problem(&Problem::ConnectionKindMismatch {
+                instance: "left_drive".to_string(),
+                artifact_id: "ddsm115".to_string(),
+                declared: ConnectionKind::Serial,
+                authored: ConnectionKind::Can,
+            }),
+            "component instance left_drive authors a 'can' connection, but its driver ddsm115 \
+             accepts only 'serial'"
+        );
     }
 }

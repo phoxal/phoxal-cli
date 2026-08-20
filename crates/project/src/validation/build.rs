@@ -143,6 +143,7 @@ impl TryFrom<RawParticipantReport> for graph_check::ParticipantApis {
             artifact_id,
             participant_kind,
             config_schema: raw.config_schema,
+            connection: raw.connection,
             scope: graph_check::ParticipantScope::Graph,
         })
     }
@@ -166,6 +167,7 @@ mod tests {
                 id: "brain".to_string(),
             },
             config_schema: schema,
+            connection: None,
         }
     }
 
