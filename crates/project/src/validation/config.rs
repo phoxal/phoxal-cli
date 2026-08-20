@@ -6,22 +6,31 @@ use phoxal::authoring::source::robot::v0::Manifest as RobotManifest;
 use phoxal::model::connection::ConnectionKind;
 use serde_json::Value;
 
-pub(crate) fn validate_user_service_config(
+/// Validate one declared `services.<id>` entry's `config` against the schema
+/// the binary that reads it embeds.
+///
+/// The `services:` map is where an operator both declares a service this
+/// project owns the source of and configures an official one that runs either
+/// way, so every key in it is checked the same way against the same slot.
+/// A key the document does not carry is not checked at all: an official
+/// service with no entry has nothing authored to be wrong about, and a service
+/// this project builds is only ever resolved because the document declared it.
+///
+/// An entry whose `config:` is absent is `null`, not `{}`: a no-config
+/// service's emitted schema requires null (so an empty entry passes), while a
+/// service with a real object schema still fails correctly as
+/// config-required-but-missing.
+pub(crate) fn validate_declared_service_config(
     service_id: &str,
     schema: Option<&Value>,
     robot: Option<&RobotManifest>,
 ) -> Option<graph_check::Problem> {
-    // An absent manifest config is `null`, not `{}`: a no-config service's
-    // emitted schema requires null (so absent passes), while a service with a
-    // real object schema still fails correctly as config-required-but-missing.
-    let config = robot
-        .and_then(|robot| robot.services.get(service_id))
-        .and_then(|service| service.config.clone());
+    let declared = robot?.services.get(service_id)?;
     validate_authored_config(
-        graph_check::ConfigOwner::UserService,
+        graph_check::ConfigOwner::Service,
         service_id,
         schema,
-        config.as_ref(),
+        declared.config.as_ref(),
         &format!("services.{service_id}.config"),
     )
 }
@@ -187,10 +196,16 @@ services:
   mission: {}
 "#;
 
-    fn robot_with_service_config(service_id: &str, config: Value) -> Result<Robot> {
-        let mut robot = crate::source::resolver::parse_robot_from_string(
+    /// The fixture document with its one `services:` entry renamed, declaring
+    /// `service_id` and authoring nothing under it.
+    fn robot_declaring(service_id: &str) -> Result<Robot> {
+        crate::source::resolver::parse_robot_from_string(
             &LAUNCH_PLAN_FIXTURE_ROBOT.replace("mission", service_id),
-        )?;
+        )
+    }
+
+    fn robot_with_service_config(service_id: &str, config: Value) -> Result<Robot> {
+        let mut robot = robot_declaring(service_id)?;
         robot
             .services
             .get_mut(service_id)
@@ -263,7 +278,7 @@ services:
                 .iter()
                 .find(|problem| matches!(problem, Problem::InvalidConfig { .. })),
             Some(Problem::InvalidConfig {
-                owner: ConfigOwner::UserService,
+                owner: ConfigOwner::Service,
                 runtime_id,
                 errors,
             })
@@ -279,7 +294,7 @@ services:
                 .iter()
                 .find(|problem| matches!(problem, Problem::InvalidConfig { .. })),
             Some(Problem::InvalidConfig {
-                owner: ConfigOwner::UserService,
+                owner: ConfigOwner::Service,
                 runtime_id,
                 errors,
             })
@@ -306,11 +321,14 @@ services:
             "optional".to_string(),
             PathBuf::from("/fake/project/runtimes/optional"),
         )];
+        let robot = robot_declaring("optional")?;
 
         let outcome = run_check_with_context(
             &[],
             &sources,
-            CheckGraphContext { robot: None },
+            CheckGraphContext {
+                robot: Some(&robot),
+            },
             |_| bail!("no platform images should be fetched"),
             |_| {
                 let mut raw = raw("optional");
@@ -337,11 +355,14 @@ services:
             "required".to_string(),
             PathBuf::from("/fake/project/runtimes/required"),
         )];
+        let robot = robot_declaring("required")?;
 
         let outcome = run_check_with_context(
             &[],
             &sources,
-            CheckGraphContext { robot: None },
+            CheckGraphContext {
+                robot: Some(&robot),
+            },
             |_| bail!("no platform images should be fetched"),
             |_| {
                 let mut raw = raw("required");
@@ -364,7 +385,7 @@ services:
                 .iter()
                 .find(|problem| matches!(problem, Problem::InvalidConfig { .. })),
             Some(Problem::InvalidConfig {
-                owner: ConfigOwner::UserService,
+                owner: ConfigOwner::Service,
                 runtime_id,
                 errors,
             })
@@ -429,7 +450,7 @@ services:
 
         let [
             Problem::InvalidConfig {
-                owner: ConfigOwner::UserService,
+                owner: ConfigOwner::Service,
                 runtime_id,
                 errors,
             },
@@ -455,6 +476,191 @@ services:
                 .any(|error| error.to_ascii_lowercase().contains("additional properties")),
             "{errors:?}"
         );
+        Ok(())
+    }
+
+    /// The two ways one OFFICIAL service reaches the check engine.
+    #[derive(Clone, Copy, Debug)]
+    enum ServiceArrival {
+        /// The ordinary case: a catalog package, fetched from the staged
+        /// binary, carrying no component instances.
+        RegistryRef,
+        /// A workspace `services/<id>` crate overriding the official's source,
+        /// built here - so the schema the declared config is judged against is
+        /// the override's own.
+        PathOverride,
+    }
+
+    const SERVICE_ARRIVALS: [ServiceArrival; 2] =
+        [ServiceArrival::RegistryRef, ServiceArrival::PathOverride];
+
+    /// Drive the check engine with the official service `safety` arriving the
+    /// stated way, against `robot` and the report its binary emits.
+    fn check_safety(
+        arrival: ServiceArrival,
+        robot: &Robot,
+        report: &RawParticipantReport,
+    ) -> Result<CheckOutcome> {
+        match arrival {
+            ServiceArrival::RegistryRef => run_check_with_context(
+                &[PlatformArtifactRef {
+                    name: "safety".to_string(),
+                    kind: ArtifactKind::Service,
+                    binary_name: "safety".to_string(),
+                    instances: Vec::new(),
+                }],
+                &[],
+                CheckGraphContext { robot: Some(robot) },
+                |_| Ok(report.clone()),
+                |participant| bail!("no source participant is built here ({})", participant.name),
+            ),
+            ServiceArrival::PathOverride => run_check_with_context(
+                &[],
+                &[SourceParticipant::official_service(
+                    "safety",
+                    "safety",
+                    PathBuf::from("/fake/project/services/safety"),
+                )],
+                CheckGraphContext { robot: Some(robot) },
+                |image_ref| bail!("no platform artifact is fetched here ({image_ref})"),
+                |_| Ok(report.clone()),
+            ),
+        }
+    }
+
+    /// The report a compiled `safety` service binary emits.
+    fn raw_safety(config_schema: Value) -> RawParticipantReport {
+        RawParticipantReport {
+            artifact: RawArtifact {
+                kind: "service".to_string(),
+                id: "safety".to_string(),
+            },
+            config_schema: Some(config_schema),
+            connection: None,
+        }
+    }
+
+    fn service_config_problems(outcome: &CheckOutcome) -> Vec<&Problem> {
+        outcome
+            .report
+            .problems
+            .iter()
+            .filter(|problem| {
+                matches!(
+                    problem,
+                    Problem::InvalidConfig {
+                        owner: ConfigOwner::Service,
+                        ..
+                    }
+                )
+            })
+            .collect()
+    }
+
+    /// The schema a `safety` binary that takes a margin embeds.
+    fn wants_a_margin() -> Value {
+        serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": { "margin_m": { "type": "number" } },
+            "required": ["margin_m"],
+            "additionalProperties": false,
+        })
+    }
+
+    /// An official service always runs; a `services.<id>` entry for one is how
+    /// its config is authored, and that config is judged against the schema
+    /// that binary embeds - by whichever of the two arrivals produced it.
+    #[test]
+    fn a_declared_official_services_config_is_validated_against_its_binarys_schema() -> Result<()> {
+        for arrival in SERVICE_ARRIVALS {
+            let robot =
+                robot_with_service_config("safety", serde_json::json!({ "margin_m": "wide" }))?;
+            let outcome = check_safety(arrival, &robot, &raw_safety(wants_a_margin()))?;
+            let [
+                Problem::InvalidConfig {
+                    owner: ConfigOwner::Service,
+                    runtime_id,
+                    errors,
+                },
+            ] = service_config_problems(&outcome).as_slice()
+            else {
+                panic!("{arrival:?}: expected one service config problem: {outcome:?}");
+            };
+            assert_eq!(runtime_id, "safety");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.starts_with("services.safety.config")),
+                "{arrival:?}: {errors:?}"
+            );
+            assert!(
+                errors.iter().any(|error| error.contains("margin_m")),
+                "{arrival:?}: {errors:?}"
+            );
+
+            let robot =
+                robot_with_service_config("safety", serde_json::json!({ "margin_m": 0.4 }))?;
+            let outcome = check_safety(arrival, &robot, &raw_safety(wants_a_margin()))?;
+            assert!(
+                outcome.is_ok(),
+                "{arrival:?}: a valid margin must pass: {outcome:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A path-overridden official is judged against the OVERRIDE's schema, not
+    /// against whatever the catalog binary would have wanted: the override is
+    /// the binary that will read the config.
+    #[test]
+    fn a_path_overridden_official_is_judged_against_the_overrides_own_schema() -> Result<()> {
+        // The fork took a `mode` where the catalog service takes a `margin_m`.
+        let robot = robot_with_service_config("safety", serde_json::json!({ "mode": "strict" }))?;
+        let takes_a_mode = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": { "mode": { "type": "string" } },
+            "required": ["mode"],
+            "additionalProperties": false,
+        });
+
+        let outcome = check_safety(
+            ServiceArrival::PathOverride,
+            &robot,
+            &raw_safety(takes_a_mode),
+        )?;
+        assert!(
+            outcome.is_ok(),
+            "the override's own schema decides: {outcome:?}"
+        );
+
+        let outcome = check_safety(
+            ServiceArrival::PathOverride,
+            &robot,
+            &raw_safety(wants_a_margin()),
+        )?;
+        assert!(
+            !service_config_problems(&outcome).is_empty(),
+            "a config the built binary rejects must fail: {outcome:?}"
+        );
+        Ok(())
+    }
+
+    /// An official service the document does not declare has nothing authored
+    /// to be wrong. It runs either way, so a schema it would have wanted a
+    /// config for must not turn every undeclared official into a failure.
+    #[test]
+    fn an_undeclared_official_service_is_not_config_checked() -> Result<()> {
+        // The fixture declares `mission`, never `safety`.
+        let robot = fixture_robot()?;
+        for arrival in SERVICE_ARRIVALS {
+            let outcome = check_safety(arrival, &robot, &raw_safety(wants_a_margin()))?;
+            assert!(
+                outcome.is_ok(),
+                "{arrival:?}: an undeclared official must not be config-checked: {outcome:?}"
+            );
+        }
         Ok(())
     }
 

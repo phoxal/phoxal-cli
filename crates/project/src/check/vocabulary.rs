@@ -56,8 +56,12 @@ pub enum ParticipantScope {
 /// instance a "user runtime" names the wrong thing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigOwner {
-    /// A declared `services.<id>` entry.
-    UserService,
+    /// A declared `services.<id>` entry. One variant covers both flavours on
+    /// purpose: a `services:` key is either a service this project owns the
+    /// source of or an official one the document is configuring, and the
+    /// authored slot, the schema it is checked against, and the sentence an
+    /// operator reads are identical either way.
+    Service,
     /// A driven `robot.components.<id>` entry's `driver:` block.
     ComponentDriver,
 }

@@ -62,6 +62,6 @@ pub use simulation::{
 };
 pub use target::resolve as resolve_target;
 pub use validation::{
-    ArchiveValidation, ValidateRequest, ValidationComponent, ValidationReport, ValidationSource,
-    validate,
+    ArchiveValidation, ValidateRequest, ValidationComponent, ValidationReport, ValidationService,
+    ValidationSource, validate,
 };

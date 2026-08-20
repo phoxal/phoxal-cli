@@ -9,12 +9,15 @@ use phoxal::authoring::source::robot::v0::Manifest as Robot;
 use phoxal::version::FrameworkVersion;
 use phoxal_cli_catalog::{ArtifactKind, Catalog};
 
-use super::{ValidateRequest, ValidationComponent, ValidationReport, ValidationSource};
+use super::{
+    ValidateRequest, ValidationComponent, ValidationReport, ValidationService, ValidationSource,
+};
 use crate::validation::{
     CheckGraphContext, CheckOutcome, PlatformArtifactRef, RawParticipantReport,
     build_participant_report_from_binary, component_driver_platform_refs_from_resolved,
     component_driver_runtimes_by_ref, ensure_check_outcome_ok,
-    extract_participant_report_from_staged_runtime, run_check_with_context,
+    extract_participant_report_from_staged_runtime, platform_artifact_refs_from_resolved,
+    platform_runtimes_by_ref, run_check_with_context,
 };
 
 pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
@@ -64,12 +67,6 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         },
     )?;
 
-    // Declaration-only invariants first, matching resolution's
-    // ordering: a dual-name or official-identity declaration must fail
-    // before any Cargo workspace reasoning, source-check or otherwise.
-    crate::resolve::project::validate_runtime_declarations(&robot)
-        .map_err(|error| anyhow!("Cargo workspace runtime discovery failed:\n{error:#}"))?;
-
     // Resolve the locked workspace once and share that result with canonical
     // compilation and config checking. Resolving component asset roots may
     // fetch packages from the Phoxal registry unless `--offline` was selected.
@@ -104,8 +101,9 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
     );
 
     // Every authored configuration must satisfy the JSON Schema the binary
-    // that reads it embeds: a declared user service's `services.<id>.config`
-    // against its `#[phoxal::service(config = ...)]` type, and a driven
+    // that reads it embeds: every `services.<id>.config` the document declares
+    // - this project's own service or an official one it configures - against
+    // that service's `#[phoxal::service(config = ...)]` type, and a driven
     // instance's `driver:` block against its driver's config type and declared
     // connection kind. There is no schema until those types compile, so this
     // is the one part of `validate` that is not free - it builds the root
@@ -122,23 +120,24 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         request.offline,
         request.reporter.as_ref(),
     )?;
-    // A registry driver's contract lives in a binary this command may not
+    // A registry artifact's contract lives in a binary this command may not
     // materialize, so it is read from the project's own staged release when
     // one is there and reported unchecked when it is not.
-    let staged_drivers = staged_registry_driver_reports(
+    let staged = staged_registry_reports(
         project_root,
+        &robot,
         &resolved,
         project_framework,
         request.reporter.as_ref(),
     );
     let outcome = check_declared_sources(
         &robot,
-        &staged_drivers.refs,
+        &staged.refs,
         &source_participants,
         |binary_name| {
-            staged_drivers.reports.get(binary_name).cloned().ok_or_else(|| {
+            staged.reports.get(binary_name).cloned().ok_or_else(|| {
                 anyhow!(
-                    "validate reads only already-staged driver binaries (unexpected request for \
+                    "validate reads only already-staged binaries (unexpected request for \
                      {binary_name})"
                 )
             })
@@ -153,24 +152,39 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
         },
     )?;
     ensure_check_outcome_ok(&outcome)?;
-    let checked_instances = outcome
-        .checked_participants
-        .iter()
-        .filter_map(|participant| match &participant.scope {
-            crate::check::ParticipantScope::ComponentInstance(instance) => Some(instance.clone()),
-            crate::check::ParticipantScope::Graph => None,
-        })
-        .collect::<BTreeSet<_>>();
+    let mut checked_instances = BTreeSet::new();
+    let mut checked_services = BTreeSet::new();
+    for participant in &outcome.checked_participants {
+        match &participant.scope {
+            crate::check::ParticipantScope::ComponentInstance(instance) => {
+                checked_instances.insert(instance.clone());
+            }
+            crate::check::ParticipantScope::Graph => {
+                if participant.participant_kind == crate::check::ParticipantKind::Service {
+                    checked_services.insert(participant.participant_id.clone());
+                }
+            }
+        }
+    }
+    let catalog = Catalog::official();
     Ok(ValidationReport {
         robot_path,
         robot: robot.robot.id.clone(),
         train,
-        platform_services: Catalog::official()
+        platform_services: catalog
             .native()
             .filter(|official| official.kind == ArtifactKind::Service)
             .map(|official| official.package.to_string())
             .collect(),
-        services: robot.services.keys().cloned().collect(),
+        services: robot
+            .services
+            .keys()
+            .map(|id| ValidationService {
+                id: id.clone(),
+                official: catalog.is_official_service(id),
+                config_checked: checked_services.contains(id),
+            })
+            .collect(),
         components: robot
             .robot
             .components
@@ -190,20 +204,26 @@ pub fn validate(request: ValidateRequest) -> Result<ValidationReport> {
 /// built only when the robot declares any, so the brain-only case must read
 /// naturally rather than announcing "0 declared service crates".
 fn compile_notice(participants: &[SourceParticipant]) -> String {
-    let count = |kind| {
+    let count = |kinds: &[SourceParticipantKind]| {
         participants
             .iter()
-            .filter(|participant| participant.kind == kind)
+            .filter(|participant| kinds.contains(&participant.kind))
             .count()
     };
     let mut parts = vec!["the root brain".to_string()];
     for (count, noun) in [
         (
-            count(SourceParticipantKind::UserService),
+            // A workspace crate that overrides an official service is a
+            // declared service crate too: it is declared, it is built here, and
+            // its schema is what the declared config is judged against.
+            count(&[
+                SourceParticipantKind::UserService,
+                SourceParticipantKind::OfficialService,
+            ]),
             "declared service crate",
         ),
         (
-            count(SourceParticipantKind::ComponentDriver),
+            count(&[SourceParticipantKind::ComponentDriver]),
             "component driver crate",
         ),
     ] {
@@ -224,57 +244,72 @@ fn compile_notice(participants: &[SourceParticipant]) -> String {
     )
 }
 
-/// The registry-sourced component drivers this command can actually check, and
-/// the report each one's staged binary carries.
+/// The registry-sourced artifacts this command can actually check, and the
+/// report each one's staged binary carries.
 ///
-/// `validate` never stages and never installs. A registry driver's binary is
-/// therefore either already in this project's own release from an earlier
-/// `phoxal build` - in which case its embedded contract is read straight off
-/// disk, exactly as `build` and `run` read it - or it cannot be read here, and
-/// the honest answer is to name the instances that went unchecked rather than
-/// pass them silently or turn `validate` into a build.
-struct StagedRegistryDrivers {
+/// Two kinds arrive here, for the same reason: a component driver, whose
+/// authored `driver:` block only its own binary's contract can judge, and an
+/// official service the document declares in order to configure it. Neither is
+/// built from source by this command.
+///
+/// `validate` never stages and never installs. Such a binary is therefore
+/// either already in this project's own release from an earlier `phoxal build` -
+/// in which case its embedded contract is read straight off disk, exactly as
+/// `build` and `run` read it - or it cannot be read here, and the honest answer
+/// is to name what went unchecked rather than pass it silently or turn
+/// `validate` into a build.
+///
+/// An official service the document does NOT declare never appears here at all:
+/// it runs regardless, and there is nothing authored about it to be wrong.
+struct StagedRegistryArtifacts {
     refs: Vec<PlatformArtifactRef>,
     reports: BTreeMap<String, RawParticipantReport>,
 }
 
-fn staged_registry_driver_reports(
+fn staged_registry_reports(
     project_root: &Path,
+    robot: &Robot,
     resolved: &BundlePlan,
     project_framework: FrameworkVersion,
     reporter: &dyn crate::Reporter,
-) -> StagedRegistryDrivers {
+) -> StagedRegistryArtifacts {
     let bin_dir = crate::paths::runtime::runtime_release_root(project_root)
         .join(crate::deployment::BUNDLE_DIR)
         .join(phoxal::bundle::BIN_DIR);
-    let runtimes = component_driver_runtimes_by_ref(resolved);
-    let mut staged = StagedRegistryDrivers {
+    let mut runtimes = platform_runtimes_by_ref(resolved);
+    runtimes.extend(component_driver_runtimes_by_ref(resolved));
+    let mut staged = StagedRegistryArtifacts {
         refs: Vec::new(),
         reports: BTreeMap::new(),
     };
-    for driver_ref in component_driver_platform_refs_from_resolved(resolved) {
-        let outcome = runtimes.get(&driver_ref.binary_name).map(|runtime| {
+    let declared_officials = platform_artifact_refs_from_resolved(resolved)
+        .into_iter()
+        .filter(|official| robot.services.contains_key(&official.name));
+    for artifact_ref in
+        declared_officials.chain(component_driver_platform_refs_from_resolved(resolved))
+    {
+        let outcome = runtimes.get(&artifact_ref.binary_name).map(|runtime| {
             extract_participant_report_from_staged_runtime(&bin_dir, runtime, project_framework)
         });
         match outcome {
             Some(Ok(report)) => {
                 staged
                     .reports
-                    .insert(driver_ref.binary_name.clone(), report);
-                staged.refs.push(driver_ref);
+                    .insert(artifact_ref.binary_name.clone(), report);
+                staged.refs.push(artifact_ref);
             }
             // A binary that is not here and a binary that is here but cannot
             // be read are two different answers, and only the second one has a
             // cause worth naming. Right after a framework bump the staged
-            // release still holds the previous line's drivers, and calling
+            // release still holds the previous line's binaries, and calling
             // that "not staged" would be a plain untruth about a file sitting
             // on disk - and would hide the one sentence saying what to do.
-            Some(Err(error)) if bin_dir.join(&driver_ref.binary_name).exists() => {
-                reporter.warn(unusable_driver_notice(&driver_ref, &error));
+            Some(Err(error)) if bin_dir.join(&artifact_ref.binary_name).exists() => {
+                reporter.warn(unusable_artifact_notice(&artifact_ref, &error));
             }
             Some(Err(_)) | None => {
-                reporter.warn(unstaged_driver_notice(
-                    &driver_ref,
+                reporter.warn(unstaged_artifact_notice(
+                    &artifact_ref,
                     resolved.train.version(),
                 ));
             }
@@ -283,30 +318,36 @@ fn staged_registry_driver_reports(
     staged
 }
 
-/// Which instances an unchecked driver leaves unchecked, as the subject of a
-/// sentence.
-fn driver_block_subject(driver_ref: &PlatformArtifactRef) -> String {
-    let instances = driver_ref
-        .instances
-        .iter()
-        .map(|instance| format!("`{instance}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    if driver_ref.instances.len() == 1 {
-        format!("driver block of {instances}")
-    } else {
-        format!("driver blocks of {instances}")
+/// What an unreadable binary leaves unchecked, as the subject of a sentence:
+/// the driver blocks that binary was the only judge of, or the config the
+/// document authored for that official service.
+fn unchecked_subject(artifact_ref: &PlatformArtifactRef) -> String {
+    match artifact_ref.kind {
+        ArtifactKind::Service => format!("config of service `{}`", artifact_ref.name),
+        ArtifactKind::ComponentDriver => {
+            let instances = artifact_ref
+                .instances
+                .iter()
+                .map(|instance| format!("`{instance}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if artifact_ref.instances.len() == 1 {
+                format!("driver block of {instances}")
+            } else {
+                format!("driver blocks of {instances}")
+            }
+        }
     }
 }
 
-/// The one thing an operator can act on when a registry driver's binary is not
-/// here: which instances went unchecked, which binary is missing, and the
-/// command that produces it.
-fn unstaged_driver_notice(driver_ref: &PlatformArtifactRef, train: &str) -> String {
+/// The one thing an operator can act on when a registry binary is not here:
+/// what went unchecked, which binary is missing, and the command that produces
+/// it.
+fn unstaged_artifact_notice(artifact_ref: &PlatformArtifactRef, train: &str) -> String {
     format!(
         "{} not validated: `{}` is not staged for train {train}; run `phoxal build`",
-        driver_block_subject(driver_ref),
-        driver_ref.binary_name,
+        unchecked_subject(artifact_ref),
+        artifact_ref.binary_name,
     )
 }
 
@@ -318,7 +359,7 @@ fn unstaged_driver_notice(driver_ref: &PlatformArtifactRef, train: &str) -> Stri
 /// declares - while the layers above it only restate which file was being read,
 /// which the notice already says. It is flattened to a single line because the
 /// metadata reader's own guidance is a paragraph, and a warning is one line.
-fn unusable_driver_notice(driver_ref: &PlatformArtifactRef, error: &anyhow::Error) -> String {
+fn unusable_artifact_notice(artifact_ref: &PlatformArtifactRef, error: &anyhow::Error) -> String {
     let cause = error
         .root_cause()
         .to_string()
@@ -330,8 +371,8 @@ fn unusable_driver_notice(driver_ref: &PlatformArtifactRef, error: &anyhow::Erro
     let cause = cause.trim_end_matches('.');
     format!(
         "{} not validated: staged `{}` is unusable: {cause}; run `phoxal build`",
-        driver_block_subject(driver_ref),
-        driver_ref.binary_name,
+        unchecked_subject(artifact_ref),
+        artifact_ref.binary_name,
     )
 }
 
@@ -372,8 +413,13 @@ fn workspace_runtime_report(robot: &Robot, project: &LockedProject) -> Workspace
             "Cargo workspace service '{service}' discovered ({note})"
         ));
     }
+    let catalog = Catalog::official();
     for configured in robot.services.keys() {
-        if !services.contains(configured) {
+        // An official identity under `services:` configures a service that runs
+        // either way; it declares no workspace crate and owes none. A project
+        // that DOES override an official's source has that crate under
+        // `services/<id>` and it is discovered above like any other.
+        if !services.contains(configured) && !catalog.is_official_service(configured) {
             report.problems.push(format!(
                 "services.{configured} has no matching services/{configured} workspace crate"
             ));
@@ -391,32 +437,38 @@ fn workspace_runtime_report(robot: &Robot, project: &LockedProject) -> Workspace
 /// before anything else depends on it.
 ///
 /// The config-bearing half is two things. A `services/<id>` crate whose `<id>`
-/// is a declared key in `robot.services`: an official identity can never be a
-/// declared key (`validate_runtime_declarations` rejects that at parse time),
-/// so this filter alone is enough to exclude a workspace crate that
-/// path-overrides an official service - no separate "is this an official
-/// package name" lookup is needed here the way full graph resolution needs
-/// one. And every `components/<id>` crate this project owns the source of,
-/// whose driven instances author a `driver:` block the crate's own binary has
-/// to accept; a registry-sourced driver is not built here at all (see
-/// [`staged_registry_driver_reports`]). This scoping is the point: `validate`
-/// builds only the crates whose contract it actually needs to read, not the
-/// whole official graph `build`/`run` resolve.
+/// is a declared key in `robot.services` - either a service this project owns
+/// outright, or a workspace crate that path-overrides an official one, which
+/// is the very binary that will read the declared config and therefore the one
+/// whose schema it must satisfy. And every `components/<id>` crate this project
+/// owns the source of, whose driven instances author a `driver:` block the
+/// crate's own binary has to accept; a registry-sourced driver is not built
+/// here at all (see [`staged_registry_reports`]). This scoping is the point:
+/// `validate` builds only the crates whose contract it actually needs to read,
+/// not the whole official graph `build`/`run` resolve.
 fn declared_source_participants(
     robot: &Robot,
     project: &LockedProject,
     resolved: &BundlePlan,
 ) -> Vec<SourceParticipant> {
+    let catalog = Catalog::official();
     let mut participants = vec![SourceParticipant::brain(
         project.brain.crate_dir.clone(),
         project.brain.bin_target.clone(),
     )];
     participants.extend(project.runtimes.iter().filter_map(|runtime| {
         let name = runtime.crate_dir.file_name()?.to_str()?.to_string();
-        robot
-            .services
-            .contains_key(&name)
-            .then(|| SourceParticipant::user_service(name, runtime.crate_dir.clone()))
+        if !robot.services.contains_key(&name) {
+            return None;
+        }
+        // The two flavours are checked identically but must not be labelled
+        // identically: calling a path-overridden official a "user service" in a
+        // build or identity diagnostic would name the wrong thing.
+        Some(if catalog.is_official_service(&name) {
+            SourceParticipant::official_service(name.clone(), name, runtime.crate_dir.clone())
+        } else {
+            SourceParticipant::user_service(name, runtime.crate_dir.clone())
+        })
     }));
     participants.extend(resolved.components.iter().filter_map(|component| {
         match component.driver.as_ref()? {
@@ -433,12 +485,12 @@ fn declared_source_participants(
     participants
 }
 
-/// Check every declared source participant plus every registry driver whose
+/// Check every declared source participant plus every registry artifact whose
 /// binary is already staged, through the shared check engine
 /// ([`crate::validation::run_check_with_context`]) `build`/`run`/`simulate`
 /// already use - never a second, divergent validator. `fetch` and `build` are
 /// injected so pure tests can supply reports; production reads each staged
-/// driver off disk and looks up each built binary in the one selected-source
+/// binary off disk and looks up each built binary in the one selected-source
 /// artifact batch prepared by [`crate::validate`].
 fn check_declared_sources(
     robot: &Robot,
@@ -709,23 +761,30 @@ services:
         Ok(())
     }
 
-    /// The unchecked-driver warning has to be actionable on its own: which
-    /// instances went unchecked, which binary is missing, and what produces
-    /// it.
+    /// The unchecked-artifact warning has to be actionable on its own: what
+    /// went unchecked, which binary is missing, and what produces it. A driver
+    /// names the instances whose blocks it was the only judge of; a declared
+    /// official names the service whose config went unread.
     #[test]
-    fn an_unstaged_registry_driver_names_its_instances_binary_and_the_fix() {
+    fn an_unstaged_registry_artifact_names_its_subject_binary_and_the_fix() {
         let one = driver_ref(vec!["left_drive".to_string()]);
         assert_eq!(
-            unstaged_driver_notice(&one, "0.42.0"),
+            unstaged_artifact_notice(&one, "0.42.0"),
             "driver block of `left_drive` not validated: `ddsm115` is not staged for train \
              0.42.0; run `phoxal build`"
         );
 
         let two = driver_ref(vec!["left_drive".to_string(), "right_drive".to_string()]);
         assert_eq!(
-            unstaged_driver_notice(&two, "0.42.0"),
+            unstaged_artifact_notice(&two, "0.42.0"),
             "driver blocks of `left_drive`, `right_drive` not validated: `ddsm115` is not staged \
              for train 0.42.0; run `phoxal build`"
+        );
+
+        assert_eq!(
+            unstaged_artifact_notice(&official_ref("safety"), "0.42.0"),
+            "config of service `safety` not validated: `safety` is not staged for train 0.42.0; \
+             run `phoxal build`"
         );
     }
 
@@ -735,6 +794,15 @@ services:
             kind: ArtifactKind::ComponentDriver,
             binary_name: "ddsm115".to_string(),
             instances,
+        }
+    }
+
+    fn official_ref(name: &str) -> PlatformArtifactRef {
+        PlatformArtifactRef {
+            name: name.to_string(),
+            kind: ArtifactKind::Service,
+            binary_name: phoxal_cli_catalog::bundle_binary_name(name),
+            instances: Vec::new(),
         }
     }
 
@@ -765,7 +833,7 @@ services:
     }
 
     /// A plan whose one component instance is driven by a registry-sourced
-    /// `ddsm115`, which is what `staged_registry_driver_reports` reasons about.
+    /// `ddsm115`, which is what `staged_registry_reports` reasons about.
     fn resolved_with_registry_driver() -> Result<BundlePlan> {
         resolved_with_components(vec![crate::source::resolver::ResolvedComponent {
             instance: "left_drive".to_string(),
@@ -784,14 +852,52 @@ services:
         }])
     }
 
-    /// Write `bytes` where this project's own release stages `bin/ddsm115`.
-    fn stage_driver_binary(project_root: &Path, bytes: &[u8]) -> Result<()> {
+    /// A plan carrying one registry-resolved official service, the shape a real
+    /// resolution produces for every catalog entry.
+    fn resolved_with_official_service(name: &str) -> Result<BundlePlan> {
+        let mut resolved = resolved_with_components(Vec::new())?;
+        resolved
+            .platform_runtimes
+            .push(crate::source::resolver::ResolvedPlatformRuntime {
+                name: name.to_string(),
+                package: format!("phoxal/service-{name}"),
+                kind: ArtifactKind::Service,
+                path_override: None,
+                train: crate::check::participant_metadata::FIXTURE_FRAMEWORK.to_string(),
+                target: None,
+            });
+        Ok(resolved)
+    }
+
+    /// The minimal fixture document with `services.<id>` declared, so an
+    /// official identity under `services:` can be exercised.
+    fn robot_declaring(id: &str) -> Robot {
+        crate::source::resolver::parse_robot_from_string(
+            &MINIMAL_ROBOT.replace("  avoid: {}", &format!("  {id}: {{}}")),
+        )
+        .expect("the fixture robot.yaml parses")
+    }
+
+    /// Write `bytes` where this project's own release stages `bin/<name>`.
+    fn stage_binary(project_root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
         let bin = crate::paths::runtime::runtime_release_root(project_root)
             .join(crate::deployment::BUNDLE_DIR)
             .join(phoxal::bundle::BIN_DIR);
         std::fs::create_dir_all(&bin)?;
-        std::fs::write(bin.join("ddsm115"), bytes)?;
+        std::fs::write(bin.join(name), bytes)?;
         Ok(())
+    }
+
+    /// The metadata object a built `<id>` binary of `kind` embeds.
+    fn staged_metadata(id: &str, kind: &str) -> Vec<u8> {
+        crate::check::participant_metadata::synthesize_host_participant_object(
+            &crate::stage::test_metadata_payload(
+                id,
+                kind,
+                (kind == "driver").then_some(phoxal::model::connection::ConnectionKind::Serial),
+                serde_json::json!({"type": "null"}),
+            ),
+        )
     }
 
     /// Nothing staged: the binary is genuinely absent, so the notice says so
@@ -802,8 +908,9 @@ services:
         let resolved = resolved_with_registry_driver()?;
         let reporter = RecordingReporter::default();
 
-        let staged = staged_registry_driver_reports(
+        let staged = staged_registry_reports(
             project.path(),
+            &minimal_robot(),
             &resolved,
             crate::check::participant_metadata::FIXTURE_FRAMEWORK,
             &reporter,
@@ -828,24 +935,19 @@ services:
     #[test]
     fn a_staged_driver_from_another_train_is_reported_unusable_with_its_cause() -> Result<()> {
         let project = tempfile::tempdir()?;
-        stage_driver_binary(
+        stage_binary(
             project.path(),
-            &crate::check::participant_metadata::synthesize_host_participant_object(
-                &crate::stage::test_metadata_payload(
-                    "ddsm115",
-                    "driver",
-                    Some(phoxal::model::connection::ConnectionKind::Serial),
-                    serde_json::json!({"type": "null"}),
-                ),
-            ),
+            "ddsm115",
+            &staged_metadata("ddsm115", "driver"),
         )?;
         let resolved = resolved_with_registry_driver()?;
         let reporter = RecordingReporter::default();
 
         // The project has moved a compatibility line ahead of what its own
         // release last staged.
-        let staged = staged_registry_driver_reports(
+        let staged = staged_registry_reports(
             project.path(),
+            &minimal_robot(),
             &resolved,
             FrameworkVersion::new(0, 43, 0),
             &reporter,
@@ -881,22 +983,17 @@ services:
     #[test]
     fn a_staged_driver_on_the_projects_line_is_read_and_checked() -> Result<()> {
         let project = tempfile::tempdir()?;
-        stage_driver_binary(
+        stage_binary(
             project.path(),
-            &crate::check::participant_metadata::synthesize_host_participant_object(
-                &crate::stage::test_metadata_payload(
-                    "ddsm115",
-                    "driver",
-                    Some(phoxal::model::connection::ConnectionKind::Serial),
-                    serde_json::json!({"type": "null"}),
-                ),
-            ),
+            "ddsm115",
+            &staged_metadata("ddsm115", "driver"),
         )?;
         let resolved = resolved_with_registry_driver()?;
         let reporter = RecordingReporter::default();
 
-        let staged = staged_registry_driver_reports(
+        let staged = staged_registry_reports(
             project.path(),
+            &minimal_robot(),
             &resolved,
             crate::check::participant_metadata::FIXTURE_FRAMEWORK,
             &reporter,
@@ -911,6 +1008,129 @@ services:
             report.connection,
             Some(phoxal::model::connection::ConnectionKind::Serial)
         );
+        Ok(())
+    }
+
+    /// An official service the document never mentions has nothing authored to
+    /// check, so `validate` neither reads its binary nor warns about it - it
+    /// runs regardless, and a warning about a file nobody asked a question of
+    /// would be noise on every project.
+    #[test]
+    fn an_undeclared_official_service_is_never_read_and_never_warned_about() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let resolved = resolved_with_official_service("safety")?;
+        let reporter = RecordingReporter::default();
+
+        let staged = staged_registry_reports(
+            project.path(),
+            &minimal_robot(),
+            &resolved,
+            crate::check::participant_metadata::FIXTURE_FRAMEWORK,
+            &reporter,
+        );
+
+        assert!(staged.refs.is_empty(), "{:?}", staged.refs);
+        assert!(reporter.warnings().is_empty(), "{:?}", reporter.warnings());
+        Ok(())
+    }
+
+    /// A declared official whose binary this project has not staged: the
+    /// config an operator wrote goes unread, and the notice has to say so
+    /// rather than let `validate` report the project green.
+    #[test]
+    fn a_declared_official_service_with_no_staged_binary_is_reported_unstaged() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let resolved = resolved_with_official_service("safety")?;
+        let reporter = RecordingReporter::default();
+
+        let staged = staged_registry_reports(
+            project.path(),
+            &robot_declaring("safety"),
+            &resolved,
+            crate::check::participant_metadata::FIXTURE_FRAMEWORK,
+            &reporter,
+        );
+
+        assert!(staged.refs.is_empty(), "{:?}", staged.refs);
+        assert_eq!(
+            reporter.warnings(),
+            vec![format!(
+                "config of service `safety` not validated: `safety` is not staged for train {}; \
+                 run `phoxal build`",
+                crate::check::participant_metadata::FIXTURE_FRAMEWORK
+            )]
+        );
+        Ok(())
+    }
+
+    /// The same declared official, with its binary staged on this project's own
+    /// line: its embedded contract is read straight off disk and its ref enters
+    /// the check, exactly as a staged driver's does.
+    #[test]
+    fn a_declared_official_service_staged_on_the_projects_line_is_read_and_checked() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        stage_binary(
+            project.path(),
+            "safety",
+            &staged_metadata("safety", "service"),
+        )?;
+        let resolved = resolved_with_official_service("safety")?;
+        let reporter = RecordingReporter::default();
+
+        let staged = staged_registry_reports(
+            project.path(),
+            &robot_declaring("safety"),
+            &resolved,
+            crate::check::participant_metadata::FIXTURE_FRAMEWORK,
+            &reporter,
+        );
+
+        assert!(reporter.warnings().is_empty(), "{:?}", reporter.warnings());
+        assert_eq!(staged.refs.len(), 1);
+        assert_eq!(staged.refs[0].name, "safety");
+        assert!(
+            staged.refs[0].instances.is_empty(),
+            "a service is not keyed per instance: {:?}",
+            staged.refs[0]
+        );
+        let report = staged.reports.get("safety").expect("the staged report");
+        assert_eq!(report.artifact.id, "safety");
+        assert_eq!(report.artifact.kind, "service");
+        Ok(())
+    }
+
+    /// A declared official whose binary IS staged but on another line: the file
+    /// is right there, so "not staged" would be untrue and would hide the
+    /// reason its config could not be checked.
+    #[test]
+    fn a_declared_official_service_from_another_train_is_reported_unusable() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        stage_binary(
+            project.path(),
+            "safety",
+            &staged_metadata("safety", "service"),
+        )?;
+        let resolved = resolved_with_official_service("safety")?;
+        let reporter = RecordingReporter::default();
+
+        let staged = staged_registry_reports(
+            project.path(),
+            &robot_declaring("safety"),
+            &resolved,
+            FrameworkVersion::new(0, 43, 0),
+            &reporter,
+        );
+
+        assert!(staged.refs.is_empty(), "{:?}", staged.refs);
+        let [warning] = reporter.warnings().try_into().expect("exactly one warning");
+        assert!(
+            warning.starts_with(
+                "config of service `safety` not validated: staged `safety` is unusable: "
+            ),
+            "{warning}"
+        );
+        assert!(warning.contains("0.43.0"), "{warning}");
+        assert_eq!(warning.lines().count(), 1, "{warning}");
         Ok(())
     }
 

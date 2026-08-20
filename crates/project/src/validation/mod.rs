@@ -44,13 +44,32 @@ pub struct ValidationComponent {
     pub driver_checked: bool,
 }
 
+/// One `services:` entry the document declares.
+///
+/// The map carries both flavours: a service this project owns the source of,
+/// and an official one the document declares only to configure. Which one an
+/// entry is decides nothing about whether it runs - an official runs either
+/// way - so the report says which it is and whether its `config` was actually
+/// read against the binary's own schema.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ValidationService {
+    pub id: String,
+    /// Whether this id names a service in the CLI's official catalog.
+    pub official: bool,
+    /// Whether this entry's `config` was checked against the schema its binary
+    /// embeds. `validate` never stages and never installs, so a registry
+    /// official whose binary this project has not built yet is reported
+    /// unchecked rather than silently assumed good.
+    pub config_checked: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ValidationReport {
     pub robot_path: PathBuf,
     pub robot: String,
     pub train: String,
     pub platform_services: Vec<String>,
-    pub services: Vec<String>,
+    pub services: Vec<ValidationService>,
     pub components: Vec<ValidationComponent>,
 }
 
@@ -100,12 +119,13 @@ mod use_case;
 pub(crate) use participants::{
     PlatformArtifactRef, check_artifact_refs_from_resolved,
     component_driver_platform_refs_from_resolved, component_driver_runtimes_by_ref,
+    platform_artifact_refs_from_resolved, platform_runtimes_by_ref,
     source_participants_from_resolved,
 };
 mod graph;
 pub use graph::run_check_with_context;
 mod config;
-pub(crate) use config::{validate_component_driver_block, validate_user_service_config};
+pub(crate) use config::{validate_component_driver_block, validate_declared_service_config};
 mod metadata;
 pub(crate) use metadata::{
     extract_participant_report_from_staged_runtime, raw_participant_report_from_extracted_metadata,

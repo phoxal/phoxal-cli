@@ -127,6 +127,26 @@ pub(crate) fn component_driver_runtimes_by_ref(
         .collect()
 }
 
+/// Every resolved official platform runtime, keyed by its canonical `bin/` file
+/// name - the name staging renamed the installed package to, and the only name
+/// that exists on disk by the time anything reads the binary. The mirror of
+/// [`component_driver_runtimes_by_ref`] for the official set, so one fetch
+/// closure can resolve services and registry component drivers identically.
+pub(crate) fn platform_runtimes_by_ref(
+    resolved: &BundlePlan,
+) -> std::collections::BTreeMap<String, &ResolvedPlatformRuntime> {
+    resolved
+        .platform_runtimes
+        .iter()
+        .map(|runtime| {
+            (
+                phoxal_cli_catalog::bundle_binary_name(&runtime.name),
+                runtime,
+            )
+        })
+        .collect()
+}
+
 pub(crate) fn check_artifact_refs_from_resolved(resolved: &BundlePlan) -> Vec<PlatformArtifactRef> {
     let mut refs = platform_artifact_refs_from_resolved(resolved);
     refs.extend(component_driver_platform_refs_from_resolved(resolved));

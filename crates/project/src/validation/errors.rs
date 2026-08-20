@@ -25,12 +25,12 @@ pub(super) fn format_report_error(report: &graph_check::Report) -> String {
 pub(super) fn format_problem(problem: &graph_check::Problem) -> String {
     match problem {
         graph_check::Problem::InvalidConfig {
-            owner: graph_check::ConfigOwner::UserService,
+            owner: graph_check::ConfigOwner::Service,
             runtime_id,
             errors,
         } => {
             format!(
-                "invalid config for user runtime {runtime_id}: {}",
+                "invalid config for service {runtime_id}: {}",
                 errors.join("; ")
             )
         }
@@ -66,19 +66,33 @@ mod tests {
     use crate::check::{ConfigOwner, Problem};
     use phoxal::model::connection::ConnectionKind;
 
-    /// A driven instance is not a user runtime, and the rendered line is the
+    /// A driven instance is not a service, and the rendered line is the
     /// whole of what an operator gets, so each owner has to name its own
-    /// subject.
+    /// subject. Both service flavours share one line: `services.<id>.config` is
+    /// the slot either way, and an operator does not need to be told which half
+    /// of the merged set the id came from to fix it.
     #[test]
     fn an_invalid_config_names_the_thing_that_actually_declared_it() {
         assert_eq!(
             format_problem(&Problem::InvalidConfig {
-                owner: ConfigOwner::UserService,
+                owner: ConfigOwner::Service,
                 runtime_id: "avoid".to_string(),
                 errors: vec!["services.avoid.config: \"gain\" is a required property".to_string()],
             }),
-            "invalid config for user runtime avoid: services.avoid.config: \"gain\" is a required \
+            "invalid config for service avoid: services.avoid.config: \"gain\" is a required \
              property"
+        );
+        assert_eq!(
+            format_problem(&Problem::InvalidConfig {
+                owner: ConfigOwner::Service,
+                runtime_id: "safety".to_string(),
+                errors: vec![
+                    "services.safety.config/margin_m: \"wide\" is not of type \"number\""
+                        .to_string()
+                ],
+            }),
+            "invalid config for service safety: services.safety.config/margin_m: \"wide\" is not \
+             of type \"number\""
         );
         assert_eq!(
             format_problem(&Problem::InvalidConfig {
