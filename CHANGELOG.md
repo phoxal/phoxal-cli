@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.42.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.42.0) - 2026-08-20
+
+
+### Added
+
+- Validate driver blocks and every declared service config against the owning binary ([#343](https://github.com/phoxal/phoxal-cli/pull/343)) [**breaking**]
+
+
 ## [0.41.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.41.0) - 2026-08-19
 
 
