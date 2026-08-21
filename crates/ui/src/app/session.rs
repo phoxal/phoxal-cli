@@ -147,8 +147,8 @@ fn run_blocking(
         stoppable: options.stoppable,
         ..AppModel::default()
     }));
-    apply_initial_inputs(&model, &effects, initial_inputs)?;
     let mut pending = PendingInputs::default();
+    apply_initial_inputs(&model, &effects, &mut pending, initial_inputs)?;
     let mut ingress_open = true;
     let listener = EventListenerCfg::default()
         .with_handle(handle)
@@ -193,12 +193,28 @@ fn collect_ingress(
     }
 }
 
+/// Apply everything the attachment had already queued before this loop started.
+///
+/// The attachment queues its opening events - the epoch it observes, and the
+/// fact that it is connected - before any feed starts, and the caller drains
+/// whatever else the feeds produced while it was still warming up. Those inputs
+/// go through the *same* mailbox as every later input rather than straight to
+/// `update`, because the mailbox's epoch is the one it learns from an
+/// `EpochChanged` it was pushed. Applying the opening batch around it would
+/// leave that epoch `None` for the life of the session, and its epoch gate
+/// would then silently drop every epoch-stamped input - process tables, log and
+/// runtime invalidations, and the store replies themselves - leaving the
+/// operator a frozen dashboard on a live robot. One path, one epoch.
 fn apply_initial_inputs(
     model: &Rc<RefCell<AppModel>>,
     effects: &EffectSenders,
+    pending: &mut PendingInputs,
     inputs: Vec<SessionInput>,
 ) -> Result<()> {
     for input in inputs {
+        pending.push(input);
+    }
+    for input in pending.drain() {
         dispatch(model, effects, input.into())?;
     }
     Ok(())
@@ -390,9 +406,11 @@ mod tests {
             commands,
         };
         let model = Rc::new(RefCell::new(AppModel::default()));
+        let mut pending = PendingInputs::default();
         apply_initial_inputs(
             &model,
             &effects,
+            &mut pending,
             vec![SessionInput::Client(
                 phoxal_cli_observation::AttachmentEvent::ConnectionChanged(
                     phoxal_cli_observation::ConnectionObservation::Connected,
@@ -403,6 +421,95 @@ mod tests {
         assert_eq!(
             model.borrow().overview.connection,
             Some(phoxal_cli_observation::ConnectionObservation::Connected)
+        );
+    }
+
+    /// The opening batch is what teaches the mailbox which epoch it gates on.
+    ///
+    /// This is the production shape: `Attachment::open` queues `EpochChanged`
+    /// and `ConnectionChanged` before any feed starts, the caller drains them
+    /// into `initial_inputs`, and only afterwards do the feeds deliver
+    /// epoch-stamped facts. Applying that batch outside the mailbox left its
+    /// epoch `None`, and every epoch-stamped input for the rest of the session
+    /// - the process table above all - was silently dropped.
+    #[test]
+    fn initial_attachment_inputs_teach_the_mailbox_the_epoch_it_gates_on() {
+        use std::sync::Arc;
+
+        use phoxal::identity::{ExecutionId, ParticipantId};
+        use phoxal::participant::metadata::ParticipantKind;
+        use phoxal::supervisor::api::execution::{Process, ProcessState};
+        use phoxal_cli_observation::{
+            AttachmentEpoch, AttachmentEvent, ConnectionObservation, ProcessObservation,
+            ProcessTable,
+        };
+
+        let (commands, _command_rx) = mpsc::channel(4);
+        let (guaranteed, _guaranteed_rx) = mpsc::unbounded_channel();
+        let effects = EffectSenders {
+            guaranteed,
+            commands,
+        };
+        let model = Rc::new(RefCell::new(AppModel::default()));
+        let epoch = AttachmentEpoch::new(ExecutionId::mint());
+        let mut pending = PendingInputs::default();
+
+        apply_initial_inputs(
+            &model,
+            &effects,
+            &mut pending,
+            vec![
+                SessionInput::Client(AttachmentEvent::EpochChanged(epoch)),
+                SessionInput::Client(AttachmentEvent::ConnectionChanged(
+                    ConnectionObservation::Connected,
+                )),
+            ],
+        )
+        .expect("seed the opening batch");
+        assert_eq!(model.borrow().epoch, Some(epoch));
+        assert_eq!(
+            model.borrow().overview.connection,
+            Some(ConnectionObservation::Connected)
+        );
+
+        let participant = ParticipantId::new("safety").expect("fixture participant");
+        let mut processes = ProcessTable::new();
+        processes.insert(
+            participant.clone(),
+            ProcessObservation {
+                row: Process {
+                    participant: participant.clone(),
+                    kind: ParticipantKind::Service,
+                    state: ProcessState::Present,
+                    producer: None,
+                },
+                local: None,
+            },
+        );
+        pending.push(SessionInput::Client(AttachmentEvent::ProcessesChanged {
+            epoch,
+            values: Arc::new(processes),
+        }));
+
+        let drained = pending.drain();
+        assert!(
+            drained.iter().any(|input| matches!(
+                input,
+                SessionInput::Client(AttachmentEvent::ProcessesChanged { .. })
+            )),
+            "the mailbox dropped the first epoch-stamped input of the session"
+        );
+        for input in drained {
+            dispatch(&model, &effects, input.into()).expect("apply feed input");
+        }
+        assert_eq!(
+            model
+                .borrow()
+                .overview
+                .processes
+                .get(&participant)
+                .map(|process| process.row.state),
+            Some(ProcessState::Present)
         );
     }
 

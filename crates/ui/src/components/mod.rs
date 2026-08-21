@@ -13,9 +13,12 @@ mod tests {
     use std::sync::Arc;
     use std::time::SystemTime;
 
+    use phoxal::identity::ParticipantId;
+    use phoxal::participant::metadata::ParticipantKind;
+    use phoxal::supervisor::api::execution::{Process, ProcessState};
     use phoxal_cli_observation::{
         InputObservation, JoypadDevice, JoypadDevicesSample, LogRow, LogSeverity, LogSource,
-        RuntimePerformanceSample, RuntimeRow,
+        ProcessObservation, ProcessTable, RuntimePerformanceSample, RuntimeRow,
     };
     use tuirealm::ratatui::Terminal;
     use tuirealm::ratatui::backend::TestBackend;
@@ -77,6 +80,24 @@ mod tests {
             },
             capacity_evictions: 0,
         });
+        // The Runtimes table renders the supervisor's presence value straight
+        // off the snapshot, so a populated process table is what proves the
+        // page shows a live robot rather than an empty frame.
+        let participant = ParticipantId::new("safety").expect("fixture participant");
+        let mut processes = ProcessTable::new();
+        processes.insert(
+            participant.clone(),
+            ProcessObservation {
+                row: Process {
+                    participant,
+                    kind: ParticipantKind::Service,
+                    state: ProcessState::Present,
+                    producer: None,
+                },
+                local: None,
+            },
+        );
+        model.overview.processes = Arc::new(processes);
         model.input.observation = Some(InputObservation {
             joypads: JoypadDevicesSample {
                 available: Arc::new(vec![JoypadDevice {
@@ -90,10 +111,13 @@ mod tests {
         });
         let theme = Theme::new(ColorCapability::None);
         for (page, expected) in [
-            (PageId::Overview, "visible-diagnostic"),
-            (PageId::Runtimes, "runtime-token"),
-            (PageId::Logs, "log-token"),
-            (PageId::Input, "PadToken"),
+            (PageId::Overview, &["visible-diagnostic"][..]),
+            (
+                PageId::Runtimes,
+                &["runtime-token", "safety", "present"][..],
+            ),
+            (PageId::Logs, &["log-token"][..]),
+            (PageId::Input, &["PadToken"][..]),
         ] {
             terminal.clear().expect("clear test terminal");
             terminal
@@ -119,7 +143,9 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect::<String>();
-            assert!(contents.contains(expected), "{page:?} missed {expected}");
+            for token in expected {
+                assert!(contents.contains(token), "{page:?} missed {token}");
+            }
         }
     }
 }
