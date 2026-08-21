@@ -35,7 +35,7 @@ use super::session::{self, Detachable, SessionOwnership};
 use super::startup::Startup;
 use super::summary::{SessionSummary, attachment_ending};
 use super::supervisor::{self, LaunchedSupervisor};
-use crate::attach::{Attachment, CLIENT_PARTICIPANT, LocalRuntimeFacts};
+use crate::attach::{Attachment, CLIENT_PARTICIPANT, Feeds, LocalRuntimeFacts};
 use crate::cli::context::AppContext;
 use crate::cli::exit::ReportedExit;
 use crate::cli::output::welcome::{Mode, StepId};
@@ -260,6 +260,7 @@ pub(crate) async fn launch_execution(
             &target.endpoint,
             target.project.display().to_string(),
             local,
+            Feeds::All,
         )
         .await?,
         supervisor,
@@ -643,10 +644,15 @@ pub(crate) async fn await_supervisor(
 
 /// Resolve an existing execution, either from a local project or from an
 /// explicitly named endpoint. This path never builds and never mutates.
+///
+/// `feeds` is the caller's shape, not a tuning knob: `attach` drives a
+/// terminal off the stores and needs every feed, while `status` and `logs` ask
+/// the session handle one question and exit.
 async fn open_existing(
     app: &AppContext,
     requested_target: Option<&Path>,
     endpoint: Option<String>,
+    feeds: Feeds,
 ) -> Result<(Target, Attachment)> {
     let target = match endpoint {
         Some(endpoint) => Target::at_endpoint(
@@ -659,6 +665,7 @@ async fn open_existing(
         &target.endpoint,
         target.project.display().to_string(),
         LocalRuntimeFacts::default(),
+        feeds,
     )
     .await
     .map_err(|error| describe_missing_execution(error, &target))?;
@@ -693,7 +700,7 @@ pub(crate) async fn attach_command(
     requested_target: Option<&Path>,
     endpoint: Option<String>,
 ) -> Result<()> {
-    let (target, session) = open_existing(app, requested_target, endpoint).await?;
+    let (target, session) = open_existing(app, requested_target, endpoint, Feeds::All).await?;
     // An attachment owns nothing: it launched no process, so it cannot stop
     // one, and the dashboard does not offer a key that would only refuse.
     let outcome = session::drive(
@@ -734,7 +741,7 @@ pub(crate) async fn status_command(
     requested_target: Option<&Path>,
     endpoint: Option<String>,
 ) -> Result<()> {
-    let (target, session) = open_existing(app, requested_target, endpoint).await?;
+    let (target, session) = open_existing(app, requested_target, endpoint, Feeds::None).await?;
     let snapshot = session
         .handle()
         .snapshot()
@@ -781,7 +788,7 @@ pub(crate) async fn logs_command(
     participant: Option<String>,
     follow: bool,
 ) -> Result<()> {
-    let (_, session) = open_existing(app, requested_target, endpoint).await?;
+    let (_, session) = open_existing(app, requested_target, endpoint, Feeds::None).await?;
     let page = session
         .handle()
         .logs(participant.clone(), 256, None)

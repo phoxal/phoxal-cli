@@ -76,6 +76,21 @@ pub(crate) struct SessionPorts {
     pub(crate) runtimes: RuntimeReader,
 }
 
+/// Which feeds an attachment runs.
+///
+/// A feed exists to keep a store fresh for a terminal that is redrawing it. A
+/// one-shot command has no such terminal: it asks the session handle its one
+/// question, prints the answer, and closes. Starting the full set for it would
+/// only issue queries and declare subscriptions that are torn down
+/// microseconds later, for stores nothing ever reads.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Feeds {
+    /// Every feed - what the three terminal applications project.
+    All,
+    /// None: the caller reads the session handle directly.
+    None,
+}
+
 /// One live attachment plus the feeds that project it.
 pub(crate) struct Attachment {
     pub(crate) ports: SessionPorts,
@@ -105,7 +120,7 @@ impl Attachment {
         &self.local
     }
 
-    /// Attach at `endpoint` and start every feed.
+    /// Attach at `endpoint` and start the feeds `feeds` names.
     ///
     /// # Errors
     ///
@@ -114,6 +129,7 @@ impl Attachment {
         endpoint: &str,
         project: String,
         local: LocalRuntimeFacts,
+        feeds: Feeds,
     ) -> Result<Self> {
         let session = Session::connect(&ConnectOptions::new(endpoint, CLIENT_PARTICIPANT)).await?;
         let handle = session.handle();
@@ -139,16 +155,23 @@ impl Attachment {
 
         let cancellation = CancellationToken::new();
         let mut tasks = JoinSet::new();
-        let context = feeds::FeedContext {
-            session: handle.clone(),
-            epoch,
-            project,
-            local: local.clone(),
-            stores: stores.clone(),
-            events: events_tx,
-            cancellation: cancellation.clone(),
-        };
-        feeds::spawn_all(&mut tasks, context, input_rx);
+        match feeds {
+            Feeds::All => {
+                let context = feeds::FeedContext {
+                    session: handle.clone(),
+                    epoch,
+                    project,
+                    local: local.clone(),
+                    stores: stores.clone(),
+                    events: events_tx,
+                    cancellation: cancellation.clone(),
+                };
+                feeds::spawn_all(&mut tasks, context, input_rx);
+            }
+            // Nothing to start: the stores behind `ports` stay at their opening
+            // state, and the caller reads `handle()` instead.
+            Feeds::None => {}
+        }
 
         Ok(Self {
             ports: SessionPorts {
