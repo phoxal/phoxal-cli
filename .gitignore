@@ -3,7 +3,6 @@ target/
 .env
 *.lock~
 .rerun/
-.claude/
 .aider*
 .codex/
 
