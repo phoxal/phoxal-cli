@@ -4,6 +4,14 @@ All notable changes documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.42.1](https://github.com/phoxal/phoxal-cli/releases/tag/v0.42.1) - 2026-08-22
+
+
+### Fixed
+
+- Apply the attachment's opening inputs through the TUI mailbox ([#345](https://github.com/phoxal/phoxal-cli/pull/345))
+
+
 ## [0.42.0](https://github.com/phoxal/phoxal-cli/releases/tag/v0.42.0) - 2026-08-20
 
 
