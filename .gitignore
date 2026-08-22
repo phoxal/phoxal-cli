@@ -4,6 +4,6 @@ target/
 *.lock~
 .rerun/
 .aider*
-.codex/
+/.codex/worktrees/
 
 .DS_Store
