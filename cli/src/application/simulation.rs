@@ -2,10 +2,10 @@
 //!
 //! `phoxal simulation webots run <PROJECT> <WORLD>` runs the same bundle
 //! `phoxal run` does - byte for byte, from the same staging pass - and differs
-//! in exactly two launch decisions: it starts no component driver, and it
-//! passes `--simulation` to every runtime it does start. Webots supplies the
-//! components instead, through a controller that declares one liveliness token
-//! per component instance it simulates.
+//! in one launch decision: it starts no component driver. The participant
+//! processes learn their time domain from the supervisor after attachment.
+//! Webots supplies the components instead, through a controller that declares
+//! one liveliness token per component instance it simulates.
 //!
 //! What is genuinely different is lifetime coordination: this client owns the
 //! Webots application as well as the session, so two things have to end

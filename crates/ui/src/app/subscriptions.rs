@@ -250,7 +250,9 @@ mod tests {
         let old = changed_epoch();
         // A new execution is a new attachment, so a different execution id is
         // exactly what an epoch change is.
-        let new = AttachmentEpoch::new(ExecutionId::mint());
+        let new = AttachmentEpoch::new(
+            ExecutionId::parse(&"2".repeat(ExecutionId::LEN)).expect("fixed execution id"),
+        );
         pending.push(SessionInput::Client(AttachmentEvent::EpochChanged(old)));
         pending.push(changed(1));
         pending.push(SessionInput::Client(AttachmentEvent::EpochChanged(new)));
@@ -289,7 +291,9 @@ mod tests {
         let old = changed_epoch();
         // A new execution is a new attachment, so a different execution id is
         // exactly what an epoch change is.
-        let new = AttachmentEpoch::new(ExecutionId::mint());
+        let new = AttachmentEpoch::new(
+            ExecutionId::parse(&"2".repeat(ExecutionId::LEN)).expect("fixed execution id"),
+        );
         pending.push(SessionInput::Client(AttachmentEvent::EpochChanged(new)));
         pending.push(SessionInput::Logs(LogWindow {
             epoch: old,
@@ -334,7 +338,8 @@ mod tests {
         pending.push(SessionInput::Client(AttachmentEvent::SupervisorChanged(
             Arc::new(SupervisorObservation {
                 revision: 1,
-                execution: ExecutionId::mint(),
+                execution: ExecutionId::parse(&"2".repeat(ExecutionId::LEN))
+                    .expect("fixed execution id"),
                 robot: RobotId::new("rover").expect("fixture robot id"),
                 project: "project".into(),
                 lifecycle: Lifecycle::Degraded,

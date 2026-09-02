@@ -122,25 +122,17 @@ impl LaunchedRuntime {
 /// The flags themselves are the framework's, rendered by the encoder that sits
 /// beside the parser every participant binary compiles, so the two halves of
 /// the launch contract cannot drift apart across repositories. What stays here
-/// is the only decision this launcher makes about them: whether this run
-/// follows a simulated world clock.
+/// is the only local decision this launcher makes about them: which child
+/// process to execute. Time mode is supervisor state, never child argv.
 ///
 /// # Errors
 ///
 /// When the bundle names a runtime whose id is not a launch identity.
-fn argv(
-    runtime: &str,
-    bundle_root: &Path,
-    endpoint: &str,
-    simulation: bool,
-) -> Result<Vec<String>> {
+fn argv(runtime: &str, endpoint: &str) -> Result<Vec<String>> {
     let participant = ParticipantId::new(runtime.to_string()).with_context(|| {
         format!("the bundle names a runtime '{runtime}' whose id is not a launch identity")
     })?;
-    Ok(LaunchCommand::new(participant, bundle_root)
-        .connect(endpoint)
-        .simulation(simulation)
-        .argv())
+    Ok(LaunchCommand::for_rendezvous(participant, endpoint).argv())
 }
 
 /// Where one runtime's output is retained for this session.
@@ -161,7 +153,6 @@ pub(crate) fn runtime_log(paths: &phoxal_cli_host::paths::RuntimePaths, runtime:
 pub(crate) fn launch(
     bundle_root: &Path,
     endpoint: &str,
-    simulation: bool,
     selection: &Selection,
     paths: &phoxal_cli_host::paths::RuntimePaths,
 ) -> Result<Vec<LaunchedRuntime>> {
@@ -172,7 +163,7 @@ pub(crate) fn launch(
         .filter(|runtime| selection.includes(runtime))
     {
         let log = runtime_log(paths, &runtime.participant_id);
-        match spawn_one(bundle_root, endpoint, simulation, runtime, &log) {
+        match spawn_one(bundle_root, endpoint, runtime, &log) {
             Ok(child) => launched.push(child),
             Err(error) => {
                 abandon(&launched);
@@ -204,7 +195,6 @@ fn abandon(launched: &[LaunchedRuntime]) {
 fn spawn_one(
     bundle_root: &Path,
     endpoint: &str,
-    simulation: bool,
     runtime: &phoxal_cli_project::RobotRuntime,
     log: &Path,
 ) -> Result<LaunchedRuntime> {
@@ -219,12 +209,7 @@ fn spawn_one(
         .with_context(|| format!("failed to open {} for {}", log.display(), runtime.binary))?;
     let mut command = Command::new(&executable);
     command
-        .args(argv(
-            &runtime.participant_id,
-            bundle_root,
-            endpoint,
-            simulation,
-        )?)
+        .args(argv(&runtime.participant_id, endpoint)?)
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(errors));
@@ -519,24 +504,16 @@ mod tests {
             .collect()
     }
 
-    /// The launch contract is exactly four things, and `--simulation` is the
-    /// only one the CLI ever decides on its own.
+    /// The launch contract is identity plus the supervisor rendezvous only.
     #[test]
-    fn a_runtimes_argv_is_the_id_the_bundle_the_endpoint_and_nothing_else() {
-        let plain = argv(
-            "drive",
-            Path::new("/srv/bundle"),
-            "tcp/127.0.0.1:7447",
-            false,
-        )
-        .expect("the fixture id is a launch identity");
+    fn a_runtimes_argv_is_the_id_the_endpoint_and_nothing_else() {
+        let plain =
+            argv("drive", "tcp/127.0.0.1:7447").expect("the fixture id is a launch identity");
         assert_eq!(
             plain,
             vec![
                 "--participant-id",
                 "drive",
-                "--bundle-root",
-                "/srv/bundle",
                 "--connect",
                 "tcp/127.0.0.1:7447",
             ]
@@ -545,17 +522,11 @@ mod tests {
             "--execution-id",
             "--execution-origin",
             "--shutdown-grace-ms",
+            "--bundle-root",
+            "--simulation",
         ] {
             assert!(!plain.iter().any(|arg| arg == retired), "{plain:?}");
         }
-        let simulated = argv(
-            "drive",
-            Path::new("/srv/bundle"),
-            "tcp/127.0.0.1:7447",
-            true,
-        )
-        .expect("the fixture id is a launch identity");
-        assert_eq!(simulated.last().map(String::as_str), Some("--simulation"));
     }
 
     /// Driver selection never touches the brain or a service: those always run,

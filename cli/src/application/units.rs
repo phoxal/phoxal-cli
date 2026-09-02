@@ -72,30 +72,24 @@ WantedBy=multi-user.target
 
 /// One runtime's unit.
 ///
-/// The argv is the process contract and nothing more: the participant id, the
-/// bundle root, and the endpoint the supervisor bound. It is rendered by the
+/// The argv is the process contract and nothing more: the participant id and
+/// the endpoint the supervisor bound. It is rendered by the
 /// framework's own launch encoder, so the flags systemd will pass on a device
 /// are the flags the participant's parser accepts, rather than a second
-/// spelling of them kept in this repository. There is no `--simulation` here
-/// and there never will be - a simulation is a launch decision an operator
-/// makes interactively, and a systemd-managed robot is the real one.
+/// spelling of them kept in this repository. Time mode is supervisor state and
+/// never appears in a participant unit.
 ///
 /// # Errors
 ///
 /// When the manifest names a runtime whose id is not a launch identity.
 pub(crate) fn runtime_unit(runtime: &RobotRuntime) -> Result<String> {
-    let argv = LaunchCommand::new(
+    let argv = LaunchCommand::for_rendezvous(
         participant_id(runtime)?,
         format!(
-            "{active}/{bundle}",
-            active = phoxal_cli_project::ACTIVE_RUNTIME_ROOT,
-            bundle = phoxal_cli_project::BUNDLE_DIR,
+            "unixsock-stream/{volatile}/supervisor.sock",
+            volatile = phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
         ),
     )
-    .connect(format!(
-        "unixsock-stream/{volatile}/supervisor.sock",
-        volatile = phoxal_cli_project::INSTALLED_VOLATILE_ROOT,
-    ))
     .argv()
     .join(" ");
     Ok(format!(
@@ -333,10 +327,7 @@ mod tests {
         assert!(unit.contains("User=phoxal\nGroup=phoxal"));
     }
 
-    /// A runtime's argv is the whole process contract: its id, its bundle, and
-    /// the endpoint. Nothing that the framework deleted may reappear here, and
-    /// `--simulation` in particular is an interactive decision that a device
-    /// unit must never carry.
+    /// A runtime's argv is the whole process contract: its id and the endpoint.
     #[test]
     fn a_runtime_unit_carries_exactly_the_process_contract() {
         let unit = runtime_unit(&runtime("left_drive", "ddsm115", RuntimeRole::Driver))
@@ -344,13 +335,14 @@ mod tests {
         assert!(
             unit.contains(
                 "ExecStart=/var/phoxal/bundle/bin/ddsm115 --participant-id left_drive \
-                 --bundle-root /var/phoxal/bundle --connect \
+                 --connect \
                  unixsock-stream//run/phoxal/supervisor.sock"
             ),
             "{unit}"
         );
         for absent in [
             "--simulation",
+            "--bundle-root",
             "--execution-id",
             "--execution-origin",
             "--shutdown-grace-ms",

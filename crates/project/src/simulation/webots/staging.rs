@@ -42,7 +42,7 @@ pub(crate) fn stage_simulation_for_robot(
         .collect::<Vec<_>>();
 
     let mesh_root = root::meshes_dir(project_root);
-    stage_compiled_geometry_assets(robot, bundle.assets(), &mesh_root)?;
+    stage_compiled_geometry_assets(robot, bundle, &mesh_root)?;
     stage_simulation_world(
         &base_world_text,
         &root::protos_dir(project_root),
@@ -58,7 +58,7 @@ pub(crate) fn stage_simulation_for_robot(
 
 fn stage_compiled_geometry_assets(
     robot: &phoxal::model::Robot,
-    assets: &phoxal::bundle::ParticipantAssets,
+    bundle: &RuntimeBundle,
     mesh_root: &Path,
 ) -> Result<()> {
     // Geometry staging runs before `stage_simulation_world`, while the fresh
@@ -78,8 +78,8 @@ fn stage_compiled_geometry_assets(
     }
     validate_unique_geometry_destinations(referenced.iter().copied())?;
     for id in referenced {
-        let bytes = assets
-            .read(id)
+        let bytes = bundle
+            .asset(id)
             .with_context(|| format!("compiled geometry asset '{}' is missing", id.as_str()))?;
         let relative = crate::simulation::webots::proto::support::paths::staged_geometry_path(id);
         let destination = mesh_root.join(relative);

@@ -451,7 +451,10 @@ mod tests {
             commands,
         };
         let model = Rc::new(RefCell::new(AppModel::default()));
-        let epoch = AttachmentEpoch::new(ExecutionId::mint());
+        let epoch = AttachmentEpoch::new(
+            ExecutionId::parse("10000000000000000000000000000001")
+                .expect("a canonical fixture execution id"),
+        );
         let mut pending = PendingInputs::default();
 
         apply_initial_inputs(

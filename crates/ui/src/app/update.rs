@@ -893,7 +893,9 @@ mod tests {
         };
         for window in [
             ObservationWindow {
-                epoch: AttachmentEpoch::new(ExecutionId::mint()),
+                epoch: AttachmentEpoch::new(
+                    ExecutionId::parse(&"2".repeat(ExecutionId::LEN)).expect("fixed execution id"),
+                ),
                 revision: StoreRevision(5),
                 token: read.token,
                 rows: Arc::from([]),

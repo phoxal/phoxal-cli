@@ -223,13 +223,7 @@ pub(crate) async fn launch_execution(
     await_supervisor(target, &mut supervisor, HANDSHAKE_BUDGET).await?;
     startup.complete(StepId::Supervisor, format!("router on {}", target.endpoint));
 
-    let runtimes = launcher::launch(
-        &release.bundle,
-        &target.endpoint,
-        simulation,
-        &selection,
-        &paths,
-    )?;
+    let runtimes = launcher::launch(&release.bundle, &target.endpoint, &selection, &paths)?;
     let record = SessionRecord {
         endpoint: target.endpoint.clone(),
         supervisor: RecordedProcess {
@@ -904,10 +898,15 @@ mod tests {
 
     fn connected() -> phoxal::session::ConnectedExecution {
         phoxal::session::ConnectedExecution {
-            execution: phoxal::identity::ExecutionId::mint(),
+            execution: execution(1),
             robot: RobotId::new("rover").expect("fixture robot"),
             framework: phoxal::version::FrameworkVersion::CURRENT,
         }
+    }
+
+    fn execution(seed: u8) -> phoxal::identity::ExecutionId {
+        phoxal::identity::ExecutionId::parse(&format!("1{:031x}", seed))
+            .expect("a canonical fixture execution id")
     }
 
     fn record() -> SessionRecord {
@@ -980,7 +979,7 @@ mod tests {
             ConnectFailure::RetryableAbsence
         );
 
-        let execution = phoxal::identity::ExecutionId::mint();
+        let execution = execution(2);
         for fatal in [
             ConnectError::MultipleExecutions {
                 endpoint: "tcp/127.0.0.1:7447".to_string(),
@@ -1075,7 +1074,7 @@ mod tests {
             ConnectError::MultipleExecutions {
                 endpoint: "tcp/127.0.0.1:7447".to_string(),
                 count: 2,
-                executions: vec![phoxal::identity::ExecutionId::mint()],
+                executions: vec![execution(3)],
             },
             ConnectError::IncompatibleFramework {
                 remote: phoxal::version::FrameworkVersion::new(0, 57, 0),

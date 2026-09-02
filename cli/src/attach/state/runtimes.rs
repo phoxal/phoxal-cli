@@ -151,7 +151,7 @@ mod tests {
     /// history rather than one robot's slice of it.
     #[test]
     fn a_reconciled_page_replaces_the_history_and_follows_extend_it() {
-        let epoch = AttachmentEpoch::new(ExecutionId::mint());
+        let epoch = AttachmentEpoch::new(execution(1));
         let status = RuntimeFeedStatus {
             capacity_evictions: 3,
         };
@@ -184,11 +184,15 @@ mod tests {
     /// be spliced onto it.
     #[test]
     fn a_sample_from_a_previous_execution_is_rejected() {
-        let old = AttachmentEpoch::new(ExecutionId::mint());
-        let new = AttachmentEpoch::new(ExecutionId::mint());
+        let old = AttachmentEpoch::new(execution(2));
+        let new = AttachmentEpoch::new(execution(3));
         let status = RuntimeFeedStatus::default();
         let mut store = RuntimeStore::new(new);
         assert_eq!(store.record(old, sample("drive", 1), status), None);
         assert!(store.record(new, sample("drive", 2), status).is_some());
+    }
+
+    fn execution(seed: u8) -> ExecutionId {
+        ExecutionId::parse(&format!("1{:031x}", seed)).expect("a canonical fixture execution id")
     }
 }

@@ -9,10 +9,11 @@
 //! derives it a second time.
 //!
 //! What each process is *configured* with is not here. Configuration is
-//! checked against the schema its own binary embeds, from the authored
-//! document the operator edits (`crate::validation`), and read at runtime by
-//! the process itself out of the bundle; a third copy passing through this
-//! launch set would only be a fourth thing to keep in agreement.
+//! checked against the schema its own binary embeds from the authored document
+//! the operator edits (`crate::validation`). At runtime, the supervisor sends
+//! the compiled model to the process during bootstrap, and the framework
+//! selects that participant's configuration from it. A third copy passing
+//! through this launch set would only be another thing to keep in agreement.
 //!
 //! The *expected presence* set the supervisor publishes is the same set,
 //! derived the same way from the same manifest: a component without a driver
