@@ -4,9 +4,9 @@ Rust workspace for `phoxal`, the project, build, deployment, and session CLI.
 Robot releases carry the `phoxal-supervisor` from their selected framework
 train.
 
-Phoxal is pre-1.0 and evolving. Installation and command documentation is
-published at <https://phoxal.com>; the installed commands also provide local
-help.
+Phoxal is pre-1.0 and evolving.
+Use `phoxal --help` for current command usage and this repository for current CLI workflow details.
+See <https://phoxal.com> for the project vision and public introduction.
 
 ```sh
 phoxal --help
