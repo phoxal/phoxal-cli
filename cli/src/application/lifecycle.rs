@@ -441,6 +441,7 @@ async fn build_and_publish(
     // authority. A supervisor that has taken its lock but has not yet answered
     // connect is live, and this is what closes that startup window.
     crate::lock::refuse_while_execution_is_live(&target.project)?;
+    refuse_unconsumed_session_record(&target.paths())?;
 
     let runtime_target =
         phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;
@@ -456,6 +457,21 @@ async fn build_and_publish(
     .await??;
     startup.complete(StepId::PrepareRuntime, staged_detail(&prepared.release));
     Ok((prepared.release, lock))
+}
+
+/// A dead supervisor does not prove that its independently owned runtimes
+/// exited. Preserve their cleanup authority before rebuilding or launching.
+fn refuse_unconsumed_session_record(paths: &phoxal_cli_host::paths::RuntimePaths) -> Result<()> {
+    let path = launcher::record_path(paths);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+        Ok(_) => bail!(
+            "previous session cleanup record remains at {}; run `phoxal stop` for this project \
+             before starting again. Refusing to overwrite ownership of potentially surviving runtimes",
+            path.display()
+        ),
+    }
 }
 
 /// What the prepared release actually contains, counted from the release
@@ -1268,6 +1284,26 @@ mod tests {
         assert!(message.contains("phoxal attach /tmp/rover"), "{message}");
         assert!(message.contains("phoxal stop /tmp/rover"), "{message}");
         assert!(message.contains(&target.endpoint), "{message}");
+    }
+
+    #[test]
+    fn restarting_never_overwrites_even_an_unreadable_cleanup_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let target =
+            Target::at_endpoint("tcp/127.0.0.1:1".to_owned(), directory.path().to_path_buf());
+        let paths = target.paths();
+        assert!(refuse_unconsumed_session_record(&paths).is_ok());
+        let record = launcher::record_path(&paths);
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, b"unreadable but still ownership evidence").unwrap();
+        let error = refuse_unconsumed_session_record(&paths)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("phoxal stop"));
+        assert_eq!(
+            std::fs::read(&record).unwrap(),
+            b"unreadable but still ownership evidence"
+        );
     }
 
     /// Simulation admission is a typed, single-use phase before the first
