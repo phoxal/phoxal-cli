@@ -31,19 +31,18 @@ const LABEL_WIDTH: usize = 17;
 /// The column budget the live detail is truncated into.
 const DETAIL_WIDTH: usize = 36;
 
-/// Which kind of execution is starting. It selects the step list - only a
-/// simulation has a simulator to bring up - and labels the header.
+/// Which kind of robot execution is starting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
     Native,
-    Webots,
+    Simulation,
 }
 
 impl Mode {
     const fn label(self) -> &'static str {
         match self {
             Self::Native => "native",
-            Self::Webots => "webots",
+            Self::Simulation => "simulation",
         }
     }
 
@@ -55,12 +54,12 @@ impl Mode {
                 StepId::Supervisor,
                 StepId::Runtimes,
             ],
-            Self::Webots => &[
+            Self::Simulation => &[
                 StepId::Project,
                 StepId::PrepareRuntime,
                 StepId::Supervisor,
-                StepId::Webots,
                 StepId::Runtimes,
+                StepId::Attachment,
             ],
         }
     }
@@ -72,7 +71,7 @@ pub(crate) enum StepId {
     Project,
     PrepareRuntime,
     Supervisor,
-    Webots,
+    Attachment,
     /// The runtimes this client launched, counted against the presence the
     /// supervisor reports for them.
     Runtimes,
@@ -84,7 +83,7 @@ impl StepId {
             Self::Project => "Project",
             Self::PrepareRuntime => "Prepare runtime",
             Self::Supervisor => "Supervisor",
-            Self::Webots => "Webots",
+            Self::Attachment => "World attachment",
             Self::Runtimes => "Runtimes",
         }
     }
@@ -663,11 +662,11 @@ mod tests {
         (welcome, lines)
     }
 
-    /// Only a simulation has a simulator to bring up, and the checklist says so.
+    /// A simulated robot has one additional host attachment transaction.
     #[test]
-    fn the_simulator_step_exists_only_for_a_simulation() {
-        assert!(!Mode::Native.steps().contains(&StepId::Webots));
-        assert!(Mode::Webots.steps().contains(&StepId::Webots));
+    fn the_attachment_step_exists_only_for_a_simulation() {
+        assert!(!Mode::Native.steps().contains(&StepId::Attachment));
+        assert!(Mode::Simulation.steps().contains(&StepId::Attachment));
     }
 
     /// A step is finished by the next one starting, so preparation can never be
@@ -687,7 +686,7 @@ mod tests {
     /// The failure block names the step that failed, the reason, and the log.
     #[test]
     fn a_failed_startup_marks_the_running_step_and_points_at_the_log() {
-        let (mut welcome, lines) = welcome(Mode::Webots);
+        let (mut welcome, lines) = welcome(Mode::Simulation);
         welcome.begin(StepId::Project, "robot.yaml");
         let directory = tempfile::tempdir().unwrap();
         let written = directory.path().join("startup.log");
@@ -742,10 +741,10 @@ mod tests {
 
     #[test]
     fn the_header_names_the_version_the_project_and_the_mode() {
-        let header = header_line(80, "0.37.7", "robot-rover", Mode::Webots);
+        let header = header_line(80, "0.37.7", "robot-rover", Mode::Simulation);
         assert_eq!(console::measure_text_width(&header), 79);
         assert!(header.starts_with("  phoxal 0.37.7"), "{header}");
-        assert!(header.ends_with("robot-rover · webots"), "{header}");
+        assert!(header.ends_with("robot-rover · simulation"), "{header}");
     }
 
     /// A colorless, non-Unicode terminal still gets a legible checklist.

@@ -15,7 +15,7 @@ use super::commands::{
     version = version::long_version(),
     about = "Build, check, and simulate Phoxal robot projects.",
     long_about = "Build, check, and simulate Phoxal robot projects.\n\n\
-                  phoxal reads robot.yaml and materializes official services and component drivers with `cargo install` against the phoxal registry, pinned exactly to the Cargo.lock-selected framework train, then drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation webots run` - each validates the graph and every participant's config before it executes.\n\n\
+                  phoxal reads robot.yaml and materializes official services and component drivers with `cargo install` against the phoxal registry, pinned exactly to the Cargo.lock-selected framework train, then drives the develop/simulate loop. Start by hand-authoring robot.yaml (see the framework repo's examples/ and getting-started docs), then run `build`, `run`, or `simulation run world.yaml` - each validates its authored source before it executes.\n\n\
                   Every robot project's ROOT Cargo package is its one mandatory brain: a non-published workspace member depending on `phoxal`, with exactly one binary target and no library. The minimal root source is:\n\n\
                   \x20 // src/main.rs\n\
                   \x20 use phoxal::prelude::*;\n\
@@ -26,7 +26,7 @@ use super::commands::{
                   \x20         -> Result<(Self::State, Self::Api)> { Ok(((), ())) }\n\
                   \x20 }\n\
                   \x20 fn main() -> phoxal::Result<()> { phoxal::run::<Brain>() }\n\n\
-                  The CLI discovers it from Cargo metadata, always builds it, stages it as `bin/brain`, and launches it in every native and Webots graph. It is never declared under robot.yaml `services:` - `brain` is a reserved identity there."
+                  The CLI discovers it from Cargo metadata, always builds it, stages it as `bin/brain`, and launches it in every native and simulated robot graph. It is never declared under robot.yaml `services:` - `brain` is a reserved identity there."
 )]
 pub struct Cli {
     #[arg(
@@ -81,7 +81,7 @@ pub enum RootCommand {
     Validate(validate::Validate),
     #[command(about = "Generate portable JSON Schemas for authored YAML editors.")]
     Schema(schema::Schema),
-    #[command(about = "Simulate a robot with `simulation webots run`.")]
+    #[command(about = "Start, inspect, connect to, and stop local world sessions.")]
     Simulation(simulation::Simulation),
     #[command(
         about = "Build a fresh bundle, launch the supervisor on it, and attach.",

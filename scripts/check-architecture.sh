@@ -51,6 +51,8 @@ verify_comment_policy_patterns
 # fragments produces the real search expression only at runtime. The scan can
 # then cover the whole active repository without exempting its own source.
 RETIRED_IDENTIFIER_PATTERN='phoxal''d|phoxal-''api|phoxal_''api|phoxal-cli-''(client|supervisor)|crates/''client-lib|phoxal\.service'
+RETIRED_SIMULATION_PATTERN='PHOXAL_SIMULATOR_''WEBOTS_PATH|webots-''proto|WEBOTS_CONTROLLER_''(PACKAGE|VERSION)|prepare_''simulation|stage_''webots|simulation webots ''run'
+NATIVE_CONTROLLER_ESCAPE='<''extern>'
 
 for required_manifest in cli/Cargo.toml; do
   if [[ ! -f "${required_manifest}" ]]; then
@@ -91,6 +93,12 @@ fail_if_found "retired identifiers must not remain outside immutable history and
   --glob '!**/CHANGELOG.md' \
   --glob '!cli/src/application/service.rs' \
   --glob '!crates/host/src/paths.rs'
+fail_if_found "the retired CLI-owned Webots path must not return" \
+  "${RETIRED_SIMULATION_PATTERN}" . \
+  --glob '!**/CHANGELOG.md'
+fail_if_found "production controllers must be generated inside the adapter host" \
+  "${NATIVE_CONTROLLER_ESCAPE}" cli crates \
+  --glob '*.rs'
 
 # The framework is one library. The retired internal packages and the extracted
 # client crate must not come back as a dependency of anything here; which

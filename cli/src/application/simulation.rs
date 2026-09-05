@@ -1,450 +1,1648 @@
-//! The client-owned simulation session.
-//!
-//! `phoxal simulation webots run <PROJECT> <WORLD>` runs the same bundle
-//! `phoxal run` does - byte for byte, from the same staging pass - and differs
-//! in one launch decision: it starts no component driver. The participant
-//! processes learn their time domain from the supervisor after attachment.
-//! Webots supplies the components instead, through a controller that declares
-//! one liveliness token per component instance it simulates.
-//!
-//! What is genuinely different is lifetime coordination: this client owns the
-//! Webots application as well as the session, so two things have to end
-//! together in either order, and there is no detach - leaving would strand a
-//! simulator with no operator.
+//! Backend-neutral local world lifecycle and robot connection workflow.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail, ensure};
+use phoxal::model::identity::SpawnId;
+use phoxal::session::WorldSessionClient;
+use phoxal::version::FrameworkVersion;
+use phoxal::world::api::session::connect::WorldSessionBootstrap;
+use phoxal::world::api::session::control::WorldSessionControlRequest;
+use phoxal::world::api::session::state::WorldSessionState;
+use phoxal::world::api::session::{
+    WorldLifecycle, WorldMemberCleanup, WorldMemberEndReason, WorldMemberPhase, WorldMotion,
+};
+use phoxal_cli_host::world::{
+    DEFAULT_LOG_BYTE_LIMIT, DEFAULT_TERMINAL_SESSION_LIMIT, LocalWorldRegistration,
+    TerminalMemberEvidence, TerminalOutcome, TerminalWorldSummary, WorldEvidence, WorldPaths,
+    WorldRegistry,
+};
 
-use super::launcher::OwnedSession;
-use super::lifecycle::{RunOptions, Target, await_session_ready, launch_execution};
-use super::session::{self, Detachable, SessionOwnership};
-use super::startup::Startup;
-use super::summary::SessionSummary;
-use super::webots::Webots;
 use crate::cli::context::AppContext;
 use crate::cli::exit::ReportedExit;
 use crate::cli::output::welcome::{Mode, StepId};
 
-/// How often the Webots process is polled while the session runs.
-const WEBOTS_POLL_INTERVAL: Duration = Duration::from_millis(250);
+use super::summary::SessionSummary;
+use super::world_host::LaunchedWorldHost;
 
-pub(crate) async fn run_command(
-    app: &AppContext,
-    world: String,
-    project: Option<&Path>,
-) -> Result<()> {
-    let target = Target::resolve(project, app.project.root())?;
-    let startup = Startup::begin(app, &target.project, Mode::Webots);
-    let started = match start_simulation(app, &target, world, &startup).await {
-        Ok(started) => started,
-        Err(error) => return Err(startup.failed(error)),
-    };
-    // The dashboard takes the terminal only from here: both processes are up
-    // and the runtimes are present.
-    startup.ready();
-    drive_simulation(app, &target, started).await
+const WORLD_UI_INGRESS_CAPACITY: usize = 64;
+const ATTACHMENT_BUDGET: Duration = Duration::from_secs(5 * 60);
+const STOP_BUDGET: Duration = Duration::from_secs(60);
+const TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const STREAM_RECONNECT_DELAY: Duration = Duration::from_millis(100);
+
+struct StartedWorld {
+    registration: LocalWorldRegistration,
+    host: LaunchedWorldHost,
 }
 
-/// Everything one simulation session owns for its whole life.
-struct StartedSimulation {
-    launched: super::lifecycle::LaunchedSession,
-    webots: Webots,
+enum ConnectedSimulationEnding {
+    World(Box<TerminalWorldSummary>),
+    Member(TerminalMemberEvidence),
 }
 
-/// Launch the session, stage Webots against the bundle it published, and only
-/// then wait for the runtimes.
-///
-/// The wait has to come last. A simulated runtime follows the world clock the
-/// controller publishes, and the controller is what presents the component
-/// instances a driver would otherwise present - the expected set, exactly - so
-/// nothing appears until Webots is open and stepping.
-/// Staging needs the published bundle and Webots needs the endpoint, both of
-/// which exist the moment the launch returns.
-async fn start_simulation(
-    app: &AppContext,
-    target: &Target,
-    world: String,
-    startup: &Startup,
-) -> Result<StartedSimulation> {
-    let webots_host = webots_host()?;
-    let runtime_target =
-        phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;
-    let reporter = startup.reporter();
-    let offline = app.offline;
-    let simulation = tokio::task::spawn_blocking(move || {
-        phoxal_cli_project::prepare_simulation(phoxal_cli_project::PrepareSimulationRequest {
-            target: runtime_target,
-            world,
-            offline,
-            webots: webots_host,
-            reporter,
-        })
-    })
-    .await??;
-
-    // Drivers are never started here, and the flags that would ask for them do
-    // not exist on this command: Webots simulates the components instead.
-    let launched = launch_execution(
+pub(crate) async fn run_command(app: &AppContext, world: &Path, spawn: Option<&str>) -> Result<()> {
+    let started = start_world(app, world).await?;
+    connect_world(
         app,
-        target,
-        &RunOptions {
-            drivers_off: false,
-            drivers_subset: Vec::new(),
-        },
-        startup,
-        true,
+        &started.registration.instance.to_string(),
+        spawn,
+        Some(started),
+    )
+    .await
+}
+
+pub(crate) async fn start_command(app: &AppContext, world: &Path) -> Result<()> {
+    let started = start_world(app, world).await?;
+    let instance = started.registration.instance.to_string();
+    started.host.detach();
+    app.ui.info(format!(
+        "world instance {instance} ready and paused; open with `phoxal simulation open {instance}` or stop with `phoxal simulation stop {instance}`"
+    ));
+    Ok(())
+}
+
+pub(crate) async fn open_command(app: &AppContext, instance: &str) -> Result<()> {
+    let stores = Stores::discover()?;
+    let registration = stores.registry.resolve(instance)?;
+    open_world_tui(app, registration).await
+}
+
+pub(crate) async fn connect_command(
+    app: &AppContext,
+    instance: &str,
+    spawn: Option<&str>,
+) -> Result<()> {
+    connect_world(app, instance, spawn, None).await
+}
+
+pub(crate) async fn status_command(_app: &AppContext, instance: &str) -> Result<()> {
+    let stores = Stores::discover()?;
+    match load_status(&stores, instance).await? {
+        StatusReport::Live(state) => print_live_status(&state),
+        StatusReport::Terminal { summary, members } => {
+            print_terminal_status(&summary, &members);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn logs_command(_app: &AppContext, instance: &str) -> Result<()> {
+    let stores = Stores::discover()?;
+    let logs = load_logs(&stores, instance).await?;
+    if logs.is_empty() {
+        eprintln!("no retained world process logs");
+    }
+    for (name, bytes) in logs {
+        println!("== {name} ==");
+        print!("{}", String::from_utf8_lossy(&bytes));
+        if !bytes.ends_with(b"\n") {
+            println!();
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn list_command(_app: &AppContext, all: bool) -> Result<()> {
+    let stores = Stores::discover()?;
+    let report = load_list(&stores, all).await?;
+    for registration in &report.live {
+        println!(
+            "{}  live      {}  {}  train {}",
+            registration.instance,
+            registration.world.id,
+            registration.world.digest,
+            registration.framework
+        );
+    }
+    for summary in &report.terminal {
+        println!(
+            "{}  {:<9} {}  {}  train {}",
+            summary.instance,
+            summary.outcome.kind(),
+            summary.provenance.world,
+            summary.provenance.digest,
+            summary.provenance.framework
+        );
+    }
+    if report.live.is_empty() && !all {
+        println!("no live world sessions");
+    }
+    Ok(())
+}
+
+pub(crate) async fn stop_command(_app: &AppContext, instance: &str) -> Result<()> {
+    let stores = Stores::discover()?;
+    let registration = stores.registry.resolve(instance)?;
+    stop_world(registration, &stores).await?;
+    println!("stopped world {instance}");
+    Ok(())
+}
+
+enum StatusReport {
+    Live(Box<WorldSessionState>),
+    Terminal {
+        summary: Box<TerminalWorldSummary>,
+        members: Vec<TerminalMemberEvidence>,
+    },
+}
+
+async fn load_status(stores: &Stores, instance: &str) -> Result<StatusReport> {
+    if let Some(registration) = stores.registry.find(instance)? {
+        let (_, state) = current_verified(&registration).await?;
+        return Ok(StatusReport::Live(Box::new(state)));
+    }
+    let summary = stores.recover_terminal(instance).await?.with_context(|| {
+        format!(
+            "no live or retained terminal world session `{instance}` was found; `phoxal simulation list --all` shows discoverable sessions"
+        )
+    })?;
+    let members = stores.evidence.read_member_evidence(&summary)?;
+    Ok(StatusReport::Terminal {
+        summary: Box::new(summary),
+        members,
+    })
+}
+
+async fn load_logs(stores: &Stores, instance: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    if let Some(registration) = stores.registry.find(instance)? {
+        connect_verified(&registration).await?;
+        return stores.evidence.read_live_logs(instance);
+    }
+    let summary = stores.recover_terminal(instance).await?.with_context(|| {
+        format!("no live or retained terminal world session `{instance}` was found")
+    })?;
+    stores.evidence.read_logs(&summary)
+}
+
+struct ListReport {
+    live: Vec<LocalWorldRegistration>,
+    terminal: Vec<TerminalWorldSummary>,
+}
+
+async fn load_list(stores: &Stores, all: bool) -> Result<ListReport> {
+    let discoverable = stores.registry.registration_instances()?;
+    let registered = stores.registry.list()?;
+    let registered_ids = registered
+        .iter()
+        .map(|registration| registration.instance.to_string())
+        .collect::<BTreeSet<_>>();
+    if all {
+        for instance in discoverable {
+            if registered_ids.contains(&instance) {
+                continue;
+            }
+            if let Err(error) = stores.recover_terminal(&instance).await {
+                eprintln!(
+                    "warning: stale world {instance} could not be finalized from durable evidence: {error:#}"
+                );
+            }
+        }
+    }
+    let report = stores
+        .evidence
+        .prune(DEFAULT_TERMINAL_SESSION_LIMIT, &registered_ids)?;
+    for path in report.incomplete {
+        tracing::warn!(path = %path.display(), "incomplete world evidence was retained");
+    }
+    let mut live = Vec::new();
+    for registration in registered {
+        match connect_verified(&registration).await {
+            Ok(_) => live.push(registration),
+            Err(error) => eprintln!(
+                "warning: world {} has a live local lease but its frozen bootstrap could not be verified: {error:#}",
+                registration.instance
+            ),
+        }
+    }
+    let terminal = if all {
+        stores
+            .evidence
+            .list_summaries()?
+            .into_iter()
+            .filter(|summary| !registered_ids.contains(&summary.instance.to_string()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(ListReport { live, terminal })
+}
+
+async fn start_world(app: &AppContext, source: &Path) -> Result<StartedWorld> {
+    let stores = Stores::discover()?;
+    stores.prune()?;
+
+    let staging = tempfile::Builder::new()
+        .prefix(".world-launch-")
+        .tempdir()
+        .context("failed to create a world-bundle launch staging directory")?;
+    let bundle_path = staging.path().join("world-bundle");
+    let source = source.to_path_buf();
+    let destination = bundle_path.clone();
+    app.ui.info(format!("compiling world {}", source.display()));
+    let compiled = tokio::task::spawn_blocking(move || {
+        phoxal_cli_project::compile_world(&source, &destination)
+    })
+    .await
+    .context("world compiler worker failed")??;
+
+    let expected_world = compiled.bundle().world().id().clone();
+    let expected_digest = compiled.digest();
+    let framework = FrameworkVersion::CURRENT;
+    let offline = app.offline;
+    app.ui
+        .info(format!("materializing simulation host train {framework}"));
+    let tools = tokio::task::spawn_blocking(move || {
+        phoxal_cli_project::materialize_webots_tools(
+            framework,
+            offline,
+            &phoxal_cli_project::SilentReporter,
+        )
+    })
+    .await
+    .context("simulation host materializer worker failed")??;
+
+    let (instance, host) = super::world_host::launch(
+        tools.host(),
+        compiled.path(),
+        &stores.paths,
+        DEFAULT_LOG_BYTE_LIMIT,
     )
     .await?;
-
-    startup.step(StepId::Webots, "staging the world");
-    let stage_request = phoxal_cli_project::StageWebotsRequest {
-        bundle_root: launched.bundle().to_path_buf(),
-        project_root: simulation.project_root.clone(),
-        world_source: simulation.world_source.clone(),
-        webots_executable: simulation.webots_executable.clone(),
-        controller: simulation.controller.clone(),
-        endpoint: target.endpoint.clone(),
+    let registration = match stores.registry.resolve(&instance) {
+        Ok(registration) => registration,
+        Err(error) => return Err(rollback_host(host, error).await),
     };
-    let started = async {
-        let launch =
-            tokio::task::spawn_blocking(move || phoxal_cli_project::stage_webots(stage_request))
-                .await
-                .context("the Webots staging worker failed")??;
-        let world_name = launch
-            .world
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("world")
-            .to_string();
-        startup.detail(StepId::Webots, format!("world {world_name}"));
-        let webots = Webots::launch(&launch, &target.paths().webots_log())?;
-        startup.complete(StepId::Webots, format!("world {world_name} · launched"));
-        Ok::<_, anyhow::Error>(webots)
-    }
-    .await;
-    let webots = match started {
-        Ok(webots) => webots,
-        Err(error) => return Err(end_launched(launched, error).await),
+    let validation = || -> Result<()> {
+        ensure!(
+            registration.framework == framework,
+            "new world registered framework {}, expected exact host train {framework}",
+            registration.framework
+        );
+        ensure!(
+            registration.world.id == expected_world,
+            "new world registered ID {}, compiled source was {}",
+            registration.world.id,
+            expected_world
+        );
+        ensure!(
+            registration.world.digest == expected_digest,
+            "new world registered digest {}, compiled bundle was {expected_digest}",
+            registration.world.digest
+        );
+        Ok(())
     };
-
-    match await_session_ready(launched, startup).await {
-        Ok(launched) => Ok(StartedSimulation { launched, webots }),
-        Err(error) => {
-            let stopped = webots.stop().await;
-            Err(match stopped {
-                Ok(()) => error,
-                Err(stopped) => error.context(format!("closing Webots also failed: {stopped:#}")),
-            })
-        }
+    if let Err(error) = validation() {
+        return Err(rollback_host(host, error).await);
     }
+    let ready = match current_verified(&registration).await {
+        Ok((_, state)) => ensure_ready_and_paused(&state),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = ready {
+        return Err(rollback_host(host, error).await);
+    }
+    drop(staging);
+    Ok(StartedWorld { registration, host })
 }
 
-/// End a session that was launched but never became a simulation.
-async fn end_launched(
-    launched: super::lifecycle::LaunchedSession,
-    error: anyhow::Error,
-) -> anyhow::Error {
-    let cleanup = launched.owned().stop().await;
-    launched.children.abort();
-    launched.session.shutdown().await;
-    match cleanup {
+async fn rollback_host(host: LaunchedWorldHost, error: anyhow::Error) -> anyhow::Error {
+    match host.stop().await {
         Ok(()) => error,
-        Err(cleanup) => error.context(format!("session cleanup also failed: {cleanup:#}")),
+        Err(cleanup) => error.context(format!("world rollback also failed: {cleanup:#}")),
     }
 }
 
-async fn drive_simulation(
+async fn connect_world(
     app: &AppContext,
-    target: &Target,
-    started: StartedSimulation,
+    instance: &str,
+    spawn: Option<&str>,
+    mut started: Option<StartedWorld>,
 ) -> Result<()> {
-    let StartedSimulation { launched, webots } = started;
-    let owned = launched.owned();
-
-    // Either exit order. If Webots goes first, the runtimes it was the world
-    // clock for have nothing left to step on, so the session is ended and the
-    // dashboard leaves exactly as a confirmed stop would end it.
-    let webots = std::sync::Arc::new(tokio::sync::Mutex::new(webots));
-    let webots_exit = std::sync::Arc::new(std::sync::Mutex::new(Option::<String>::None));
-    let watcher = tokio::spawn(watch_webots(
-        std::sync::Arc::clone(&webots),
-        std::sync::Arc::clone(&webots_exit),
-        owned.clone(),
-    ));
-
-    let outcome = session::drive(
-        app,
-        &target.project,
-        launched.session,
-        Detachable::No,
-        SessionOwnership {
-            owned: Some(owned.clone()),
-            supervisor_exit: None,
-        },
-    )
-    .await;
-    launched.children.abort();
-    let _ = launched.children.await;
-    watcher.abort();
-    let _ = watcher.await;
-
-    // Whichever way the session ended, both halves are this client's and both
-    // go down: the session first, then Webots, so the controller is not left
-    // publishing a world clock into an execution that has gone.
-    let stopped_session = owned.stop().await;
-    let webots = std::sync::Arc::into_inner(webots)
-        .context("the Webots process handle still has an owner after shutdown")?
-        .into_inner();
-    let stopped_webots = webots.stop().await;
-    let webots_exit = std::sync::Arc::into_inner(webots_exit)
-        .context("the Webots exit observation still has an owner after shutdown")?
-        .into_inner()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-    let end = SessionEnd::observe(webots_exit, outcome.as_ref());
-    let result = finish(outcome.map(|_| ()), stopped_session, stopped_webots);
-
-    // One account of the ending, printed only now: the dashboard has released
-    // the terminal, and both processes are already down.
-    let paths = target.paths();
-    let ending = match &result {
-        Ok(()) => report(&end),
-        Err(error) => format!("{error:#}"),
+    let stores = Stores::discover()?;
+    let registration = match &started {
+        Some(started) => started.registration.clone(),
+        None => stores.registry.resolve(instance)?,
     };
-    SessionSummary::new(ending, vec![paths.supervisor_log(), paths.webots_log()])
-        .print(&target.project, app.output.theme);
-    result.map_err(|_| ReportedExit(1).into())
-}
-
-/// End the session as soon as Webots goes, and remember that it did.
-async fn watch_webots(
-    webots: std::sync::Arc<tokio::sync::Mutex<Webots>>,
-    observed: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    owned: OwnedSession,
-) {
-    loop {
-        tokio::time::sleep(WEBOTS_POLL_INTERVAL).await;
-        let exited = { webots.lock().await.exited() };
-        match exited {
-            Ok(Some(status)) => {
-                let status = status.to_string();
-                tracing::warn!("Webots exited with {status}; ending the session");
-                *observed
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
-                if let Err(error) = owned.stop().await {
-                    tracing::warn!(%error, "ending the session after Webots exited failed");
-                }
-                return;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!("failed to poll the Webots process: {error:#}");
-                return;
-            }
-        }
+    let client = match connect_verified(&registration).await {
+        Ok(client) => client,
+        Err(error) => return Err(rollback_started_world(started.take(), error).await),
+    };
+    let project = app.project.root().to_path_buf();
+    let offline = app.offline;
+    let locked = tokio::task::spawn_blocking(move || {
+        phoxal_cli_project::source::train::resolve_locked_train(&project, offline)
+    })
+    .await
+    .context("locked framework preflight worker failed")
+    .and_then(|locked| locked);
+    let locked = match locked {
+        Ok(locked) => locked,
+        Err(error) => return Err(rollback_started_world(started.take(), error).await),
+    };
+    if let Err(error) = ensure_compatible_train(registration.framework, locked.framework()) {
+        return Err(rollback_started_world(started.take(), error).await);
     }
+
+    // The compatibility decision is deliberately before project preparation,
+    // package materialization, supervisor launch, or native scene mutation.
+    connect_fresh_execution(app, registration, client, spawn, started).await
 }
 
-/// Fold the session's outcome and both cleanups into one result.
-fn finish(outcome: Result<()>, session: Result<()>, webots: Result<()>) -> Result<()> {
-    let mut result = outcome;
-    for (label, cleanup) in [("session", session), ("Webots", webots)] {
-        result = match (result, cleanup) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(()), Err(error)) => Err(error.context(format!("{label} cleanup failed"))),
-            (Err(error), Err(cleanup)) => {
-                Err(error.context(format!("{label} cleanup also failed: {cleanup:#}")))
+fn ensure_compatible_train(world: FrameworkVersion, robot: FrameworkVersion) -> Result<()> {
+    ensure!(
+        world.is_compatible_with(robot),
+        "world instance uses framework {world}, but this robot lockfile resolves {robot}; the world accepts {}, so select a robot patch on that line before any build or launch",
+        world.compatibility_line()
+    );
+    Ok(())
+}
+
+async fn connect_fresh_execution(
+    app: &AppContext,
+    registration: LocalWorldRegistration,
+    client: WorldSessionClient,
+    spawn: Option<&str>,
+    mut started: Option<StartedWorld>,
+) -> Result<()> {
+    let spawn = spawn
+        .map(SpawnId::new)
+        .transpose()
+        .context("invalid world spawn name")?;
+    let target = super::lifecycle::Target::resolve(None, app.project.root())?;
+    let startup = super::startup::Startup::begin(app, &target.project, Mode::Simulation);
+    let prepared =
+        match super::lifecycle::prepare_driver_free_execution(app, &target, &startup).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let error = rollback_started_world(started.take(), error).await;
+                return Err(startup.failed(error));
             }
         };
+    let launched =
+        match super::lifecycle::launch_driver_free_execution(&target, &startup, prepared).await {
+            Ok(launched) => launched,
+            Err(error) => {
+                let error = rollback_started_world(started.take(), error).await;
+                return Err(startup.failed(error));
+            }
+        };
+    if let Err(error) = launched.ensure_drivers_absent() {
+        let error = rollback_before_active(launched, started.take(), error).await;
+        return Err(startup.failed(error));
     }
-    result
-}
 
-// ---------------------------------------------------------------------------
-// shutdown coordination
-// ---------------------------------------------------------------------------
-
-/// What ended a simulation session, in the order it actually happened.
-///
-/// There is no detach here, so every path ends the whole session; what differs
-/// is which of the two halves went first and therefore what the operator is
-/// told.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SessionEnd {
-    /// The operator ended it: `q`, `S`, a confirmed Ctrl+C, or an external
-    /// SIGTERM/SIGHUP - the UI turns all of them into the same stop for a
-    /// non-detachable session.
-    Operator,
-    /// Webots exited before the session did.
-    WebotsExited { status: String },
-    /// The execution went away first: the supervisor this client launched
-    /// exited, or its identity token disappeared.
-    ExecutionEnded { reason: Option<String> },
-}
-
-impl SessionEnd {
-    /// Classify the end from the two facts the session leaves behind: whether
-    /// the watcher saw Webots exit, and how the dashboard itself ended.
-    pub(crate) fn observe(
-        webots_exit: Option<String>,
-        outcome: Result<&phoxal_cli_ui::AttachmentOutcome, &anyhow::Error>,
-    ) -> Self {
-        if let Some(status) = webots_exit {
-            return Self::WebotsExited { status };
+    let mut states = match client.state_subscription().await {
+        Ok(states) => states,
+        Err(error) => {
+            let error = rollback_before_active(launched, started.take(), error.into()).await;
+            return Err(startup.failed(error));
         }
-        match outcome {
-            Ok(phoxal_cli_ui::AttachmentOutcome::ExecutionEnded { reason }) => {
-                Self::ExecutionEnded {
-                    reason: reason.clone(),
+    };
+    let execution = launched.session.connected().execution;
+    startup.step(
+        StepId::Attachment,
+        format!("attaching {execution} to {}", registration.instance),
+    );
+    let attached = match client
+        .attach(execution, target.endpoint.clone(), spawn)
+        .await
+    {
+        Ok(state) => state,
+        Err(error) => {
+            let error = rollback_before_active(launched, started.take(), error.into()).await;
+            return Err(startup.failed(error));
+        }
+    };
+    if !member_is_active(&attached, execution) {
+        let active = tokio::select! {
+            result = tokio::time::timeout(
+                ATTACHMENT_BUDGET,
+                states.wait_for_member_active(execution),
+            ) => match result {
+                Ok(result) => result.map(|_| ()).map_err(anyhow::Error::from),
+                Err(_) => Err(anyhow::anyhow!(
+                    "timed out after {}s waiting for world member {execution} to become active",
+                    ATTACHMENT_BUDGET.as_secs()
+                )),
+            },
+            () = startup.cancelled() => Err(anyhow::anyhow!(
+                "world attachment was interrupted before member {execution} became active"
+            )),
+        };
+        if let Err(error) = active {
+            let error = rollback_before_active(launched, started.take(), error).await;
+            return Err(startup.failed(error));
+        }
+    }
+
+    startup.complete(
+        StepId::Attachment,
+        format!("member {execution} active in {}", registration.instance),
+    );
+    if let Some(started) = started.take() {
+        started.host.detach();
+    }
+    startup.ready();
+    let outcome =
+        super::lifecycle::drive_launched_session(app, &target, launched, Mode::Simulation).await?;
+    if outcome == phoxal_cli_ui::AttachmentOutcome::Detached {
+        super::lifecycle::report_outcome(app, &target, &outcome)?;
+        report_world_remains_live(app, registration.instance);
+        return Ok(());
+    }
+
+    let ending = await_connected_simulation_ending(&registration, execution).await?;
+    let world_remains_live = matches!(&ending, ConnectedSimulationEnding::Member(_));
+    report_connected_simulation_ending(app, &target, &ending)?;
+    if world_remains_live {
+        report_world_remains_live(app, registration.instance);
+    }
+    Ok(())
+}
+
+fn report_world_remains_live(app: &AppContext, instance: phoxal::model::world::WorldInstanceId) {
+    app.ui.info(format!(
+        "world {instance} remains independently live; open it with `phoxal simulation open {instance}` or stop it with `phoxal simulation stop {instance}`"
+    ));
+}
+
+async fn await_connected_simulation_ending(
+    registration: &LocalWorldRegistration,
+    execution: phoxal::identity::ExecutionId,
+) -> Result<ConnectedSimulationEnding> {
+    let stores = Stores::discover()?;
+    let instance = registration.instance.to_string();
+    tokio::time::timeout(STOP_BUDGET, async {
+        loop {
+            if let Some(summary) = stores.evidence.read_summary(&instance)? {
+                return Ok(ConnectedSimulationEnding::World(Box::new(summary)));
+            }
+            if stores.registry.find(&instance)?.is_some() {
+                if let Some(member) = stores
+                    .evidence
+                    .read_member_terminal(&instance, execution)?
+                {
+                    return Ok(ConnectedSimulationEnding::Member(member));
+                }
+            } else if let Some(summary) = stores.recover_terminal(&instance).await? {
+                return Ok(ConnectedSimulationEnding::World(Box::new(summary)));
+            }
+            tokio::time::sleep(TERMINAL_POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "timed out after {}s waiting for typed terminal evidence for member {execution} in world {instance}",
+            STOP_BUDGET.as_secs()
+        )
+    })?
+}
+
+fn report_connected_simulation_ending(
+    app: &AppContext,
+    target: &super::lifecycle::Target,
+    ending: &ConnectedSimulationEnding,
+) -> Result<()> {
+    let (description, failed) = connected_simulation_ending_description(ending);
+    SessionSummary::new(description, vec![target.paths().supervisor_log()])
+        .print(&target.project, app.output.theme);
+    if failed {
+        return Err(ReportedExit(1).into());
+    }
+    Ok(())
+}
+
+fn connected_simulation_ending_description(ending: &ConnectedSimulationEnding) -> (String, bool) {
+    match ending {
+        ConnectedSimulationEnding::World(summary) => {
+            let failed = matches!(&summary.outcome, TerminalOutcome::Failed { .. });
+            let detail = summary
+                .outcome
+                .detail()
+                .map_or_else(String::new, |detail| format!(": {detail}"));
+            (
+                format!(
+                    "world terminal outcome {}/{:?}{detail}",
+                    summary.outcome.kind(),
+                    summary.outcome.reason()
+                ),
+                failed,
+            )
+        }
+        ConnectedSimulationEnding::Member(member) => {
+            let (cleanup, cleanup_failed) = match &member.terminal.cleanup {
+                WorldMemberCleanup::Complete => ("complete".to_owned(), false),
+                WorldMemberCleanup::Incomplete { detail } => {
+                    (format!("incomplete: {detail}"), true)
+                }
+            };
+            (
+                format!(
+                    "simulation member terminal outcome {:?}; cleanup {cleanup}",
+                    member.terminal.reason
+                ),
+                cleanup_failed || member.terminal.reason != WorldMemberEndReason::Stopped,
+            )
+        }
+    }
+}
+
+fn member_is_active(state: &WorldSessionState, execution: phoxal::identity::ExecutionId) -> bool {
+    state
+        .members
+        .iter()
+        .any(|member| member.execution == execution && member.phase == WorldMemberPhase::Active)
+}
+
+async fn rollback_before_active(
+    launched: super::lifecycle::LaunchedSession,
+    started: Option<StartedWorld>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let error = match super::lifecycle::rollback_launched_session(launched).await {
+        Ok(()) => error,
+        Err(cleanup) => error.context(format!("robot rollback also failed: {cleanup:#}")),
+    };
+    rollback_started_world(started, error).await
+}
+
+async fn rollback_started_world(
+    started: Option<StartedWorld>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let Some(started) = started else {
+        return error;
+    };
+    rollback_host(started.host, error).await
+}
+
+async fn connect_verified(registration: &LocalWorldRegistration) -> Result<WorldSessionClient> {
+    let client = WorldSessionClient::connect(&registration.endpoint)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect to live world instance {}",
+                registration.instance
+            )
+        })?;
+    ensure_bootstrap_matches_registration(client.bootstrap(), registration)?;
+    Ok(client)
+}
+
+async fn current_verified(
+    registration: &LocalWorldRegistration,
+) -> Result<(WorldSessionClient, WorldSessionState)> {
+    let client = connect_verified(registration).await?;
+    let state = client
+        .current_state()
+        .await
+        .context("failed to read current world state")?;
+    ensure_state_matches_registration(&state, registration)?;
+    Ok((client, state))
+}
+
+fn ensure_ready_and_paused(state: &WorldSessionState) -> Result<()> {
+    ensure!(
+        matches!(
+            state.lifecycle,
+            WorldLifecycle::Ready {
+                motion: WorldMotion::Paused
+            }
+        ),
+        "world host published readiness while its authoritative lifecycle was {}",
+        lifecycle_text(state.lifecycle)
+    );
+    Ok(())
+}
+
+fn ensure_bootstrap_matches_registration(
+    bootstrap: &WorldSessionBootstrap,
+    registration: &LocalWorldRegistration,
+) -> Result<()> {
+    ensure!(
+        bootstrap.instance == registration.instance,
+        "world endpoint registered for {} bootstrapped as {}; refusing mismatched locator",
+        registration.instance,
+        bootstrap.instance
+    );
+    ensure!(
+        bootstrap.framework == registration.framework,
+        "world {} registered framework {} but bootstrapped as {}",
+        registration.instance,
+        registration.framework,
+        bootstrap.framework
+    );
+    ensure!(
+        bootstrap.world == registration.world.id,
+        "world {} registered authored ID {} but bootstrapped as {}",
+        registration.instance,
+        registration.world.id,
+        bootstrap.world
+    );
+    ensure!(
+        bootstrap.digest == registration.world.digest,
+        "world {} registered digest {} but bootstrapped as {}",
+        registration.instance,
+        registration.world.digest,
+        bootstrap.digest
+    );
+    Ok(())
+}
+
+async fn open_world_tui(app: &AppContext, registration: LocalWorldRegistration) -> Result<()> {
+    let client = connect_verified(&registration).await?;
+    let states = client
+        .state_subscription()
+        .await
+        .context("failed to open world state subscription")?;
+    let diagnostics = match client.diagnostics_subscription().await {
+        Ok(diagnostics) => Some(diagnostics),
+        Err(error) => {
+            app.ui.warn(format!(
+                "world diagnostics are unavailable, but authoritative state remains connected: {error}"
+            ));
+            None
+        }
+    };
+    let initial_state = states.current().clone();
+    let initial_diagnostics = diagnostics
+        .as_ref()
+        .map(|diagnostics| diagnostics.current());
+    ensure_state_matches_registration(&initial_state, &registration)?;
+
+    let (ingress_tx, ingress_rx) = tokio::sync::mpsc::channel(WORLD_UI_INGRESS_CAPACITY);
+    let (controls_tx, controls_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = tokio::task::JoinSet::new();
+    spawn_state_feed(
+        &mut tasks,
+        client.clone(),
+        states,
+        registration.clone(),
+        ingress_tx.clone(),
+    );
+    if let Some(diagnostics) = diagnostics {
+        spawn_diagnostics_feed(&mut tasks, client.clone(), diagnostics, ingress_tx.clone());
+    }
+    spawn_control_router(
+        &mut tasks,
+        client,
+        registration.clone(),
+        controls_rx,
+        ingress_tx.clone(),
+    );
+    drop(ingress_tx);
+
+    let outcome = phoxal_cli_ui::run_world(
+        ingress_rx,
+        controls_tx,
+        phoxal_cli_ui::WorldUiOptions {
+            title: "phoxal simulation",
+            theme: app.output.theme,
+        },
+        initial_state,
+        initial_diagnostics,
+    )
+    .await;
+    tasks.shutdown().await;
+    match outcome? {
+        phoxal_cli_ui::WorldOutcome::Detached => app.ui.info(format!(
+            "detached from world {}; inspect it with `phoxal simulation status {}`",
+            registration.instance, registration.instance
+        )),
+        phoxal_cli_ui::WorldOutcome::Stopped => app
+            .ui
+            .success(format!("world {} stopped", registration.instance)),
+        phoxal_cli_ui::WorldOutcome::Ended { reason } => {
+            bail!(
+                "world {} ended{}",
+                registration.instance,
+                reason.map_or_else(String::new, |reason| format!(": {reason}"))
+            );
+        }
+    }
+    Ok(())
+}
+
+fn spawn_state_feed(
+    tasks: &mut tokio::task::JoinSet<()>,
+    client: WorldSessionClient,
+    mut states: phoxal::session::WorldStateSubscription,
+    registration: LocalWorldRegistration,
+    ingress: tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
+) {
+    tasks.spawn(async move {
+        loop {
+            match states.recv().await {
+                Ok(state) => {
+                    if let Err(error) = ensure_state_matches_registration(state, &registration) {
+                        let _ = ingress
+                            .send(phoxal_cli_ui::WorldInput::Disconnected {
+                                reason: Some(error.to_string()),
+                            })
+                            .await;
+                        return;
+                    }
+                    if ingress
+                        .send(phoxal_cli_ui::WorldInput::State(state.clone()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    match reconnect_state_subscription(&client, &registration, &ingress).await {
+                        Ok(reconnected) => states = reconnected,
+                        Err(reconnect) => {
+                            let _ = ingress
+                                .send(phoxal_cli_ui::WorldInput::Disconnected {
+                                    reason: Some(format!(
+                                        "world state stream ended: {error}; reconnect failed: {reconnect:#}"
+                                    )),
+                                })
+                                .await;
+                            return;
+                        }
+                    }
                 }
             }
-            Ok(_) => Self::Operator,
-            Err(error) => Self::ExecutionEnded {
-                reason: Some(format!("{error:#}")),
-            },
         }
-    }
+    });
 }
 
-/// What an operator is told about a session that ended cleanly.
-pub(crate) fn report(end: &SessionEnd) -> String {
-    match end {
-        SessionEnd::Operator => {
-            "you ended it; the runtimes were stopped and Webots was closed".to_string()
-        }
-        SessionEnd::WebotsExited { status } => format!(
-            "Webots exited with {status} before the session did; the runtimes were stopped \
-             because the world clock they follow is gone"
-        ),
-        SessionEnd::ExecutionEnded { reason } => match reason {
-            Some(reason) => {
-                format!("the execution ended before Webots did ({reason}); Webots was closed")
+async fn reconnect_state_subscription(
+    client: &WorldSessionClient,
+    registration: &LocalWorldRegistration,
+    ingress: &tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
+) -> Result<phoxal::session::WorldStateSubscription> {
+    tokio::time::sleep(STREAM_RECONNECT_DELAY).await;
+    let states = client
+        .state_subscription()
+        .await
+        .context("failed to reopen the world state subscription")?;
+    let current = states.current().clone();
+    ensure_state_matches_registration(&current, registration)?;
+    ingress
+        .send(phoxal_cli_ui::WorldInput::State(current))
+        .await
+        .context("world UI closed during state-stream recovery")?;
+    Ok(states)
+}
+
+fn spawn_diagnostics_feed(
+    tasks: &mut tokio::task::JoinSet<()>,
+    client: WorldSessionClient,
+    mut diagnostics: phoxal::session::WorldDiagnosticsSubscription,
+    ingress: tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
+) {
+    tasks.spawn(async move {
+        loop {
+            match diagnostics.recv().await {
+                Ok(diagnostics) => {
+                    if ingress
+                        .send(phoxal_cli_ui::WorldInput::Diagnostics(diagnostics))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    match reconnect_diagnostics_subscription(&client, &ingress).await {
+                        Ok(reconnected) => diagnostics = reconnected,
+                        Err(reconnect) => {
+                            let _ = ingress
+                                .send(phoxal_cli_ui::WorldInput::DiagnosticsUnavailable {
+                                    reason: format!(
+                                        "diagnostics stream ended: {error}; reconnect failed: {reconnect:#}"
+                                    ),
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                }
             }
-            None => "the execution ended before Webots did; Webots was closed".to_string(),
-        },
+        }
+    });
+}
+
+async fn reconnect_diagnostics_subscription(
+    client: &WorldSessionClient,
+    ingress: &tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
+) -> Result<phoxal::session::WorldDiagnosticsSubscription> {
+    tokio::time::sleep(STREAM_RECONNECT_DELAY).await;
+    let diagnostics = client
+        .diagnostics_subscription()
+        .await
+        .context("failed to reopen the world diagnostics subscription")?;
+    ingress
+        .send(phoxal_cli_ui::WorldInput::Diagnostics(
+            diagnostics.current(),
+        ))
+        .await
+        .context("world UI closed during diagnostics-stream recovery")?;
+    Ok(diagnostics)
+}
+
+fn spawn_control_router(
+    tasks: &mut tokio::task::JoinSet<()>,
+    client: WorldSessionClient,
+    registration: LocalWorldRegistration,
+    mut controls: tokio::sync::mpsc::UnboundedReceiver<WorldSessionControlRequest>,
+    ingress: tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
+) {
+    tasks.spawn(async move {
+        while let Some(request) = controls.recv().await {
+            let input = match client.control(request).await {
+                Ok(state) => match ensure_state_matches_registration(&state, &registration) {
+                    Ok(()) => phoxal_cli_ui::WorldInput::State(state),
+                    Err(error) => phoxal_cli_ui::WorldInput::Disconnected {
+                        reason: Some(error.to_string()),
+                    },
+                },
+                Err(error) => phoxal_cli_ui::WorldInput::ControlFailed {
+                    request,
+                    reason: error.to_string(),
+                },
+            };
+            if ingress.send(input).await.is_err() {
+                return;
+            }
+        }
+    });
+}
+
+fn print_live_status(state: &WorldSessionState) {
+    println!("instance:  {}", state.instance);
+    println!("world:     {}", state.provenance.world);
+    println!("digest:    {}", state.provenance.digest);
+    println!("lifecycle: {}", lifecycle_text(state.lifecycle));
+    println!("train:     {}", state.provenance.framework);
+    println!(
+        "adapter:   {} {}",
+        state.provenance.adapter, state.provenance.adapter_version
+    );
+    println!("simulator: {}", state.provenance.simulator_version);
+    println!("step:      {}", state.progress.completed_step());
+    println!("world ns:  {}", state.progress.elapsed_ns());
+    println!("members:   {}", state.members.len());
+    for member in &state.members {
+        println!(
+            "  {}  {:?}  {}",
+            member.robot, member.phase, member.execution
+        );
     }
 }
 
-/// Resolve the Webots installation this session will drive.
-fn webots_host() -> Result<phoxal_cli_project::WebotsHost> {
-    phoxal_cli_project::host::doctor::preflight()
-        .map_err(|error| anyhow::anyhow!("{error}"))
-        .context("Webots preflight failed; simulation cannot launch the simulator")?;
-    let executable = phoxal_cli_project::host::doctor::webots_executable_path()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let home = phoxal_cli_project::host::doctor::webots_home_path()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    Ok(phoxal_cli_project::WebotsHost { executable, home })
+fn ensure_state_matches_registration(
+    state: &WorldSessionState,
+    registration: &LocalWorldRegistration,
+) -> Result<()> {
+    ensure!(
+        state.instance == registration.instance,
+        "world state instance {} disagrees with locator {}",
+        state.instance,
+        registration.instance
+    );
+    ensure!(
+        state.provenance.framework == registration.framework
+            && state.provenance.world == registration.world.id
+            && state.provenance.digest == registration.world.digest,
+        "world state provenance disagrees with the verified locator for {}",
+        registration.instance
+    );
+    Ok(())
+}
+
+fn lifecycle_text(lifecycle: WorldLifecycle) -> String {
+    match lifecycle {
+        WorldLifecycle::Starting => "starting".to_owned(),
+        WorldLifecycle::Ready { motion } => format!("ready/{motion:?}").to_lowercase(),
+        WorldLifecycle::Stopping => "stopping".to_owned(),
+        WorldLifecycle::Failed { reason } => format!("failed/{reason:?}").to_lowercase(),
+    }
+}
+
+async fn stop_world(
+    registration: LocalWorldRegistration,
+    stores: &Stores,
+) -> Result<TerminalWorldSummary> {
+    let client = connect_verified(&registration).await?;
+    let state = client
+        .control(WorldSessionControlRequest::Stop)
+        .await
+        .context("world host refused stop")?;
+    ensure_state_matches_registration(&state, &registration)?;
+
+    let instance = registration.instance.to_string();
+    let summary = tokio::time::timeout(STOP_BUDGET, async {
+        loop {
+            if stores.registry.find(&instance)?.is_none() {
+                if let Some(summary) = stores.evidence.read_summary(&instance)? {
+                    return Ok::<_, anyhow::Error>(summary);
+                }
+                if let Some(summary) = stores.recover_terminal(&instance).await? {
+                    return Ok::<_, anyhow::Error>(summary);
+                }
+            }
+            tokio::time::sleep(TERMINAL_POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "timed out after {}s waiting for world {instance} to persist terminal evidence",
+            STOP_BUDGET.as_secs()
+        )
+    })??;
+    if matches!(summary.outcome, TerminalOutcome::Failed { .. }) {
+        bail!(
+            "world {instance} ended as {}/{:?} while stopping{}",
+            summary.outcome.kind(),
+            summary.outcome.reason(),
+            summary
+                .outcome
+                .detail()
+                .map_or_else(String::new, |detail| format!(": {detail}"))
+        );
+    }
+    Ok(summary)
+}
+
+fn print_terminal_status(summary: &TerminalWorldSummary, ended: &[TerminalMemberEvidence]) {
+    println!("instance:  {}", summary.instance);
+    println!("world:     {}", summary.provenance.world);
+    println!("digest:    {}", summary.provenance.digest);
+    println!("lifecycle: {}", summary.outcome.kind());
+    println!("reason:    {:?}", summary.outcome.reason());
+    if let Some(detail) = summary.outcome.detail() {
+        println!("detail:    {detail}");
+    }
+    println!("train:     {}", summary.provenance.framework);
+    println!(
+        "adapter:   {} {}",
+        summary.provenance.adapter, summary.provenance.adapter_version
+    );
+    println!("simulator: {}", summary.provenance.simulator_version);
+    println!("platform:  {}", summary.provenance.platform);
+    println!("seed:      {}", summary.provenance.random_seed);
+    println!("quantum:   {} ns", summary.provenance.time_step_ns);
+    println!("step:      {}", summary.progress.completed_step());
+    println!("world ns:  {}", summary.progress.elapsed_ns());
+    println!(
+        "members:   {} at shutdown, {} ended",
+        summary.members.len(),
+        ended.len()
+    );
+    for member in &summary.members {
+        println!(
+            "  {}  at-shutdown/{:?}  {}",
+            member.robot, member.phase, member.execution
+        );
+    }
+    for member in ended {
+        println!(
+            "  {}  ended/{:?}  {}  cleanup/{:?}",
+            member.terminal.robot,
+            member.terminal.reason,
+            member.terminal.execution,
+            member.terminal.cleanup
+        );
+    }
+    if let Some(process) = summary.failing.process {
+        println!(
+            "failure:   process {} born {}",
+            process.pid, process.started_at_unix_s
+        );
+    }
+    if let Some(producer) = summary.failing.producer {
+        println!("failure:   producer {producer}");
+    }
+    println!(
+        "cleanup:   {}{}",
+        if summary.cleanup.complete {
+            "complete"
+        } else {
+            "incomplete"
+        },
+        summary
+            .cleanup
+            .detail
+            .as_deref()
+            .map_or_else(String::new, |detail| format!(" ({detail})"))
+    );
+    if !summary.retention.truncated.is_empty() {
+        println!("truncated: {}", summary.retention.truncated.join(", "));
+    }
+}
+
+struct Stores {
+    paths: WorldPaths,
+    registry: WorldRegistry,
+    evidence: WorldEvidence,
+}
+
+impl Stores {
+    fn discover() -> Result<Self> {
+        Ok(Self::at(WorldPaths::discover()?))
+    }
+
+    fn at(paths: WorldPaths) -> Self {
+        Self {
+            registry: WorldRegistry::new(
+                paths.clone(),
+                phoxal_cli_host::world::SystemProcessInspector,
+            ),
+            evidence: WorldEvidence::new(paths.clone()),
+            paths,
+        }
+    }
+
+    fn prune(&self) -> Result<()> {
+        let live = self
+            .registry
+            .list()?
+            .into_iter()
+            .map(|registration| registration.instance.to_string())
+            .collect::<BTreeSet<_>>();
+        let report = self.evidence.prune(DEFAULT_TERMINAL_SESSION_LIMIT, &live)?;
+        for path in report.incomplete {
+            tracing::warn!(path = %path.display(), "incomplete world evidence was retained");
+        }
+        Ok(())
+    }
+
+    async fn recover_terminal(&self, instance: &str) -> Result<Option<TerminalWorldSummary>> {
+        let paths = self.paths.clone();
+        let instance = instance.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let inspector = phoxal_cli_host::world::SystemProcessInspector;
+            let registry = WorldRegistry::new(paths.clone(), inspector);
+            let evidence = WorldEvidence::new(paths);
+            registry.recover_host_loss(&evidence, &instance, &inspector)
+        })
+        .await
+        .context("world host-loss recovery worker failed")?
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::fs::{self, File, OpenOptions};
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
 
-    /// `q`, `S`, a confirmed Ctrl+C and an external termination all reach this
-    /// client as the same operator-driven end, and the report says so without
-    /// blaming anything.
-    #[test]
-    fn an_operator_driven_end_reports_what_the_operator_did() {
-        for outcome in [
-            phoxal_cli_ui::AttachmentOutcome::SessionStopped,
-            phoxal_cli_ui::AttachmentOutcome::Detached,
-        ] {
-            let end = SessionEnd::observe(None, Ok(&outcome));
-            assert_eq!(end, SessionEnd::Operator);
-            assert!(report(&end).contains("you ended it"), "{end:?}");
+    use super::*;
+    use phoxal::identity::{ExecutionId, ProducerId, RobotId};
+    use phoxal::model::identity::WorldId;
+    use phoxal::model::world::{WorldDigest, WorldInstanceId, WorldProgress, WorldProvenance};
+    use phoxal::supervisor::api::simulation::SimulationEndReason;
+    use phoxal::world::api::session::diagnostics::WorldSessionDiagnostics;
+    use phoxal::world::{WorldSessionHandler, WorldSessionOperation, WorldSessionServer};
+    use phoxal_cli_host::world::{
+        ProcessIdentity, ProcessInspector, REGISTRATION_SCHEMA, RegisteredWorld,
+        SystemProcessInspector, TERMINAL_SUMMARY_SCHEMA, TerminalCleanup, TerminalFailure,
+        TerminalRetention,
+    };
+    use serde::Serialize;
+    use tokio::sync::broadcast;
+
+    const WORKFLOW_INSTANCE: &str = "3234567890abcdef1234567890abcdef";
+
+    struct WorkflowWorld {
+        bootstrap: WorldSessionBootstrap,
+        state: Mutex<WorldSessionState>,
+        states: Mutex<broadcast::Sender<WorldSessionState>>,
+        diagnostics: Mutex<WorldSessionDiagnostics>,
+        diagnostic_updates: Mutex<broadcast::Sender<WorldSessionDiagnostics>>,
+        paths: WorldPaths,
+    }
+
+    impl WorkflowWorld {
+        fn new(paths: WorldPaths) -> Self {
+            let instance = WorldInstanceId::parse(WORKFLOW_INSTANCE).unwrap();
+            let world = WorldId::new("warehouse").unwrap();
+            let digest = WorldDigest::parse(&"c".repeat(64)).unwrap();
+            let bootstrap = WorldSessionBootstrap {
+                instance,
+                framework: FrameworkVersion::CURRENT,
+                world: world.clone(),
+                digest,
+            };
+            let state = WorldSessionState {
+                revision: 1,
+                instance,
+                provenance: WorldProvenance {
+                    world,
+                    digest,
+                    random_seed: 17,
+                    framework: FrameworkVersion::CURRENT,
+                    adapter: "workflow-test".to_owned(),
+                    adapter_version: "1".to_owned(),
+                    simulator_version: "fake".to_owned(),
+                    platform: "test".to_owned(),
+                    time_step_ns: 10_000_000,
+                },
+                lifecycle: WorldLifecycle::Ready {
+                    motion: WorldMotion::Paused,
+                },
+                progress: WorldProgress::at(3, 10_000_000).unwrap(),
+                members: Vec::new(),
+            };
+            let (states, _) = broadcast::channel(8);
+            let (diagnostic_updates, _) = broadcast::channel(8);
+            Self {
+                bootstrap,
+                state: Mutex::new(state),
+                states: Mutex::new(states),
+                diagnostics: Mutex::new(WorldSessionDiagnostics {
+                    revision: 2,
+                    pacing: None,
+                    last_transition_age_ns: Some(1),
+                }),
+                diagnostic_updates: Mutex::new(diagnostic_updates),
+                paths,
+            }
+        }
+
+        fn rotate_state_stream(&self) {
+            let (replacement, _) = broadcast::channel(8);
+            *self.states.lock().unwrap() = replacement;
+        }
+
+        fn rotate_diagnostics_stream(&self) {
+            let (replacement, _) = broadcast::channel(8);
+            *self.diagnostic_updates.lock().unwrap() = replacement;
+        }
+
+        fn stop(&self) -> Result<WorldSessionState, String> {
+            let mut state = self.state.lock().unwrap();
+            state.revision += 1;
+            state.lifecycle = WorldLifecycle::Stopping;
+            let stopped = state.clone();
+            let _ = self.states.lock().unwrap().send(stopped.clone());
+            let root = self.paths.evidence_path(WORKFLOW_INSTANCE);
+            let summary = TerminalWorldSummary {
+                schema: TERMINAL_SUMMARY_SCHEMA.to_owned(),
+                instance: state.instance,
+                provenance: state.provenance.clone(),
+                outcome: TerminalOutcome::Stopped {
+                    reason: SimulationEndReason::WorldStopped,
+                },
+                progress: state.progress,
+                members: state.members.clone(),
+                member_evidence: Vec::new(),
+                failing: TerminalFailure {
+                    process: None,
+                    producer: None,
+                },
+                evidence: vec!["host.log".to_owned(), "webots.log".to_owned()],
+                cleanup: TerminalCleanup {
+                    complete: true,
+                    detail: None,
+                },
+                retention: TerminalRetention {
+                    log_byte_limit: 1_024,
+                    truncated: Vec::new(),
+                },
+                ended_at_unix_ms: 123_456,
+            };
+            write_owner_json(&root.join("summary.json"), &summary)
+                .map_err(|error| error.to_string())?;
+            fs::remove_file(self.paths.registration_path(WORKFLOW_INSTANCE))
+                .map_err(|error| error.to_string())?;
+            fs::remove_file(
+                self.paths
+                    .registry()
+                    .join(format!("{WORKFLOW_INSTANCE}.lease")),
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(stopped)
         }
     }
 
-    /// Order one: Webots dies first. The runtimes have no world clock left, so
-    /// the session is ended and the operator is told why.
+    impl WorldSessionHandler for WorkflowWorld {
+        fn bootstrap(&self) -> WorldSessionBootstrap {
+            self.bootstrap.clone()
+        }
+
+        fn state(&self) -> WorldSessionState {
+            self.state.lock().unwrap().clone()
+        }
+
+        fn subscribe_state(&self) -> broadcast::Receiver<WorldSessionState> {
+            self.states.lock().unwrap().subscribe()
+        }
+
+        fn diagnostics(&self) -> WorldSessionDiagnostics {
+            *self.diagnostics.lock().unwrap()
+        }
+
+        fn subscribe_diagnostics(&self) -> broadcast::Receiver<WorldSessionDiagnostics> {
+            self.diagnostic_updates.lock().unwrap().subscribe()
+        }
+
+        fn control(
+            &self,
+            request: WorldSessionControlRequest,
+        ) -> WorldSessionOperation<'_, WorldSessionState> {
+            Box::pin(async move {
+                match request {
+                    WorldSessionControlRequest::Stop => self.stop(),
+                    WorldSessionControlRequest::Pause | WorldSessionControlRequest::Resume => {
+                        Ok(self.state())
+                    }
+                }
+            })
+        }
+
+        fn attach(
+            &self,
+            _execution: ExecutionId,
+            _supervisor_endpoint: String,
+            _spawn: Option<SpawnId>,
+        ) -> WorldSessionOperation<'_, WorldSessionState> {
+            Box::pin(async move { Ok(self.state()) })
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_owner_json(path: &Path, value: &impl Serialize) -> std::io::Result<File> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(&serde_json::to_vec(value)?)?;
+        Ok(file)
+    }
+
+    #[cfg(unix)]
+    fn write_owner_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<File> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)?;
+        Ok(file)
+    }
+
+    #[cfg(unix)]
+    fn create_owner_directory(path: &Path) {
+        use std::os::unix::fs::DirBuilderExt;
+
+        fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn write_live_registration(
+        paths: &WorldPaths,
+        endpoint: &str,
+    ) -> (LocalWorldRegistration, File) {
+        use std::os::fd::AsRawFd;
+
+        let inspector = SystemProcessInspector;
+        let pid = std::process::id();
+        let process = ProcessIdentity {
+            pid,
+            started_at_unix_s: inspector.started_at_unix_s(pid).unwrap(),
+        };
+        let instance = WorldInstanceId::parse(WORKFLOW_INSTANCE).unwrap();
+        let registration = LocalWorldRegistration {
+            schema: REGISTRATION_SCHEMA.to_owned(),
+            instance,
+            endpoint: endpoint.to_owned(),
+            process,
+            framework: FrameworkVersion::CURRENT,
+            world: RegisteredWorld {
+                id: WorldId::new("warehouse").unwrap(),
+                digest: WorldDigest::parse(&"c".repeat(64)).unwrap(),
+            },
+            lease: format!("{WORKFLOW_INSTANCE}.lease"),
+        };
+        let lease = write_owner_bytes(
+            &paths.registry().join(format!("{WORKFLOW_INSTANCE}.lease")),
+            b"",
+        )
+        .unwrap();
+        // SAFETY: `lease` owns a valid descriptor for the fixture's lifetime.
+        assert_eq!(unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX) }, 0);
+        write_owner_json(&paths.registration_path(WORKFLOW_INSTANCE), &registration).unwrap();
+        (registration, lease)
+    }
+
+    #[cfg(unix)]
+    async fn workflow_fixture() -> (
+        tempfile::TempDir,
+        Stores,
+        Arc<WorkflowWorld>,
+        WorldSessionServer,
+        LocalWorldRegistration,
+        File,
+    ) {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = WorldPaths::create(
+            temporary.path().join("registry"),
+            temporary.path().join("evidence"),
+        )
+        .unwrap();
+        let evidence = paths.evidence_path(WORKFLOW_INSTANCE);
+        create_owner_directory(&evidence);
+        write_owner_bytes(&evidence.join("host.log"), b"host retained\n").unwrap();
+        write_owner_bytes(&evidence.join("webots.log"), b"webots retained\n").unwrap();
+        let handler = Arc::new(WorkflowWorld::new(paths.clone()));
+        let server = WorldSessionServer::bind(Arc::clone(&handler))
+            .await
+            .unwrap();
+        let (registration, lease) = write_live_registration(&paths, server.endpoint());
+        (
+            temporary,
+            Stores::at(paths),
+            handler,
+            server,
+            registration,
+            lease,
+        )
+    }
+
+    fn registration() -> LocalWorldRegistration {
+        let instance =
+            WorldInstanceId::parse("1234567890abcdef1234567890abcdef").expect("world instance");
+        LocalWorldRegistration {
+            schema: REGISTRATION_SCHEMA.to_owned(),
+            instance,
+            endpoint: "tcp://127.0.0.1:12345".to_owned(),
+            process: ProcessIdentity {
+                pid: 42,
+                started_at_unix_s: 100,
+            },
+            framework: FrameworkVersion::new(0, 68, 2),
+            world: RegisteredWorld {
+                id: WorldId::new("warehouse").expect("world id"),
+                digest: WorldDigest::parse(&"a".repeat(64)).expect("world digest"),
+            },
+            lease: format!("{instance}.lease"),
+        }
+    }
+
+    fn bootstrap(registration: &LocalWorldRegistration) -> WorldSessionBootstrap {
+        WorldSessionBootstrap {
+            instance: registration.instance,
+            framework: registration.framework,
+            world: registration.world.id.clone(),
+            digest: registration.world.digest,
+        }
+    }
+
+    fn state(lifecycle: WorldLifecycle) -> WorldSessionState {
+        WorldSessionState {
+            revision: 1,
+            instance: WorldInstanceId::parse("1234567890abcdef1234567890abcdef").unwrap(),
+            provenance: WorldProvenance {
+                world: WorldId::new("warehouse").unwrap(),
+                digest: WorldDigest::parse(&"a".repeat(64)).unwrap(),
+                random_seed: 7,
+                framework: FrameworkVersion::new(0, 68, 2),
+                adapter: "webots".to_owned(),
+                adapter_version: "R2025a".to_owned(),
+                simulator_version: "R2025a".to_owned(),
+                platform: "test".to_owned(),
+                time_step_ns: 10_000_000,
+            },
+            lifecycle,
+            progress: WorldProgress::at(0, 10_000_000).unwrap(),
+            members: Vec::new(),
+        }
+    }
+
+    fn member_ending(
+        reason: WorldMemberEndReason,
+        cleanup: WorldMemberCleanup,
+    ) -> ConnectedSimulationEnding {
+        ConnectedSimulationEnding::Member(TerminalMemberEvidence {
+            schema: phoxal_cli_host::world::MEMBER_TERMINAL_SCHEMA.to_owned(),
+            terminal: phoxal::world::api::session::WorldMemberTerminal {
+                execution: ExecutionId::parse("1234567890abcdef1234567890abcdef").unwrap(),
+                robot: RobotId::new("rover").unwrap(),
+                controller: ProducerId::parse("2234567890abcdef1234567890abcdef").unwrap(),
+                spawn: SpawnId::new("loading-bay").unwrap(),
+                reason,
+                last_progress: WorldProgress::at(4, 10_000_000).unwrap(),
+                cleanup,
+                evidence_paths: Vec::new(),
+            },
+        })
+    }
+
     #[test]
-    fn webots_exiting_first_ends_the_session_and_reports_it() {
-        let end = SessionEnd::observe(
-            Some("exit status: 139".to_string()),
-            Ok(&phoxal_cli_ui::AttachmentOutcome::SessionStopped),
+    fn same_line_patches_pass_preflight_in_both_directions() {
+        assert!(
+            ensure_compatible_train(
+                FrameworkVersion::new(0, 68, 2),
+                FrameworkVersion::new(0, 68, 0)
+            )
+            .is_ok()
         );
+        assert!(
+            ensure_compatible_train(
+                FrameworkVersion::new(1, 4, 0),
+                FrameworkVersion::new(1, 9, 7)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn adjacent_line_is_refused_with_both_versions_and_required_line() {
+        let error = ensure_compatible_train(
+            FrameworkVersion::new(0, 68, 2),
+            FrameworkVersion::new(0, 69, 0),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("0.68.2"), "{error}");
+        assert!(error.contains("0.69.0"), "{error}");
+        assert!(error.contains("0.68.x"), "{error}");
+        assert!(error.contains("before any build or launch"), "{error}");
+    }
+
+    #[test]
+    fn live_endpoint_bootstrap_must_match_every_locator_identity() {
+        let registration = registration();
+        assert!(
+            ensure_bootstrap_matches_registration(&bootstrap(&registration), &registration).is_ok()
+        );
+
+        let mut wrong_instance = bootstrap(&registration);
+        wrong_instance.instance =
+            WorldInstanceId::parse("2234567890abcdef1234567890abcdef").unwrap();
+        let error = ensure_bootstrap_matches_registration(&wrong_instance, &registration)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mismatched locator"), "{error}");
+
+        let mut wrong_provenance = bootstrap(&registration);
+        wrong_provenance.digest = WorldDigest::parse(&"b".repeat(64)).unwrap();
+        let error = ensure_bootstrap_matches_registration(&wrong_provenance, &registration)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("registered digest"), "{error}");
+    }
+
+    #[test]
+    fn launch_commit_requires_authoritative_ready_and_paused_state() {
+        assert!(
+            ensure_ready_and_paused(&state(WorldLifecycle::Ready {
+                motion: WorldMotion::Paused,
+            }))
+            .is_ok()
+        );
+        for lifecycle in [
+            WorldLifecycle::Starting,
+            WorldLifecycle::Ready {
+                motion: WorldMotion::Running,
+            },
+            WorldLifecycle::Stopping,
+        ] {
+            let error = ensure_ready_and_paused(&state(lifecycle))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("authoritative lifecycle"), "{error}");
+        }
+    }
+
+    #[test]
+    fn typed_member_outcomes_distinguish_clean_stop_from_world_failure() {
+        let (stopped, failed) = connected_simulation_ending_description(&member_ending(
+            WorldMemberEndReason::Stopped,
+            WorldMemberCleanup::Complete,
+        ));
+        assert!(!failed, "{stopped}");
+        assert!(stopped.contains("Stopped"), "{stopped}");
+
+        let (fault, failed) = connected_simulation_ending_description(&member_ending(
+            WorldMemberEndReason::ControllerFault,
+            WorldMemberCleanup::Incomplete {
+                detail: "native controller survived".to_owned(),
+            },
+        ));
+        assert!(failed, "{fault}");
+        assert!(fault.contains("ControllerFault"), "{fault}");
+        assert!(fault.contains("native controller survived"), "{fault}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_workflow_reads_live_and_terminal_state_logs_and_list_scope() {
+        let (_temporary, stores, _handler, server, registration, _lease) = workflow_fixture().await;
+
+        let StatusReport::Live(live) = load_status(&stores, WORKFLOW_INSTANCE).await.unwrap()
+        else {
+            panic!("a held registration must resolve as live");
+        };
+        assert_eq!(live.instance, registration.instance);
         assert_eq!(
-            end,
-            SessionEnd::WebotsExited {
-                status: "exit status: 139".to_string()
+            live.lifecycle,
+            WorldLifecycle::Ready {
+                motion: WorldMotion::Paused
             }
         );
-        let report = report(&end);
-        assert!(report.contains("exit status: 139"), "{report}");
-        assert!(report.contains("world clock"), "{report}");
-    }
-
-    /// Order two: the execution goes first. Webots must not be left behind, and
-    /// the supervisor's own account of why survives.
-    #[test]
-    fn the_execution_ending_first_still_closes_webots_and_keeps_the_reason() {
-        let end = SessionEnd::observe(
-            None,
-            Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionEnded {
-                reason: Some("phoxal-supervisor exited with exit status: 1".to_string()),
-            }),
+        assert_eq!(
+            load_logs(&stores, WORKFLOW_INSTANCE).await.unwrap(),
+            vec![
+                ("host.log".to_owned(), b"host retained\n".to_vec()),
+                ("webots.log".to_owned(), b"webots retained\n".to_vec()),
+            ]
         );
-        let report = report(&end);
-        assert!(report.contains("exit status: 1"), "{report}");
-        assert!(report.contains("Webots was closed"), "{report}");
-    }
 
-    /// A session that never produced an outcome at all is still classified and
-    /// reported, never silently swallowed.
-    #[test]
-    fn a_failed_session_is_classified_and_reported_rather_than_swallowed() {
-        let error = anyhow::anyhow!("the supervisor's identity token was lost");
-        let end = SessionEnd::observe(None, Err(&error));
-        assert!(report(&end).contains("identity token"), "{end:?}");
-    }
+        let live_only = load_list(&stores, false).await.unwrap();
+        assert_eq!(live_only.live.len(), 1);
+        assert!(live_only.terminal.is_empty());
+        let live_and_terminal = load_list(&stores, true).await.unwrap();
+        assert_eq!(live_and_terminal.live.len(), 1);
+        assert!(live_and_terminal.terminal.is_empty());
 
-    /// Webots exiting wins over whatever the dashboard reported: it is the
-    /// earlier fact, and it is what ended the session at all.
-    #[test]
-    fn a_webots_exit_is_the_end_even_when_the_dashboard_also_reported_one() {
-        let end = SessionEnd::observe(
-            Some("signal: 15".to_string()),
-            Ok(&phoxal_cli_ui::AttachmentOutcome::ExecutionEnded { reason: None }),
+        let stopped = stop_world(registration, &stores).await.unwrap();
+        assert_eq!(stopped.outcome.reason(), SimulationEndReason::WorldStopped);
+        let StatusReport::Terminal { summary, members } =
+            load_status(&stores, WORKFLOW_INSTANCE).await.unwrap()
+        else {
+            panic!("a stopped world must resolve from retained evidence");
+        };
+        assert_eq!(*summary, stopped);
+        assert!(members.is_empty());
+        assert_eq!(
+            load_logs(&stores, WORKFLOW_INSTANCE).await.unwrap(),
+            vec![
+                ("host.log".to_owned(), b"host retained\n".to_vec()),
+                ("webots.log".to_owned(), b"webots retained\n".to_vec()),
+            ]
         );
-        assert!(matches!(end, SessionEnd::WebotsExited { .. }), "{end:?}");
+
+        let live_only = load_list(&stores, false).await.unwrap();
+        assert!(live_only.live.is_empty());
+        assert!(live_only.terminal.is_empty());
+        let all = load_list(&stores, true).await.unwrap();
+        assert!(all.live.is_empty());
+        assert_eq!(all.terminal, vec![stopped]);
+
+        server.close().await.unwrap();
     }
 
-    /// Neither cleanup may hide the session's own failure, and neither may be
-    /// silently dropped when the session itself was fine.
-    #[test]
-    fn no_cleanup_failure_is_hidden_and_none_hides_the_session_failure() {
-        let error = finish(
-            Err(anyhow::anyhow!("the session failed")),
-            Err(anyhow::anyhow!("a runtime survived SIGKILL")),
-            Err(anyhow::anyhow!("Webots cleanup failed")),
-        )
-        .expect_err("every failure must remain a failure");
-        let report = format!("{error:#}");
-        assert!(report.contains("the session failed"), "{report}");
-        assert!(report.contains("survived SIGKILL"), "{report}");
-        assert!(report.contains("Webots cleanup failed"), "{report}");
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn monitor_feeds_reconnect_state_and_diagnostics_after_stream_loss() {
+        let (_temporary, _stores, handler, server, registration, _lease) = workflow_fixture().await;
+        let client = connect_verified(&registration).await.unwrap();
 
-        let error = finish(
-            Ok(()),
-            Ok(()),
-            Err(anyhow::anyhow!("Webots cleanup failed")),
-        )
-        .expect_err("a cleanup failure must not become success");
-        let report = format!("{error:#}");
-        assert!(report.contains("Webots cleanup failed"), "{report}");
+        let states = client.state_subscription().await.unwrap();
+        let (state_tx, mut state_rx) = tokio::sync::mpsc::channel(4);
+        let mut state_tasks = tokio::task::JoinSet::new();
+        spawn_state_feed(
+            &mut state_tasks,
+            client.clone(),
+            states,
+            registration,
+            state_tx,
+        );
+        handler.rotate_state_stream();
+        let state = tokio::time::timeout(Duration::from_secs(3), state_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let phoxal_cli_ui::WorldInput::State(state) = state else {
+            panic!("state loss must reconnect with a fresh authoritative snapshot");
+        };
+        assert_eq!(state.instance.to_string(), WORKFLOW_INSTANCE);
+        state_tasks.shutdown().await;
 
-        assert!(finish(Ok(()), Ok(()), Ok(())).is_ok());
-    }
+        let diagnostics = client.diagnostics_subscription().await.unwrap();
+        let (diagnostics_tx, mut diagnostics_rx) = tokio::sync::mpsc::channel(4);
+        let mut diagnostics_tasks = tokio::task::JoinSet::new();
+        spawn_diagnostics_feed(&mut diagnostics_tasks, client, diagnostics, diagnostics_tx);
+        handler.rotate_diagnostics_stream();
+        let diagnostics = tokio::time::timeout(Duration::from_secs(3), diagnostics_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let phoxal_cli_ui::WorldInput::Diagnostics(diagnostics) = diagnostics else {
+            panic!("diagnostics loss must reconnect with a fresh bounded snapshot");
+        };
+        assert_eq!(diagnostics.revision, 2);
+        diagnostics_tasks.shutdown().await;
 
-    /// A simulation session is never detachable: this client owns Webots, so
-    /// leaving would strand a simulator with no operator.
-    #[test]
-    fn a_simulation_session_is_never_detachable() {
-        assert_ne!(Detachable::No, Detachable::Yes);
+        server.close().await.unwrap();
     }
 }

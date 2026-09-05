@@ -8,8 +8,8 @@
 //!
 //! `PHOXAL_FRAMEWORK_PATH` points at a framework checkout, and every official
 //! package is then materialized with `cargo install --path <checkout>/<crate>`
-//! instead. `PHOXAL_SIMULATOR_WEBOTS_PATH` does the same for the Webots
-//! controller, which lives in its own repository on its own train.
+//! instead. The exact-train Webots adapter packages live in that same
+//! framework checkout under `simulators/webots`.
 //!
 //! This changes *where the source comes from* and nothing else: the same
 //! install, the same install root, the same caching, the same staging. It is a
@@ -25,20 +25,10 @@ use crate::build::materialise::MaterializeSource;
 /// The framework checkout every official package is built from when set.
 pub const FRAMEWORK_PATH_VAR: &str = "PHOXAL_FRAMEWORK_PATH";
 
-/// The `phoxal/simulator-webots` checkout the Webots controller is built from
-/// when set.
-pub const SIMULATOR_WEBOTS_PATH_VAR: &str = "PHOXAL_SIMULATOR_WEBOTS_PATH";
-
 /// The framework checkout the operator directed official packages at.
 #[must_use]
 pub fn framework_path() -> Option<PathBuf> {
     non_empty(FRAMEWORK_PATH_VAR)
-}
-
-/// The controller checkout the operator directed the simulator at.
-#[must_use]
-pub fn simulator_webots_path() -> Option<PathBuf> {
-    non_empty(SIMULATOR_WEBOTS_PATH_VAR)
 }
 
 fn non_empty(variable: &str) -> Option<PathBuf> {
@@ -65,10 +55,17 @@ pub fn supervisor_source() -> MaterializeSource {
     })
 }
 
-/// Where the Webots controller's package is built from.
+/// Where one exact-train Webots adapter package is built from.
 #[must_use]
-pub fn webots_controller_source() -> MaterializeSource {
-    simulator_webots_path().map_or(MaterializeSource::Registry, MaterializeSource::Path)
+pub fn webots_adapter_source(package_directory: &str) -> MaterializeSource {
+    framework_path().map_or(MaterializeSource::Registry, |checkout| {
+        MaterializeSource::Path(
+            checkout
+                .join("simulators")
+                .join("webots")
+                .join(package_directory),
+        )
+    })
 }
 
 /// The framework repository's own directory layout for its official packages.

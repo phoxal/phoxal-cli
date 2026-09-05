@@ -37,9 +37,7 @@ mod target;
 mod validation;
 
 pub use build::container::ContainerEngine;
-pub use build::overlay::{
-    FRAMEWORK_PATH_VAR, SIMULATOR_WEBOTS_PATH_VAR, framework_path, simulator_webots_path,
-};
+pub use build::overlay::{FRAMEWORK_PATH_VAR, framework_path};
 pub use build::shell::shell_quote;
 pub use build::{BuildBackend, BuildBundleRequest, BuiltBundle, build_bundle};
 pub use bundle::archive::{digest_sidecar, verify_against_digest_sidecar};
@@ -57,8 +55,8 @@ pub use runtimes::{
     BRAIN_ID, RobotRuntime, RuntimeRole, bundle_runtimes, robot_binaries, robot_runtimes,
 };
 pub use simulation::{
-    PrepareSimulationRequest, PreparedSimulation, StageWebotsRequest, WebotsHost, WebotsLaunch,
-    prepare_simulation, stage_webots,
+    CompiledWorld, FullSimulationAdmission, MaterializedWebotsTools, compile_world,
+    materialize_webots_tools, validate_full_simulation_bundle,
 };
 pub use target::resolve as resolve_target;
 pub use validation::{

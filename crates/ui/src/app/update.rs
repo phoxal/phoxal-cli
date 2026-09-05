@@ -82,14 +82,7 @@ fn complete_stop_failure(model: &mut AppModel, reason: String) -> Vec<Effect> {
 }
 
 /// Leave the session without touching the execution.
-///
-/// In a simulation session there is nothing to leave behind: the client owns
-/// Webots, so detaching would strand a simulator with no operator. `q` there
-/// means "end the session", which is a stop.
 fn detach(model: &mut AppModel) -> Vec<Effect> {
-    if !model.detachable {
-        return request_stop(model);
-    }
     model.exit = Some(AttachmentOutcome::Detached);
     Vec::new()
 }
@@ -1228,21 +1221,16 @@ mod tests {
         assert!(!model.stop_requested);
     }
 
-    /// A simulation session is not detachable: the client owns Webots, so `q`
-    /// ends the whole session rather than stranding a simulator.
     #[test]
-    fn q_in_a_simulation_session_stops_instead_of_detaching() {
-        let mut model = AppModel {
-            detachable: false,
-            ..launched()
-        };
-        let stop = update(
+    fn q_leaves_an_owned_execution_running() {
+        let mut model = launched();
+        let effects = update(
             &mut model,
             Msg::Navigate(NavigationMsg::Key(Key::Char('q').into())),
         );
-        assert_eq!(stop, vec![Effect::StopSession]);
-        assert_eq!(model.exit, None);
-        assert!(model.stop_requested);
+        assert!(effects.is_empty());
+        assert_eq!(model.exit, Some(AttachmentOutcome::Detached));
+        assert!(!model.stop_requested);
     }
 
     /// The session exits when its processes are actually down, not when the

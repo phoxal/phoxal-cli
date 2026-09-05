@@ -41,10 +41,6 @@ use super::update::update;
 pub struct UiOptions {
     pub title: String,
     pub theme: Theme,
-    /// Whether `q` may leave the execution running. A simulation session is
-    /// not detachable: the client owns Webots, so leaving would strand a
-    /// simulator with no operator.
-    pub detachable: bool,
     /// Whether this client launched the session, and can therefore stop it.
     pub stoppable: bool,
 }
@@ -143,7 +139,6 @@ fn run_blocking(
     TerminalGuard::set_title(&title)?;
 
     let model = Rc::new(RefCell::new(AppModel {
-        detachable: options.detachable,
         stoppable: options.stoppable,
         ..AppModel::default()
     }));

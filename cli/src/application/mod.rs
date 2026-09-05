@@ -19,4 +19,4 @@ pub(crate) mod startup;
 pub(crate) mod summary;
 pub(crate) mod supervisor;
 pub(crate) mod units;
-pub(crate) mod webots;
+pub(crate) mod world_host;

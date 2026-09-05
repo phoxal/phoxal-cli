@@ -14,9 +14,6 @@ use super::route::FocusRoute;
 pub struct AppModel {
     pub epoch: Option<AttachmentEpoch>,
     /// Whether leaving this session is allowed to leave the execution running.
-    /// A simulation session is not detachable: the client owns Webots, so `q`
-    /// there ends the whole session.
-    pub detachable: bool,
     /// Whether this client launched the session it is attached to, and can
     /// therefore end it. An attachment to somebody else's execution cannot:
     /// there is no stop command to send, and this client started nothing.
@@ -37,7 +34,6 @@ impl Default for AppModel {
     fn default() -> Self {
         Self {
             epoch: None,
-            detachable: true,
             stoppable: false,
             stop_requested: false,
             route: FocusRoute::default(),

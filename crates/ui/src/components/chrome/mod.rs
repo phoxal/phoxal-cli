@@ -85,16 +85,6 @@ pub fn render_tabs(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme
     frame.render_widget(Paragraph::new(Line::from(tabs)), area);
 }
 
-/// What `q` actually does here.
-///
-/// It is not the same key in both sessions: a detachable session leaves the
-/// execution running, while a simulation session has no detach at all - this
-/// client owns Webots, so leaving ends everything. An operator who reads
-/// "detach" and gets a stopped robot has been lied to by the footer.
-pub(crate) const fn quit_hint(detachable: bool) -> &'static str {
-    if detachable { "detach" } else { "end session" }
-}
-
 pub fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
     let depth = match model.route {
         FocusRoute::Tabs { .. } => "tabs",
@@ -115,8 +105,7 @@ pub fn render_footer(frame: &mut Frame, area: Rect, model: &AppModel, theme: The
     let stop = if model.stoppable { "  S stop" } else { "" };
     frame.render_widget(
         Paragraph::new(format!(
-            " {depth}  Enter descend  Esc ascend  ? help  i session{stop}  q {}{diagnostic}",
-            quit_hint(model.detachable)
+            " {depth}  Enter descend  Esc ascend  ? help  i session{stop}  q detach{diagnostic}"
         ))
         .style(crate::theme::role::muted(theme))
         .block(Block::default().borders(Borders::TOP)),
@@ -163,18 +152,12 @@ mod tests {
         assert!(contents.contains(">2 Runtimes"));
     }
 
-    /// The footer must describe the key it actually has: `q` stops everything
-    /// in a simulation session, and calling that "detach" is how an operator
-    /// ends a run they meant to leave running.
     #[test]
-    fn the_quit_hint_matches_what_q_does_in_this_session() {
-        assert_eq!(quit_hint(true), "detach");
-        assert_eq!(quit_hint(false), "end session");
-
-        for (detachable, expected) in [(true, "q detach"), (false, "q end session")] {
+    fn the_quit_hint_is_detach_regardless_of_stop_ownership() {
+        for stoppable in [true, false] {
             let mut terminal = Terminal::new(TestBackend::new(120, 2)).expect("test terminal");
             let model = AppModel {
-                detachable,
+                stoppable,
                 ..AppModel::default()
             };
             terminal
@@ -194,7 +177,7 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect::<String>();
-            assert!(contents.contains(expected), "{contents}");
+            assert!(contents.contains("q detach"), "{contents}");
         }
     }
 

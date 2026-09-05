@@ -1,6 +1,6 @@
 //! The startup that gates the dashboard.
 //!
-//! `run`, `start`, and `simulation webots run` all reach an attached execution
+//! `run`, `start`, and `simulation connect` all reach an attached execution
 //! the same way: prepare the project, launch the framework supervisor, attach,
 //! and wait for the graph. This module drives that sequence's *presentation* -
 //! the checklist in [`crate::cli::output::welcome`] - and owns nothing about
@@ -98,17 +98,12 @@ impl Startup {
             )));
         }
 
-        let mut logs = vec![log, paths.supervisor_log()];
-        if mode == Mode::Webots {
-            logs.push(paths.webots_log());
-        }
-
         Self {
             welcome,
             cancellation,
             stop,
             tasks,
-            logs,
+            logs: vec![log, paths.supervisor_log()],
             handed_over: AtomicBool::new(false),
         }
     }
@@ -130,12 +125,13 @@ impl Startup {
         self.welcome().begin(id, detail);
     }
 
-    pub(crate) fn detail(&self, id: StepId, detail: impl Into<String>) {
-        self.welcome().detail(id, detail);
-    }
-
     pub(crate) fn complete(&self, id: StepId, detail: impl Into<String>) {
         self.welcome().complete(id, detail);
+    }
+
+    /// Resolve when the operator interrupts an in-progress startup.
+    pub(crate) async fn cancelled(&self) {
+        self.cancellation.cancelled().await;
     }
 
     /// Watch the attached execution until its runtimes are up.

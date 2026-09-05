@@ -22,7 +22,7 @@ pub fn tracing_ansi_enabled() -> bool {
         && std::env::var("NO_COLOR").map_or(true, |value| value.is_empty())
 }
 
-/// The immutable output contract for one `run`/`simulation webots run` invocation.
+/// The immutable output contract for one `run`/`simulation connect` invocation.
 #[derive(Debug, Clone, Copy)]
 pub struct OutputContext {
     pub interactive: bool,

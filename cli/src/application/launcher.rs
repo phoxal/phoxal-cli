@@ -30,6 +30,8 @@ use phoxal::identity::ParticipantId;
 use phoxal::participant::launch::LaunchCommand;
 use serde::{Deserialize, Serialize};
 
+use crate::cli::output::welcome::Mode;
+
 /// How often a signalled process is re-checked while waiting for it to go.
 const REAP_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -345,18 +347,24 @@ impl SessionRecord {
 pub(crate) struct OwnedSession {
     record: SessionRecord,
     paths: phoxal_cli_host::paths::RuntimePaths,
+    mode: Mode,
 }
 
 impl OwnedSession {
     pub(crate) const fn new(
         record: SessionRecord,
         paths: phoxal_cli_host::paths::RuntimePaths,
+        mode: Mode,
     ) -> Self {
-        Self { record, paths }
+        Self {
+            record,
+            paths,
+            mode,
+        }
     }
 
     pub(crate) async fn stop(&self) -> Result<()> {
-        stop_session(&self.record, &self.paths).await
+        stop_session_for_mode(&self.record, &self.paths, self.mode).await
     }
 }
 
@@ -364,8 +372,25 @@ impl OwnedSession {
 /// killed. A runtime that will not stop must not hold the operator's terminal.
 const RUNTIME_GRACE: Duration = Duration::from_secs(10);
 
-/// The same, for the supervisor, which is asked to go only after the graph has.
+/// The same, for an ordinary native supervisor stopped after the graph.
 const SUPERVISOR_GRACE: Duration = Duration::from_secs(10);
+
+/// The simulation supervisor owns the Removing handshake. Its process grace
+/// must exceed the framework's 10-second removal budget before escalation.
+const SIMULATION_SUPERVISOR_GRACE: Duration = Duration::from_secs(15);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopStage {
+    Runtimes,
+    Supervisor,
+}
+
+const fn stop_order(mode: Mode) -> [StopStage; 2] {
+    match mode {
+        Mode::Native => [StopStage::Runtimes, StopStage::Supervisor],
+        Mode::Simulation => [StopStage::Supervisor, StopStage::Runtimes],
+    }
+}
 
 /// End the session `record` describes and consume it.
 ///
@@ -376,13 +401,41 @@ pub(crate) async fn stop_session(
     record: &SessionRecord,
     paths: &phoxal_cli_host::paths::RuntimePaths,
 ) -> Result<()> {
+    stop_session_for_mode(record, paths, Mode::Native).await
+}
+
+async fn stop_session_for_mode(
+    record: &SessionRecord,
+    paths: &phoxal_cli_host::paths::RuntimePaths,
+    mode: Mode,
+) -> Result<()> {
     let runtimes = record
         .runtimes
         .iter()
         .map(|runtime| runtime.pid)
         .collect::<Vec<_>>();
-    terminate(&runtimes, RUNTIME_GRACE).await?;
-    terminate(&[record.supervisor.pid], SUPERVISOR_GRACE).await?;
+    let mut failures = Vec::new();
+    for stage in stop_order(mode) {
+        let result = match stage {
+            StopStage::Runtimes => terminate(&runtimes, RUNTIME_GRACE).await,
+            StopStage::Supervisor => {
+                let grace = match mode {
+                    Mode::Native => SUPERVISOR_GRACE,
+                    Mode::Simulation => SIMULATION_SUPERVISOR_GRACE,
+                };
+                terminate(&[record.supervisor.pid], grace).await
+            }
+        };
+        if let Err(error) = result {
+            failures.push(format!("{stage:?} shutdown failed: {error:#}"));
+        }
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "session stop was incomplete; its record was retained for retry: {}",
+            failures.join("; ")
+        );
+    }
     SessionRecord::remove(paths)
 }
 
@@ -502,6 +555,19 @@ mod tests {
         ["left_drive".to_string(), "right_drive".to_string()]
             .into_iter()
             .collect()
+    }
+
+    #[test]
+    fn native_and_simulation_shutdown_orders_preserve_their_owners() {
+        assert_eq!(
+            stop_order(Mode::Native),
+            [StopStage::Runtimes, StopStage::Supervisor]
+        );
+        assert_eq!(
+            stop_order(Mode::Simulation),
+            [StopStage::Supervisor, StopStage::Runtimes]
+        );
+        assert!(SIMULATION_SUPERVISOR_GRACE > SUPERVISOR_GRACE);
     }
 
     /// The launch contract is identity plus the supervisor rendezvous only.

@@ -12,7 +12,9 @@ const EDITOR_COMMENTS: &str = "  robot.yaml\n    \
      components/<id>/component.yaml\n    \
      # $schema: ../../.phoxal/schemas/component.schema.json\n  \
      components/<id>/simulation.yaml\n    \
-     # $schema: ../../.phoxal/schemas/simulation.schema.json";
+     # $schema: ../../.phoxal/schemas/simulation.schema.json\n  \
+     worlds/<id>/world.yaml\n    \
+     # $schema: ../../.phoxal/schemas/world.schema.json";
 
 #[derive(Debug, Args)]
 pub struct Schema {
@@ -24,7 +26,7 @@ pub struct Schema {
 pub enum SchemaSubcommand {
     #[command(
         about = "Generate the authored YAML editor schemas.",
-        long_about = "Write the robot, component, and simulation editor schemas to <project>/.phoxal/schemas/.\n\n\
+        long_about = "Write the robot, component, simulation, and world editor schemas to <project>/.phoxal/schemas/.\n\n\
                       The robot project is found from the current directory, or from the global --project-path.\n\n\
                       The schemas give portable YAML completion and inspection in JetBrains IDEs such as RustRover and in current yaml-language-server clients. Each authored file opts in with a comment you commit above its `schema:` key, for example in a root robot.yaml:\n\n  \
                       # $schema: ./.phoxal/schemas/robot.schema.json\n\n\
@@ -118,7 +120,7 @@ mod tests {
         for expected in [
             "or from the global --project-path",
             "<project>/.phoxal/schemas/",
-            "robot, component, and simulation editor schemas",
+            "robot, component, simulation, and world editor schemas",
             "RustRover",
             "yaml-language-server",
             "never edits authored YAML",
@@ -169,7 +171,7 @@ mod tests {
             .iter()
             .filter(|line| line.trim_start().starts_with("# $schema: "))
             .collect::<Vec<_>>();
-        assert_eq!(comments.len(), 3, "one comment per authored document kind");
+        assert_eq!(comments.len(), 4, "one comment per authored document kind");
         for comment in comments {
             assert_eq!(
                 comment.trim_start(),
@@ -181,8 +183,10 @@ mod tests {
             "  robot.yaml",
             "  components/<id>/component.yaml",
             "  components/<id>/simulation.yaml",
+            "  worlds/<id>/world.yaml",
             "    # $schema: ../../.phoxal/schemas/component.schema.json",
             "    # $schema: ../../.phoxal/schemas/simulation.schema.json",
+            "    # $schema: ../../.phoxal/schemas/world.schema.json",
         ] {
             assert!(lines.contains(&expected), "missing `{expected}`");
         }

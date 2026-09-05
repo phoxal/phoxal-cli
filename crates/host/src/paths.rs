@@ -85,14 +85,6 @@ impl RuntimePaths {
         self.rendezvous.volatile_root().join("supervisor.log")
     }
 
-    /// The Webots application's own output. It must never reach the terminal:
-    /// Webots prints driver notices over whatever is on screen, and during a
-    /// session that is the dashboard.
-    #[must_use]
-    pub fn webots_log(&self) -> PathBuf {
-        self.rendezvous.volatile_root().join("webots.log")
-    }
-
     #[must_use]
     pub fn supervisor_socket(&self) -> PathBuf {
         self.rendezvous.supervisor_socket()
@@ -139,10 +131,6 @@ mod tests {
         assert_eq!(
             source.supervisor_log(),
             Path::new("/tmp/robot/.phoxal/run/supervisor.log")
-        );
-        assert_eq!(
-            source.webots_log(),
-            Path::new("/tmp/robot/.phoxal/run/webots.log")
         );
 
         let installed = RuntimePaths::for_root(Path::new(

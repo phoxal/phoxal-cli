@@ -15,10 +15,10 @@
 //! wire contract: this remains an identity-free index of where official
 //! participants live.
 //!
-//! The Webots controller is deliberately *not* an entry here. It is not a
-//! participant, is never staged into a bundle, and rides its own release train
-//! rather than the framework's, so it is modelled below as a host tool the CLI
-//! materializes into its own cache.
+//! The Webots adapter binaries are deliberately *not* entries here. They are
+//! not robot participants, are never staged into a bundle, and publish on the
+//! exact framework train, so they are modelled below only as host tools the CLI
+//! materializes side by side in its own cache.
 
 #![cfg_attr(
     test,
@@ -41,16 +41,19 @@ pub const REGISTRY_NAME: &str = "phoxal";
 /// The static margo registry official packages publish to.
 pub const REGISTRY_INDEX: &str = "sparse+https://phoxal.github.io/registry/";
 
-/// The Webots controller package the CLI materializes for a simulation.
+/// Exact-train host tools for the version 0 Webots adapter.
 ///
-/// It is a host tool, not a robot runtime: it runs beside Webots on an
-/// operator's machine, never on the robot, and never appears in a bundle or a
-/// manifest. It therefore carries its own version rather than the framework
-/// train - the repository that owns it releases on its own cadence.
-pub const WEBOTS_CONTROLLER_PACKAGE: &str = "phoxal-simulator-webots-controller";
+/// These binaries are materialized beside each other for the local host. They
+/// never enter a robot bundle and this crate never links their Webots APIs.
+pub const WEBOTS_HOST_PACKAGE: &str = "phoxal-simulator-webots-host";
+pub const WEBOTS_WORLD_CONTROLLER_PACKAGE: &str = "phoxal-simulator-webots-world-controller";
+pub const WEBOTS_ROBOT_CONTROLLER_PACKAGE: &str = "phoxal-simulator-webots-robot-controller";
 
-/// The exact controller version this CLI release drives Webots with.
-pub const WEBOTS_CONTROLLER_VERSION: &str = "0.64.0";
+pub const WEBOTS_ADAPTER_PACKAGES: [&str; 3] = [
+    WEBOTS_HOST_PACKAGE,
+    WEBOTS_WORLD_CONTROLLER_PACKAGE,
+    WEBOTS_ROBOT_CONTROLLER_PACKAGE,
+];
 
 /// What an official catalog entry is, which decides its canonical staged binary
 /// name.
@@ -283,9 +286,8 @@ mod tests {
         assert_eq!(bundle_binary_name("ddsm115"), "ddsm115");
     }
 
-    /// The official set is services only, and the simulator that used to sit
-    /// beside them is gone: the Webots controller is a host tool on its own
-    /// train, named by its package constant rather than by a catalog entry.
+    /// The official robot set is services only. Adapter executables are local
+    /// host tools on the framework train, never participant catalog entries.
     #[test]
     fn the_official_set_is_services_and_the_controller_is_a_host_tool() {
         let catalog = Catalog::official();
@@ -298,15 +300,21 @@ mod tests {
         assert!(catalog.is_official_service("drive"));
         assert!(!catalog.is_official_service("mission"));
         assert_eq!(
-            WEBOTS_CONTROLLER_PACKAGE,
-            "phoxal-simulator-webots-controller"
+            WEBOTS_ADAPTER_PACKAGES,
+            [
+                "phoxal-simulator-webots-host",
+                "phoxal-simulator-webots-world-controller",
+                "phoxal-simulator-webots-robot-controller",
+            ]
         );
-        assert!(
-            catalog
-                .native()
-                .all(|official| official.cargo_package_name() != WEBOTS_CONTROLLER_PACKAGE),
-            "the controller is never a catalog participant"
-        );
+        for package in WEBOTS_ADAPTER_PACKAGES {
+            assert!(
+                catalog
+                    .native()
+                    .all(|official| official.cargo_package_name() != package),
+                "adapter host tools are never catalog participants"
+            );
+        }
     }
 
     #[test]

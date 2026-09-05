@@ -17,9 +17,6 @@ impl Doctor {
                 phoxal_cli_project::host::doctor::ProbeStatus::Warn(message) => {
                     app.ui.warn(message);
                 }
-                phoxal_cli_project::host::doctor::ProbeStatus::Fail(error) => {
-                    app.ui.warn(error.to_string());
-                }
             }
         }
         for line in development_overrides() {
@@ -68,17 +65,9 @@ fn development_overrides() -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(checkout) = phoxal_cli_project::framework_path() {
         lines.push(format!(
-            "{}={} is set: every official service, component driver, and the supervisor are built \
-             from that checkout instead of the phoxal registry",
+            "{}={} is set: every official service, component driver, supervisor, and simulation \
+             adapter package, including component definitions and assets, comes from that checkout instead of the phoxal registry",
             phoxal_cli_project::FRAMEWORK_PATH_VAR,
-            checkout.display()
-        ));
-    }
-    if let Some(checkout) = phoxal_cli_project::simulator_webots_path() {
-        lines.push(format!(
-            "{}={} is set: the Webots controller is built from that checkout instead of the \
-             phoxal registry",
-            phoxal_cli_project::SIMULATOR_WEBOTS_PATH_VAR,
             checkout.display()
         ));
     }
@@ -110,18 +99,13 @@ pub(crate) async fn doctor_command(app: &AppContext) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// The two overrides are named by the variable that sets them and by what
-    /// they replace, so an operator reading `doctor` output knows exactly which
-    /// binaries they are about to run.
+    /// The one owner override is named by the variable that sets it and by
+    /// every exact-train package it replaces.
     #[test]
     fn every_development_override_names_its_variable_and_what_it_replaces() {
         assert_eq!(
             phoxal_cli_project::FRAMEWORK_PATH_VAR,
             "PHOXAL_FRAMEWORK_PATH"
-        );
-        assert_eq!(
-            phoxal_cli_project::SIMULATOR_WEBOTS_PATH_VAR,
-            "PHOXAL_SIMULATOR_WEBOTS_PATH"
         );
         // The reporter reads the process environment, which this test does not
         // mutate: an unset override reports nothing at all.
