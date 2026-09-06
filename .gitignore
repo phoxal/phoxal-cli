@@ -5,5 +5,5 @@ target/
 .rerun/
 .aider*
 /.codex/worktrees/
-
+/.codex/config.toml
 .DS_Store
