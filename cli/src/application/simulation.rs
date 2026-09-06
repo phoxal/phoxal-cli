@@ -450,30 +450,33 @@ async fn connect_fresh_execution(
         super::lifecycle::drive_launched_session(app, &target, launched, Mode::Simulation).await?;
     if outcome == phoxal_cli_ui::AttachmentOutcome::Detached {
         super::lifecycle::report_outcome(app, &target, &outcome)?;
-        report_world_remains_live(app, registration.instance);
+        report_world_commands(app, registration.instance);
         return Ok(());
     }
 
-    let ending = await_connected_simulation_ending(&registration, execution).await?;
+    let stores = Stores::discover()?;
+    let ending =
+        await_connected_simulation_ending(&stores, &registration, &client, execution).await?;
     let world_remains_live = matches!(&ending, ConnectedSimulationEnding::Member(_));
     report_connected_simulation_ending(app, &target, &ending)?;
     if world_remains_live {
-        report_world_remains_live(app, registration.instance);
+        report_world_commands(app, registration.instance);
     }
     Ok(())
 }
 
-fn report_world_remains_live(app: &AppContext, instance: phoxal::model::world::WorldInstanceId) {
+fn report_world_commands(app: &AppContext, instance: phoxal::model::world::WorldInstanceId) {
     app.ui.info(format!(
-        "world {instance} remains independently live; open it with `phoxal simulation open {instance}` or stop it with `phoxal simulation stop {instance}`"
+        "inspect the independent world with `phoxal simulation status {instance}`; while live, use `phoxal simulation open {instance}` or `phoxal simulation stop {instance}`"
     ));
 }
 
 async fn await_connected_simulation_ending(
+    stores: &Stores,
     registration: &LocalWorldRegistration,
+    client: &WorldSessionClient,
     execution: phoxal::identity::ExecutionId,
 ) -> Result<ConnectedSimulationEnding> {
-    let stores = Stores::discover()?;
     let instance = registration.instance.to_string();
     tokio::time::timeout(STOP_BUDGET, async {
         loop {
@@ -485,7 +488,16 @@ async fn await_connected_simulation_ending(
                     .evidence
                     .read_member_terminal(&instance, execution)?
                 {
-                    return Ok(ConnectedSimulationEnding::Member(member));
+                    // World stop persists member evidence before its summary and registration
+                    // removal. A held registration alone cannot prove this was member-only.
+                    if let Ok(state) = client.current_state().await {
+                        ensure_state_matches_registration(&state, registration)?;
+                        if matches!(state.lifecycle, WorldLifecycle::Ready { .. })
+                            && !state.members.iter().any(|member| member.execution == execution)
+                        {
+                            return Ok(ConnectedSimulationEnding::Member(member));
+                        }
+                    }
                 }
             } else if let Some(summary) = stores.recover_terminal(&instance).await? {
                 return Ok(ConnectedSimulationEnding::World(Box::new(summary)));
@@ -1541,6 +1553,84 @@ mod tests {
         assert!(failed, "{fault}");
         assert!(fault.contains("ControllerFault"), "{fault}");
         assert!(fault.contains("native controller survived"), "{fault}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn world_stop_member_evidence_waits_for_world_terminal_summary() {
+        let (_temporary, stores, handler, server, registration, _lease) = workflow_fixture().await;
+        let client = connect_verified(&registration).await.unwrap();
+        let ConnectedSimulationEnding::Member(member) =
+            member_ending(WorldMemberEndReason::Stopped, WorldMemberCleanup::Complete)
+        else {
+            unreachable!();
+        };
+        let members = handler
+            .paths
+            .evidence_path(WORKFLOW_INSTANCE)
+            .join("members");
+        create_owner_directory(&members);
+        write_owner_json(
+            &members.join(format!("{}.json", member.terminal.execution)),
+            &member,
+        )
+        .unwrap();
+        handler.state.lock().unwrap().lifecycle = WorldLifecycle::Stopping;
+        let ending = await_connected_simulation_ending(
+            &stores,
+            &registration,
+            &client,
+            member.terminal.execution,
+        );
+        tokio::pin!(ending);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut ending)
+                .await
+                .is_err(),
+            "member evidence during world stop must not be reported as an independently live world"
+        );
+        handler.stop().unwrap();
+        assert!(matches!(
+            ending.await.unwrap(),
+            ConnectedSimulationEnding::World(_)
+        ));
+        server.close().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn member_only_stop_resolves_while_world_is_ready() {
+        let (_temporary, stores, handler, server, registration, _lease) = workflow_fixture().await;
+        let client = connect_verified(&registration).await.unwrap();
+        let ConnectedSimulationEnding::Member(member) =
+            member_ending(WorldMemberEndReason::Stopped, WorldMemberCleanup::Complete)
+        else {
+            unreachable!();
+        };
+        let members = handler
+            .paths
+            .evidence_path(WORKFLOW_INSTANCE)
+            .join("members");
+        create_owner_directory(&members);
+        write_owner_json(
+            &members.join(format!("{}.json", member.terminal.execution)),
+            &member,
+        )
+        .unwrap();
+        let ending = tokio::time::timeout(
+            Duration::from_secs(3),
+            await_connected_simulation_ending(
+                &stores,
+                &registration,
+                &client,
+                member.terminal.execution,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(ending, ConnectedSimulationEnding::Member(_)));
+        server.close().await.unwrap();
     }
 
     #[cfg(unix)]

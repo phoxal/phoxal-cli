@@ -1339,7 +1339,7 @@ mod tests {
             .split_once("async fn connect_fresh_execution(")
             .expect("the fresh simulation connection exists")
             .1
-            .split_once("fn report_world_remains_live")
+            .split_once("\n}\n")
             .expect("the connection function has a stable end")
             .0;
         let prepare_call = connect
