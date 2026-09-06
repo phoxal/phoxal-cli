@@ -200,70 +200,77 @@ pub async fn launch(
         .spawn()
         .with_context(|| format!("failed to launch world host {}", executable.display()))?;
     let mut host = LaunchedWorldHost::from_spawned(child)?;
-    let stdout = host
-        .child_mut()?
-        .stdout
-        .take()
-        .context("world host stdout pipe was not created")?;
-    let ready = tokio::task::spawn_blocking(move || {
-        let mut line = String::new();
-        let read = BufReader::new(stdout).read_line(&mut line)?;
-        Ok::<_, std::io::Error>((read, line))
-    });
+    let startup = async {
+        let stdout = host
+            .child_mut()?
+            .stdout
+            .take()
+            .context("world host stdout pipe was not created")?;
+        let ready = tokio::task::spawn_blocking(move || {
+            let mut line = String::new();
+            let read = BufReader::new(stdout).read_line(&mut line)?;
+            Ok::<_, std::io::Error>((read, line))
+        });
 
-    let line = tokio::select! {
-        ready = tokio::time::timeout(READY_BUDGET, ready) => {
-            match ready {
-                Ok(Ok(Ok((read, line)))) if read > 0 => line,
-                Ok(Ok(Ok(_))) => {
-                    let status = host.child_mut()?.try_wait()?;
-                    let error = bootstrap_failure("world host exited before publishing readiness", status, bootstrap_log.path()?);
-                    host.stop_owned().await?;
-                    return Err(error);
-                }
-                Ok(Ok(Err(error))) => {
-                    host.stop_owned().await?;
-                    return Err(error).context("failed to read the world host ready line");
-                }
-                Ok(Err(error)) => {
-                    host.stop_owned().await?;
-                    return Err(error).context("world host ready reader failed");
-                }
-                Err(_) => {
-                    let error = bootstrap_failure("timed out waiting for the world host to become Ready and Paused", host.child_mut()?.try_wait()?, bootstrap_log.path()?);
-                    host.stop_owned().await?;
-                    return Err(error);
+        let line = tokio::select! {
+            ready = tokio::time::timeout(READY_BUDGET, ready) => {
+                match ready {
+                    Ok(Ok(Ok((read, line)))) if read > 0 => Ok(line),
+                    Ok(Ok(Ok(_))) => {
+                        let status = host.child_mut()?.try_wait()?;
+                        Err(bootstrap_failure("world host exited before publishing readiness", status, bootstrap_log.path()?))
+                    }
+                    Ok(Ok(Err(error))) => Err(error).context("failed to read the world host ready line"),
+                    Ok(Err(error)) => Err(error).context("world host ready reader failed"),
+                    Err(_) => {
+                        let error = bootstrap_failure("timed out waiting for the world host to become Ready and Paused", host.child_mut()?.try_wait()?, bootstrap_log.path()?);
+                        Err(error)
+                    }
                 }
             }
-        }
-        interrupted = tokio::signal::ctrl_c() => {
-            if let Err(error) = interrupted {
-                tracing::debug!(%error, "failed to observe world-start interrupt");
+            interrupted = tokio::signal::ctrl_c() => {
+                if let Err(error) = interrupted {
+                    tracing::debug!(%error, "failed to observe world-start interrupt");
+                }
+                bail!("world start was interrupted before readiness; the new world was rolled back");
             }
-            host.stop_owned().await?;
-            bail!("world start was interrupted before readiness; the new world was rolled back");
-        }
-    };
+        }?;
 
-    let instance = line
-        .strip_suffix('\n')
-        .context("world host ready output was not one newline-terminated instance ID")?;
-    ensure!(
-        !instance.contains('\r') && !instance.contains('\n'),
-        "world host ready output contained more than one line"
-    );
-    parse_instance_id(instance).context("world host emitted an invalid instance ID")?;
+        let instance = line
+            .strip_suffix('\n')
+            .context("world host ready output was not one newline-terminated instance ID")?;
+        ensure!(
+            !instance.contains('\r') && !instance.contains('\n'),
+            "world host ready output contained more than one line"
+        );
+        parse_instance_id(instance).context("world host emitted an invalid instance ID")?;
 
-    let evidence = paths.evidence_path(instance);
-    ensure!(
-        evidence.is_dir(),
-        "world host reported readiness before creating {}",
-        evidence.display()
-    );
-    let host_log = evidence.join("host.log");
-    bootstrap_log.publish(&host_log)?;
+        let evidence = paths.evidence_path(instance);
+        ensure!(
+            evidence.is_dir(),
+            "world host reported readiness before creating {}",
+            evidence.display()
+        );
+        let host_log = evidence.join("host.log");
+        bootstrap_log.publish(&host_log)?;
 
-    Ok((instance.to_string(), host))
+        Ok(instance.to_string())
+    }
+    .await;
+
+    match startup {
+        Ok(instance) => Ok((instance, host)),
+        Err(error) => Err(rollback_launch(host, error).await),
+    }
+}
+
+async fn rollback_launch(host: LaunchedWorldHost, error: anyhow::Error) -> anyhow::Error {
+    match host.stop().await {
+        Ok(()) => error,
+        Err(cleanup) => error.context(format!(
+            "world host launch rollback also failed: {cleanup:#}"
+        )),
+    }
 }
 
 fn bootstrap_failure(
@@ -416,6 +423,21 @@ mod tests {
         let child = spawn_group("sleep", &["120"]);
         let pid = child.id();
         drop(LaunchedWorldHost::from_spawned(child).unwrap());
+        wait_for_group_exit(pid);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_failure_uses_orderly_rollback_before_drop_can_kill() {
+        let child = spawn_group("sleep", &["120"]);
+        let pid = child.id();
+        let error = rollback_launch(
+            LaunchedWorldHost::from_spawned(child).unwrap(),
+            anyhow::anyhow!("readiness failed"),
+        )
+        .await;
+
+        assert_eq!(error.to_string(), "readiness failed");
         wait_for_group_exit(pid);
     }
 

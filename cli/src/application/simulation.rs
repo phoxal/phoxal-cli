@@ -1,5 +1,9 @@
 //! Backend-neutral local world lifecycle and robot connection workflow.
 
+mod observation;
+mod start;
+mod terminal;
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
@@ -16,8 +20,8 @@ use phoxal::world::api::session::{
 };
 use phoxal_cli_host::world::{
     DEFAULT_LOG_BYTE_LIMIT, DEFAULT_TERMINAL_SESSION_LIMIT, LocalWorldRegistration,
-    TerminalMemberEvidence, TerminalOutcome, TerminalWorldSummary, WorldEvidence, WorldPaths,
-    WorldRegistry,
+    TerminalOutcome, WorldEvidence, WorldMemberEvidence, WorldPaths, WorldRegistry,
+    WorldTerminalSummary,
 };
 
 use crate::cli::context::AppContext;
@@ -25,7 +29,18 @@ use crate::cli::exit::ReportedExit;
 use crate::cli::output::welcome::{Mode, StepId};
 
 use super::summary::SessionSummary;
+use observation::{
+    StatusReport, ensure_state_matches_registration, lifecycle_text, load_list, load_logs,
+    load_status, print_live_status, print_terminal_status, stop_world,
+};
 use phoxal_cli_host::world_process::LaunchedWorldHost;
+use start::{rollback_host, start_world};
+use terminal::open_world_tui;
+
+#[cfg(test)]
+use observation::format_live_status;
+#[cfg(test)]
+use terminal::{spawn_diagnostics_feed, spawn_state_feed};
 
 const WORLD_UI_INGRESS_CAPACITY: usize = 64;
 const ATTACHMENT_BUDGET: Duration = Duration::from_secs(5 * 60);
@@ -33,7 +48,7 @@ const STOP_BUDGET: Duration = Duration::from_secs(60);
 const TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STREAM_RECONNECT_DELAY: Duration = Duration::from_millis(100);
 
-struct StartedWorld {
+pub(super) struct StartedWorld {
     registration: LocalWorldRegistration,
     host: LaunchedWorldHost,
 }
@@ -47,8 +62,8 @@ struct ConnectionIntent {
 }
 
 enum ConnectedSimulationEnding {
-    World(Box<TerminalWorldSummary>),
-    Member(TerminalMemberEvidence),
+    World(Box<WorldTerminalSummary>),
+    Member(WorldMemberEvidence),
 }
 
 pub(crate) async fn run_command(app: &AppContext, world: &Path, spawn: Option<&str>) -> Result<()> {
@@ -169,180 +184,6 @@ async fn control_world(instance: &str, operation: WorldControl) -> Result<()> {
     Ok(())
 }
 
-enum StatusReport {
-    Live(Box<WorldSessionState>),
-    Terminal {
-        summary: Box<TerminalWorldSummary>,
-        members: Vec<TerminalMemberEvidence>,
-    },
-}
-
-async fn load_status(stores: &Stores, instance: &str) -> Result<StatusReport> {
-    if let Some(registration) = stores.registry.find(instance)? {
-        let (_, state) = current_verified(&registration).await?;
-        return Ok(StatusReport::Live(Box::new(state)));
-    }
-    let summary = stores.recover_terminal(instance).await?.with_context(|| {
-        format!(
-            "no live or retained terminal world session `{instance}` was found; `phoxal simulation list --all` shows discoverable sessions"
-        )
-    })?;
-    let members = stores.evidence.read_member_evidence(&summary)?;
-    Ok(StatusReport::Terminal {
-        summary: Box::new(summary),
-        members,
-    })
-}
-
-async fn load_logs(stores: &Stores, instance: &str) -> Result<Vec<(String, Vec<u8>)>> {
-    if let Some(registration) = stores.registry.find(instance)? {
-        connect_verified(&registration).await?;
-        return stores.evidence.read_live_logs(instance);
-    }
-    let summary = stores.recover_terminal(instance).await?.with_context(|| {
-        format!("no live or retained terminal world session `{instance}` was found")
-    })?;
-    stores.evidence.read_logs(&summary)
-}
-
-struct ListReport {
-    live: Vec<LocalWorldRegistration>,
-    terminal: Vec<TerminalWorldSummary>,
-}
-
-async fn load_list(stores: &Stores, all: bool) -> Result<ListReport> {
-    let discoverable = stores.registry.registration_instances()?;
-    let registered = stores.registry.list()?;
-    let registered_ids = registered
-        .iter()
-        .map(|registration| registration.instance.to_string())
-        .collect::<BTreeSet<_>>();
-    if all {
-        for instance in discoverable {
-            if registered_ids.contains(&instance) {
-                continue;
-            }
-            if let Err(error) = stores.recover_terminal(&instance).await {
-                eprintln!(
-                    "warning: stale world {instance} could not be finalized from durable evidence: {error:#}"
-                );
-            }
-        }
-    }
-    let report = stores
-        .evidence
-        .prune(DEFAULT_TERMINAL_SESSION_LIMIT, &registered_ids)?;
-    for path in report.incomplete {
-        tracing::warn!(path = %path.display(), "incomplete world evidence was retained");
-    }
-    let mut live = Vec::new();
-    for registration in registered {
-        match connect_verified(&registration).await {
-            Ok(_) => live.push(registration),
-            Err(error) => eprintln!(
-                "warning: world {} has a live local lease but its frozen bootstrap could not be verified: {error:#}",
-                registration.instance
-            ),
-        }
-    }
-    let terminal = if all {
-        stores
-            .evidence
-            .list_summaries()?
-            .into_iter()
-            .filter(|summary| !registered_ids.contains(&summary.instance.to_string()))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    Ok(ListReport { live, terminal })
-}
-
-async fn start_world(app: &AppContext, source: &Path) -> Result<StartedWorld> {
-    let stores = Stores::discover()?;
-    stores.prune()?;
-
-    let staging = tempfile::Builder::new()
-        .prefix(".world-launch-")
-        .tempdir()
-        .context("failed to create a world-bundle launch staging directory")?;
-    let bundle_path = staging.path().join("world-bundle");
-    let source = source.to_path_buf();
-    let destination = bundle_path.clone();
-    app.ui.info(format!("compiling world {}", source.display()));
-    let compiled = tokio::task::spawn_blocking(move || {
-        phoxal_cli_project::compile_world(&source, &destination)
-    })
-    .await
-    .context("world compiler worker failed")??;
-
-    let expected_world = compiled.bundle().world().id().clone();
-    let expected_digest = compiled.digest();
-    let framework = FrameworkVersion::CURRENT;
-    let offline = app.offline;
-    app.ui
-        .info(format!("materializing simulation host train {framework}"));
-    let tools = tokio::task::spawn_blocking(move || {
-        phoxal_cli_project::materialize_webots_tools(
-            framework,
-            offline,
-            &phoxal_cli_project::SilentReporter,
-        )
-    })
-    .await
-    .context("simulation host materializer worker failed")??;
-
-    let (instance, host) = phoxal_cli_host::world_process::launch(
-        tools.host(),
-        compiled.path(),
-        &stores.paths,
-        DEFAULT_LOG_BYTE_LIMIT,
-    )
-    .await?;
-    let registration = match stores.registry.resolve(&instance) {
-        Ok(registration) => registration,
-        Err(error) => return Err(rollback_host(host, error).await),
-    };
-    let validation = || -> Result<()> {
-        ensure!(
-            registration.framework == framework,
-            "new world registered framework {}, expected exact host train {framework}",
-            registration.framework
-        );
-        ensure!(
-            registration.world.id == expected_world,
-            "new world registered ID {}, compiled source was {}",
-            registration.world.id,
-            expected_world
-        );
-        ensure!(
-            registration.world.digest == expected_digest,
-            "new world registered digest {}, compiled bundle was {expected_digest}",
-            registration.world.digest
-        );
-        Ok(())
-    };
-    if let Err(error) = validation() {
-        return Err(rollback_host(host, error).await);
-    }
-    let ready = match current_verified(&registration).await {
-        Ok((_, state)) => ensure_ready_and_paused(&state),
-        Err(error) => Err(error),
-    };
-    if let Err(error) = ready {
-        return Err(rollback_host(host, error).await);
-    }
-    drop(staging);
-    Ok(StartedWorld { registration, host })
-}
-
-async fn rollback_host(host: LaunchedWorldHost, error: anyhow::Error) -> anyhow::Error {
-    match host.stop().await {
-        Ok(()) => error,
-        Err(cleanup) => error.context(format!("world rollback also failed: {cleanup:#}")),
-    }
-}
-
 fn connection_intent(
     app: &AppContext,
     spawn: Option<&str>,
@@ -366,7 +207,10 @@ async fn connect_world(
     intent: ConnectionIntent,
     mut started: Option<StartedWorld>,
 ) -> Result<()> {
-    let stores = Stores::discover()?;
+    let stores = match Stores::discover() {
+        Ok(stores) => stores,
+        Err(error) => return Err(rollback_started_world(started.take(), error).await),
+    };
     let registration = match &started {
         Some(started) => started.registration.clone(),
         None => stores.registry.resolve(instance)?,
@@ -742,401 +586,6 @@ fn ensure_bootstrap_matches_registration(
     Ok(())
 }
 
-async fn open_world_tui(app: &AppContext, registration: LocalWorldRegistration) -> Result<()> {
-    let client = connect_verified(&registration).await?;
-    let states = client
-        .state_subscription()
-        .await
-        .context("failed to open world state subscription")?;
-    let diagnostics = match client.diagnostics_subscription().await {
-        Ok(diagnostics) => Some(diagnostics),
-        Err(error) => {
-            app.ui.warn(format!(
-                "world diagnostics are unavailable, but authoritative state remains connected: {error}"
-            ));
-            None
-        }
-    };
-    let initial_state = states.current().clone();
-    let initial_diagnostics = diagnostics
-        .as_ref()
-        .map(|diagnostics| diagnostics.current());
-    ensure_state_matches_registration(&initial_state, &registration)?;
-
-    let (ingress_tx, ingress_rx) = tokio::sync::mpsc::channel(WORLD_UI_INGRESS_CAPACITY);
-    let (controls_tx, controls_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut tasks = tokio::task::JoinSet::new();
-    spawn_state_feed(
-        &mut tasks,
-        client.clone(),
-        states,
-        registration.clone(),
-        ingress_tx.clone(),
-    );
-    if let Some(diagnostics) = diagnostics {
-        spawn_diagnostics_feed(&mut tasks, client.clone(), diagnostics, ingress_tx.clone());
-    }
-    spawn_control_router(
-        &mut tasks,
-        client,
-        registration.clone(),
-        controls_rx,
-        ingress_tx.clone(),
-    );
-    drop(ingress_tx);
-
-    let outcome = phoxal_cli_ui::run_world(
-        ingress_rx,
-        controls_tx,
-        phoxal_cli_ui::WorldUiOptions {
-            title: "phoxal simulation",
-            theme: app.output.theme,
-        },
-        initial_state,
-        initial_diagnostics,
-    )
-    .await;
-    tasks.shutdown().await;
-    match outcome? {
-        phoxal_cli_ui::WorldOutcome::Detached => app.ui.info(format!(
-            "detached from world {}; inspect it with `phoxal simulation status {}`",
-            registration.instance, registration.instance
-        )),
-        phoxal_cli_ui::WorldOutcome::Stopped => app
-            .ui
-            .success(format!("world {} stopped", registration.instance)),
-        phoxal_cli_ui::WorldOutcome::Ended { reason } => {
-            bail!(
-                "world {} ended{}",
-                registration.instance,
-                reason.map_or_else(String::new, |reason| format!(": {reason}"))
-            );
-        }
-    }
-    Ok(())
-}
-
-fn spawn_state_feed(
-    tasks: &mut tokio::task::JoinSet<()>,
-    client: WorldSessionClient,
-    mut states: phoxal::session::WorldStateSubscription,
-    registration: LocalWorldRegistration,
-    ingress: tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
-) {
-    tasks.spawn(async move {
-        loop {
-            match states.recv().await {
-                Ok(state) => {
-                    if let Err(error) = ensure_state_matches_registration(state, &registration) {
-                        let _ = ingress
-                            .send(phoxal_cli_ui::WorldInput::Disconnected {
-                                reason: Some(error.to_string()),
-                            })
-                            .await;
-                        return;
-                    }
-                    if ingress
-                        .send(phoxal_cli_ui::WorldInput::State(state.clone()))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                Err(error) => {
-                    match reconnect_state_subscription(&client, &registration, &ingress).await {
-                        Ok(reconnected) => states = reconnected,
-                        Err(reconnect) => {
-                            let _ = ingress
-                                .send(phoxal_cli_ui::WorldInput::Disconnected {
-                                    reason: Some(format!(
-                                        "world state stream ended: {error}; reconnect failed: {reconnect:#}"
-                                    )),
-                                })
-                                .await;
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
-
-async fn reconnect_state_subscription(
-    client: &WorldSessionClient,
-    registration: &LocalWorldRegistration,
-    ingress: &tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
-) -> Result<phoxal::session::WorldStateSubscription> {
-    tokio::time::sleep(STREAM_RECONNECT_DELAY).await;
-    let states = client
-        .state_subscription()
-        .await
-        .context("failed to reopen the world state subscription")?;
-    let current = states.current().clone();
-    ensure_state_matches_registration(&current, registration)?;
-    ingress
-        .send(phoxal_cli_ui::WorldInput::State(current))
-        .await
-        .context("world UI closed during state-stream recovery")?;
-    Ok(states)
-}
-
-fn spawn_diagnostics_feed(
-    tasks: &mut tokio::task::JoinSet<()>,
-    client: WorldSessionClient,
-    mut diagnostics: phoxal::session::WorldDiagnosticsSubscription,
-    ingress: tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
-) {
-    tasks.spawn(async move {
-        loop {
-            match diagnostics.recv().await {
-                Ok(diagnostics) => {
-                    if ingress
-                        .send(phoxal_cli_ui::WorldInput::Diagnostics(diagnostics))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                Err(error) => {
-                    match reconnect_diagnostics_subscription(&client, &ingress).await {
-                        Ok(reconnected) => diagnostics = reconnected,
-                        Err(reconnect) => {
-                            let _ = ingress
-                                .send(phoxal_cli_ui::WorldInput::DiagnosticsUnavailable {
-                                    reason: format!(
-                                        "diagnostics stream ended: {error}; reconnect failed: {reconnect:#}"
-                                    ),
-                                })
-                                .await;
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
-
-async fn reconnect_diagnostics_subscription(
-    client: &WorldSessionClient,
-    ingress: &tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
-) -> Result<phoxal::session::WorldDiagnosticsSubscription> {
-    tokio::time::sleep(STREAM_RECONNECT_DELAY).await;
-    let diagnostics = client
-        .diagnostics_subscription()
-        .await
-        .context("failed to reopen the world diagnostics subscription")?;
-    ingress
-        .send(phoxal_cli_ui::WorldInput::Diagnostics(
-            diagnostics.current(),
-        ))
-        .await
-        .context("world UI closed during diagnostics-stream recovery")?;
-    Ok(diagnostics)
-}
-
-fn spawn_control_router(
-    tasks: &mut tokio::task::JoinSet<()>,
-    client: WorldSessionClient,
-    registration: LocalWorldRegistration,
-    mut controls: tokio::sync::mpsc::UnboundedReceiver<WorldControl>,
-    ingress: tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
-) {
-    tasks.spawn(async move {
-        while let Some(request) = controls.recv().await {
-            let input = match client.control(request).await {
-                Ok(state) => match ensure_state_matches_registration(&state, &registration) {
-                    Ok(()) => phoxal_cli_ui::WorldInput::State(state),
-                    Err(error) => phoxal_cli_ui::WorldInput::Disconnected {
-                        reason: Some(error.to_string()),
-                    },
-                },
-                Err(error) => phoxal_cli_ui::WorldInput::ControlFailed {
-                    request,
-                    reason: error.to_string(),
-                },
-            };
-            if ingress.send(input).await.is_err() {
-                return;
-            }
-        }
-    });
-}
-
-fn print_live_status(state: &WorldSessionState) {
-    println!("{}", format_live_status(state));
-}
-
-fn format_live_status(state: &WorldSessionState) -> String {
-    let mut lines = vec![
-        format!("instance:  {}", state.instance),
-        format!("world:     {}", state.provenance.world),
-        format!("digest:    {}", state.provenance.digest),
-        format!("lifecycle: {}", lifecycle_text(state.lifecycle)),
-        format!("train:     {}", state.provenance.framework),
-        format!(
-            "adapter:   {} {}",
-            state.provenance.adapter, state.provenance.adapter_version
-        ),
-        format!("simulator: {}", state.provenance.simulator_version),
-        format!("step:      {}", state.progress.completed_step()),
-        format!("world ns:  {}", state.progress.elapsed_ns()),
-        format!("members:   {}", state.members.len()),
-    ];
-    for member in &state.members {
-        lines.push(format!(
-            "  {}  {:?}  {}",
-            member.robot, member.phase, member.execution
-        ));
-    }
-    lines.join("\n")
-}
-
-fn ensure_state_matches_registration(
-    state: &WorldSessionState,
-    registration: &LocalWorldRegistration,
-) -> Result<()> {
-    ensure!(
-        state.instance == registration.instance,
-        "world state instance {} disagrees with locator {}",
-        state.instance,
-        registration.instance
-    );
-    ensure!(
-        state.provenance.framework == registration.framework
-            && state.provenance.world == registration.world.id
-            && state.provenance.digest == registration.world.digest,
-        "world state provenance disagrees with the verified locator for {}",
-        registration.instance
-    );
-    Ok(())
-}
-
-fn lifecycle_text(lifecycle: WorldLifecycle) -> String {
-    match lifecycle {
-        WorldLifecycle::Starting => "starting".to_owned(),
-        WorldLifecycle::Ready { motion } => format!("ready/{motion:?}").to_lowercase(),
-        WorldLifecycle::Stopping => "stopping".to_owned(),
-        WorldLifecycle::Failed { reason } => format!("failed/{reason:?}").to_lowercase(),
-    }
-}
-
-async fn stop_world(
-    registration: LocalWorldRegistration,
-    stores: &Stores,
-) -> Result<TerminalWorldSummary> {
-    let client = connect_verified(&registration).await?;
-    let state = client
-        .control(WorldControl::Stop)
-        .await
-        .context("world host refused stop")?;
-    ensure_state_matches_registration(&state, &registration)?;
-
-    let instance = registration.instance.to_string();
-    let summary = tokio::time::timeout(STOP_BUDGET, async {
-        loop {
-            if stores.registry.find(&instance)?.is_none() {
-                if let Some(summary) = stores.evidence.read_summary(&instance)? {
-                    return Ok::<_, anyhow::Error>(summary);
-                }
-                if let Some(summary) = stores.recover_terminal(&instance).await? {
-                    return Ok::<_, anyhow::Error>(summary);
-                }
-            }
-            tokio::time::sleep(TERMINAL_POLL_INTERVAL).await;
-        }
-    })
-    .await
-    .with_context(|| {
-        format!(
-            "timed out after {}s waiting for world {instance} to persist terminal evidence",
-            STOP_BUDGET.as_secs()
-        )
-    })??;
-    if matches!(summary.outcome, TerminalOutcome::Failed { .. }) {
-        bail!(
-            "world {instance} ended as {}/{:?} while stopping{}",
-            summary.outcome.kind(),
-            summary.outcome.reason(),
-            summary
-                .outcome
-                .detail()
-                .map_or_else(String::new, |detail| format!(": {detail}"))
-        );
-    }
-    Ok(summary)
-}
-
-fn print_terminal_status(summary: &TerminalWorldSummary, ended: &[TerminalMemberEvidence]) {
-    println!("instance:  {}", summary.instance);
-    println!("world:     {}", summary.provenance.world);
-    println!("digest:    {}", summary.provenance.digest);
-    println!("lifecycle: {}", summary.outcome.kind());
-    println!("reason:    {:?}", summary.outcome.reason());
-    if let Some(detail) = summary.outcome.detail() {
-        println!("detail:    {detail}");
-    }
-    println!("train:     {}", summary.provenance.framework);
-    println!(
-        "adapter:   {} {}",
-        summary.provenance.adapter, summary.provenance.adapter_version
-    );
-    println!("simulator: {}", summary.provenance.simulator_version);
-    println!("platform:  {}", summary.provenance.platform);
-    println!("seed:      {}", summary.provenance.random_seed);
-    println!("quantum:   {} ns", summary.provenance.time_step_ns);
-    println!("step:      {}", summary.progress.completed_step());
-    println!("world ns:  {}", summary.progress.elapsed_ns());
-    println!(
-        "members:   {} at shutdown, {} ended",
-        summary.members.len(),
-        ended.len()
-    );
-    for member in &summary.members {
-        println!(
-            "  {}  at-shutdown/{:?}  {}",
-            member.robot, member.phase, member.execution
-        );
-    }
-    for member in ended {
-        println!(
-            "  {}  ended/{:?}  {}  cleanup/{:?}",
-            member.terminal.robot,
-            member.terminal.reason,
-            member.terminal.execution,
-            member.terminal.cleanup
-        );
-    }
-    if let Some(process) = summary.failing.process {
-        println!(
-            "failure:   process {} born {}",
-            process.pid, process.started_at_unix_s
-        );
-    }
-    if let Some(producer) = summary.failing.producer {
-        println!("failure:   producer {producer}");
-    }
-    println!(
-        "cleanup:   {}{}",
-        if summary.cleanup.complete {
-            "complete"
-        } else {
-            "incomplete"
-        },
-        summary
-            .cleanup
-            .detail
-            .as_deref()
-            .map_or_else(String::new, |detail| format!(" ({detail})"))
-    );
-    if !summary.retention.truncated.is_empty() {
-        println!("truncated: {}", summary.retention.truncated.join(", "));
-    }
-}
-
 struct Stores {
     paths: WorldPaths,
     registry: WorldRegistry,
@@ -1173,7 +622,7 @@ impl Stores {
         Ok(())
     }
 
-    async fn recover_terminal(&self, instance: &str) -> Result<Option<TerminalWorldSummary>> {
+    async fn recover_terminal(&self, instance: &str) -> Result<Option<WorldTerminalSummary>> {
         let paths = self.paths.clone();
         let instance = instance.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -1283,7 +732,7 @@ mod tests {
             let stopped = state.clone();
             let _ = self.states.lock().unwrap().send(stopped.clone());
             let root = self.paths.evidence_path(WORKFLOW_INSTANCE);
-            let summary = TerminalWorldSummary {
+            let summary = WorldTerminalSummary {
                 schema: TERMINAL_SUMMARY_SCHEMA.to_owned(),
                 instance: state.instance,
                 provenance: state.provenance.clone(),
@@ -1538,7 +987,7 @@ mod tests {
         reason: WorldMemberEndReason,
         cleanup: WorldMemberCleanup,
     ) -> ConnectedSimulationEnding {
-        ConnectedSimulationEnding::Member(TerminalMemberEvidence {
+        ConnectedSimulationEnding::Member(WorldMemberEvidence {
             schema: phoxal_cli_host::world::MEMBER_TERMINAL_SCHEMA.to_owned(),
             terminal: phoxal::world::api::session::WorldMemberTerminal {
                 execution: ExecutionId::parse("1234567890abcdef1234567890abcdef").unwrap(),

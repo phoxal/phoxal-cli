@@ -21,9 +21,8 @@ pub use phoxal::world::api::session::document::{
     NativeProcessIdentity, ProcessIdentity, RegisteredWorld, TerminalCleanup, TerminalFailure,
     TerminalOutcome, TerminalRetention, WORLD_CHECKPOINT_SCHEMA,
     WORLD_MEMBER_TERMINAL_SCHEMA as MEMBER_TERMINAL_SCHEMA,
-    WORLD_TERMINAL_SUMMARY_SCHEMA as TERMINAL_SUMMARY_SCHEMA, WorldCheckpoint,
-    WorldMemberEvidence as TerminalMemberEvidence, WorldMemberEvidenceIndex as MemberEvidence,
-    WorldTerminalSummary as TerminalWorldSummary,
+    WORLD_TERMINAL_SUMMARY_SCHEMA as TERMINAL_SUMMARY_SCHEMA, WorldCheckpoint, WorldMemberEvidence,
+    WorldMemberEvidenceIndex, WorldTerminalSummary,
 };
 use serde::Serialize;
 use sysinfo::{Pid, ProcessesToUpdate, System};
@@ -366,7 +365,7 @@ impl<I: ProcessInspector> WorldRegistry<I> {
         evidence: &WorldEvidence,
         instance: &str,
         control: &C,
-    ) -> Result<Option<TerminalWorldSummary>> {
+    ) -> Result<Option<WorldTerminalSummary>> {
         validate_instance_id(instance)?;
         let stale = match self.probe(instance)? {
             RegistrationProbe::Missing => return evidence.read_summary(instance),
@@ -399,7 +398,7 @@ impl<I: ProcessInspector> WorldRegistry<I> {
 
         let member_evidence = evidence.discover_member_evidence(&checkpoint)?;
         let (retained_logs, truncated) = evidence.recovery_logs(instance)?;
-        let summary = TerminalWorldSummary {
+        let summary = WorldTerminalSummary {
             schema: TERMINAL_SUMMARY_SCHEMA.to_owned(),
             instance: checkpoint.state.instance,
             provenance: checkpoint.state.provenance,
@@ -438,11 +437,11 @@ impl<I: ProcessInspector> WorldRegistry<I> {
     }
 }
 
-trait ValidateTerminalMemberEvidence {
+trait ValidateWorldMemberEvidence {
     fn validate(&self, expected_execution: ExecutionId) -> Result<()>;
 }
 
-impl ValidateTerminalMemberEvidence for TerminalMemberEvidence {
+impl ValidateWorldMemberEvidence for WorldMemberEvidence {
     fn validate(&self, expected_execution: ExecutionId) -> Result<()> {
         self.validate_structure(expected_execution)?;
         for evidence in &self.terminal.evidence_paths {
@@ -452,11 +451,11 @@ impl ValidateTerminalMemberEvidence for TerminalMemberEvidence {
     }
 }
 
-trait ValidateTerminalWorldSummary {
+trait ValidateWorldTerminalSummary {
     fn validate(&self, expected_instance: &str) -> Result<()>;
 }
 
-impl ValidateTerminalWorldSummary for TerminalWorldSummary {
+impl ValidateWorldTerminalSummary for WorldTerminalSummary {
     fn validate(&self, expected_instance: &str) -> Result<()> {
         let expected = parse_instance_id(expected_instance)?;
         self.validate_structure(expected)?;
@@ -489,13 +488,13 @@ impl WorldEvidence {
         Self { paths }
     }
 
-    pub fn read_summary(&self, instance: &str) -> Result<Option<TerminalWorldSummary>> {
+    pub fn read_summary(&self, instance: &str) -> Result<Option<WorldTerminalSummary>> {
         validate_instance_id(instance)?;
         let path = self.paths.evidence_path(instance).join("summary.json");
         let Some(document) = read_owner_file_if_present(&path)? else {
             return Ok(None);
         };
-        let summary: TerminalWorldSummary =
+        let summary: WorldTerminalSummary =
             serde_json::from_slice(&document).with_context(|| {
                 format!("failed to parse terminal world summary {}", path.display())
             })?;
@@ -516,8 +515,8 @@ impl WorldEvidence {
 
     pub fn read_member_evidence(
         &self,
-        summary: &TerminalWorldSummary,
-    ) -> Result<Vec<TerminalMemberEvidence>> {
+        summary: &WorldTerminalSummary,
+    ) -> Result<Vec<WorldMemberEvidence>> {
         let instance = summary.instance.to_string();
         summary.validate(&instance)?;
         let root = self.paths.evidence_path(&instance);
@@ -525,7 +524,7 @@ impl WorldEvidence {
         for indexed in &summary.member_evidence {
             let path = root.join(&indexed.path);
             let document = read_owner_file(&path)?;
-            let member: TerminalMemberEvidence = serde_json::from_slice(&document)
+            let member: WorldMemberEvidence = serde_json::from_slice(&document)
                 .with_context(|| format!("failed to parse member evidence {}", path.display()))?;
             member.validate(indexed.execution)?;
             member
@@ -549,7 +548,7 @@ impl WorldEvidence {
         &self,
         instance: &str,
         execution: ExecutionId,
-    ) -> Result<Option<TerminalMemberEvidence>> {
+    ) -> Result<Option<WorldMemberEvidence>> {
         validate_instance_id(instance)?;
         let path = self
             .paths
@@ -559,7 +558,7 @@ impl WorldEvidence {
         let Some(document) = read_owner_file_if_present(&path)? else {
             return Ok(None);
         };
-        let member: TerminalMemberEvidence = serde_json::from_slice(&document)
+        let member: WorldMemberEvidence = serde_json::from_slice(&document)
             .with_context(|| format!("failed to parse member evidence {}", path.display()))?;
         member.validate(execution)?;
         Ok(Some(member))
@@ -568,7 +567,7 @@ impl WorldEvidence {
     fn discover_member_evidence(
         &self,
         checkpoint: &WorldCheckpoint,
-    ) -> Result<Vec<MemberEvidence>> {
+    ) -> Result<Vec<WorldMemberEvidenceIndex>> {
         let instance = checkpoint.state.instance.to_string();
         let directory = self.paths.evidence_path(&instance).join("members");
         validate_owner_directory(&directory)?;
@@ -588,7 +587,7 @@ impl WorldEvidence {
                 .with_context(|| format!("invalid member evidence filename `{name}`"))?;
             let path = entry.path();
             let document = read_owner_file(&path)?;
-            let record: TerminalMemberEvidence = serde_json::from_slice(&document)
+            let record: WorldMemberEvidence = serde_json::from_slice(&document)
                 .with_context(|| format!("failed to parse member evidence {}", path.display()))?;
             record.validate(execution)?;
             record
@@ -601,7 +600,7 @@ impl WorldEvidence {
                         record.terminal.execution
                     )
                 })?;
-            members.push(MemberEvidence {
+            members.push(WorldMemberEvidenceIndex {
                 execution,
                 path: format!("members/{execution}.json"),
             });
@@ -633,8 +632,8 @@ impl WorldEvidence {
     fn publish_recovered_summary(
         &self,
         instance: &str,
-        summary: &TerminalWorldSummary,
-    ) -> Result<TerminalWorldSummary> {
+        summary: &WorldTerminalSummary,
+    ) -> Result<WorldTerminalSummary> {
         summary.validate(instance)?;
         let root = self.paths.evidence_path(instance);
         validate_owner_directory(&root)?;
@@ -647,7 +646,7 @@ impl WorldEvidence {
         }
     }
 
-    pub fn list_summaries(&self) -> Result<Vec<TerminalWorldSummary>> {
+    pub fn list_summaries(&self) -> Result<Vec<WorldTerminalSummary>> {
         let mut summaries = Vec::new();
         for directory in fs::read_dir(self.paths.evidence())? {
             let directory = directory?;
@@ -669,7 +668,7 @@ impl WorldEvidence {
         Ok(summaries)
     }
 
-    pub fn read_logs(&self, summary: &TerminalWorldSummary) -> Result<Vec<(String, Vec<u8>)>> {
+    pub fn read_logs(&self, summary: &WorldTerminalSummary) -> Result<Vec<(String, Vec<u8>)>> {
         let instance = summary.instance.to_string();
         summary.validate(&instance)?;
         let root = self.paths.evidence_path(&instance);
@@ -1328,8 +1327,8 @@ mod tests {
         (temporary, paths)
     }
 
-    fn summary(instance: &str, ended_at_unix_ms: u64) -> TerminalWorldSummary {
-        TerminalWorldSummary {
+    fn summary(instance: &str, ended_at_unix_ms: u64) -> WorldTerminalSummary {
+        WorldTerminalSummary {
             schema: TERMINAL_SUMMARY_SCHEMA.to_string(),
             instance: WorldInstanceId::parse(instance).unwrap(),
             provenance: WorldProvenance {
@@ -1507,7 +1506,7 @@ mod tests {
         let (_temporary, paths) = recovery_fixture();
         let root = paths.evidence_path(INSTANCE);
         let execution = ExecutionId::parse("1234567890abcdef1234567890abcdef").unwrap();
-        let record = TerminalMemberEvidence {
+        let record = WorldMemberEvidence {
             schema: MEMBER_TERMINAL_SCHEMA.to_owned(),
             terminal: WorldMemberTerminal {
                 execution,
@@ -1540,7 +1539,7 @@ mod tests {
         assert_eq!(recovered.progress, checkpoint().state.progress);
         assert_eq!(
             recovered.member_evidence,
-            vec![MemberEvidence {
+            vec![WorldMemberEvidenceIndex {
                 execution,
                 path: format!("members/{execution}.json"),
             }]
@@ -1802,7 +1801,7 @@ mod tests {
             producer: Some(ProducerId::parse("2234567890abcdef1234567890abcdef").unwrap()),
         };
 
-        let decoded: TerminalWorldSummary =
+        let decoded: WorldTerminalSummary =
             serde_json::from_slice(&serde_json::to_vec(&summary).unwrap()).unwrap();
 
         assert_eq!(decoded, summary);
@@ -1821,7 +1820,7 @@ mod tests {
         let members = paths.evidence_path(INSTANCE).join("members");
         secure_directory(&members).unwrap();
         let execution = ExecutionId::parse("1234567890abcdef1234567890abcdef").unwrap();
-        let record = TerminalMemberEvidence {
+        let record = WorldMemberEvidence {
             schema: MEMBER_TERMINAL_SCHEMA.to_owned(),
             terminal: WorldMemberTerminal {
                 execution,
@@ -1834,7 +1833,7 @@ mod tests {
                 evidence_paths: vec!["members/controller.log".to_owned()],
             },
         };
-        summary.member_evidence = vec![MemberEvidence {
+        summary.member_evidence = vec![WorldMemberEvidenceIndex {
             execution,
             path: format!("members/{execution}.json"),
         }];
