@@ -2700,6 +2700,8 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

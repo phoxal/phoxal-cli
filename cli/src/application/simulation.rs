@@ -25,7 +25,7 @@ use crate::cli::exit::ReportedExit;
 use crate::cli::output::welcome::{Mode, StepId};
 
 use super::summary::SessionSummary;
-use super::world_host::LaunchedWorldHost;
+use phoxal_cli_host::world_process::LaunchedWorldHost;
 
 const WORLD_UI_INGRESS_CAPACITY: usize = 64;
 const ATTACHMENT_BUDGET: Duration = Duration::from_secs(5 * 60);
@@ -38,17 +38,25 @@ struct StartedWorld {
     host: LaunchedWorldHost,
 }
 
+/// Inputs resolved before a `simulation run` creates its transaction-owned
+/// world process.
+struct ConnectionIntent {
+    spawn: Option<SpawnId>,
+    target: super::lifecycle::Target,
+}
+
 enum ConnectedSimulationEnding {
     World(Box<TerminalWorldSummary>),
     Member(TerminalMemberEvidence),
 }
 
 pub(crate) async fn run_command(app: &AppContext, world: &Path, spawn: Option<&str>) -> Result<()> {
+    let intent = connection_intent(app, spawn)?;
     let started = start_world(app, world).await?;
     connect_world(
         app,
         &started.registration.instance.to_string(),
-        spawn,
+        intent,
         Some(started),
     )
     .await
@@ -75,7 +83,7 @@ pub(crate) async fn connect_command(
     instance: &str,
     spawn: Option<&str>,
 ) -> Result<()> {
-    connect_world(app, instance, spawn, None).await
+    connect_world(app, instance, connection_intent(app, spawn)?, None).await
 }
 
 pub(crate) async fn status_command(_app: &AppContext, instance: &str) -> Result<()> {
@@ -264,7 +272,7 @@ async fn start_world(app: &AppContext, source: &Path) -> Result<StartedWorld> {
     .await
     .context("simulation host materializer worker failed")??;
 
-    let (instance, host) = super::world_host::launch(
+    let (instance, host) = phoxal_cli_host::world_process::launch(
         tools.host(),
         compiled.path(),
         &stores.paths,
@@ -315,10 +323,19 @@ async fn rollback_host(host: LaunchedWorldHost, error: anyhow::Error) -> anyhow:
     }
 }
 
+fn connection_intent(app: &AppContext, spawn: Option<&str>) -> Result<ConnectionIntent> {
+    let spawn = spawn
+        .map(SpawnId::new)
+        .transpose()
+        .context("invalid world spawn name")?;
+    let target = super::lifecycle::Target::resolve(None, app.project.root())?;
+    Ok(ConnectionIntent { spawn, target })
+}
+
 async fn connect_world(
     app: &AppContext,
     instance: &str,
-    spawn: Option<&str>,
+    intent: ConnectionIntent,
     mut started: Option<StartedWorld>,
 ) -> Result<()> {
     let stores = Stores::discover()?;
@@ -348,7 +365,7 @@ async fn connect_world(
 
     // The compatibility decision is deliberately before project preparation,
     // package materialization, supervisor launch, or native scene mutation.
-    connect_fresh_execution(app, registration, client, spawn, started).await
+    connect_fresh_execution(app, registration, client, intent, started).await
 }
 
 fn ensure_compatible_train(world: FrameworkVersion, robot: FrameworkVersion) -> Result<()> {
@@ -364,14 +381,10 @@ async fn connect_fresh_execution(
     app: &AppContext,
     registration: LocalWorldRegistration,
     client: WorldSessionClient,
-    spawn: Option<&str>,
+    intent: ConnectionIntent,
     mut started: Option<StartedWorld>,
 ) -> Result<()> {
-    let spawn = spawn
-        .map(SpawnId::new)
-        .transpose()
-        .context("invalid world spawn name")?;
-    let target = super::lifecycle::Target::resolve(None, app.project.root())?;
+    let ConnectionIntent { spawn, target } = intent;
     let startup = super::startup::Startup::begin(app, &target.project, Mode::Simulation);
     let prepared =
         match super::lifecycle::prepare_driver_free_execution(app, &target, &startup).await {

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use phoxal_cli_host::world::{
+use crate::world::{
     EVIDENCE_DIR_ENV, LOG_BYTE_LIMIT_ENV, REGISTRY_DIR_ENV, WorldPaths, parse_instance_id,
 };
 
@@ -23,7 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// A host that is Ready but still transaction-owned by this invocation.
 /// Dropping it before [`Self::detach`] rolls the whole native process group
 /// back.
-pub(crate) struct LaunchedWorldHost {
+pub struct LaunchedWorldHost {
     child: Option<Child>,
     process_group: Option<NonZeroI32>,
 }
@@ -56,7 +56,7 @@ impl LaunchedWorldHost {
     /// Release launch ownership after the operation has reached its commit
     /// point. The host remains discoverable and stoppable through its typed
     /// session plus live registration.
-    pub(crate) fn detach(mut self) {
+    pub fn detach(mut self) {
         self.process_group = None;
         if let Some(child) = self.child.take() {
             reap_in_background(child);
@@ -64,7 +64,7 @@ impl LaunchedWorldHost {
     }
 
     /// Roll back a host that this invocation still owns.
-    pub(crate) async fn stop(mut self) -> Result<()> {
+    pub async fn stop(mut self) -> Result<()> {
         self.stop_owned().await?;
         if let Some(child) = self.child.take() {
             reap_in_background(child);
@@ -166,7 +166,7 @@ impl Drop for BootstrapLog {
 ///
 /// The line is emitted only after the host has persisted its closed bundle,
 /// become Ready/Paused, and atomically created the live registration.
-pub(crate) async fn launch(
+pub async fn launch(
     executable: &Path,
     world_bundle: &Path,
     paths: &WorldPaths,
