@@ -2628,9 +2628,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal"
-version = "0.67.1"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df516900ef156c4f0f5507d5e2796291d0dff71eb49ba4f31acfe67cfb0dbe7d"
+checksum = "d41d12f3756eabf940c99e3de31ffa9a5486d0cd19737f85b8ce010958573aae"
 dependencies = [
  "anyhow",
  "clap",
@@ -2644,6 +2644,8 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "toml 1.1.5+spec-1.1.0",
@@ -2675,7 +2677,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "tar",
  "tempfile",
  "tokio",
@@ -2730,7 +2732,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2",
+ "sha2 0.11.0",
  "tar",
  "tempfile",
  "toml 0.9.12+spec-1.1.0",
@@ -2751,9 +2753,9 @@ dependencies = [
 
 [[package]]
 name = "phoxal-macros"
-version = "0.67.1"
+version = "0.68.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6875831fe992686568f05a4395348f289cae5621c2033bc23577d85efdb1701f"
+checksum = "faea336c8d6d29ec6eab1669a686b09c68f70d0bebae647729dbf54b97618ffc"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3731,6 +3733,17 @@ name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
