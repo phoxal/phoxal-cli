@@ -10,7 +10,7 @@ use std::io::{self, Stderr};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use phoxal::world::api::session::control::WorldSessionControlRequest;
+use phoxal::world::api::session::control::WorldControl;
 use phoxal::world::api::session::diagnostics::WorldSessionDiagnostics;
 use phoxal::world::api::session::state::WorldSessionState;
 use phoxal::world::api::session::{WorldLifecycle, WorldMemberPhase, WorldMotion};
@@ -38,7 +38,7 @@ pub enum WorldInput {
         reason: String,
     },
     ControlFailed {
-        request: WorldSessionControlRequest,
+        request: WorldControl,
         reason: String,
     },
     Disconnected {
@@ -70,7 +70,7 @@ pub struct WorldUiOptions {
 /// responsible for routing every accepted operation to the typed client.
 pub async fn run(
     ingress: mpsc::Receiver<WorldInput>,
-    controls: mpsc::UnboundedSender<WorldSessionControlRequest>,
+    controls: mpsc::UnboundedSender<WorldControl>,
     options: WorldUiOptions,
     initial_state: WorldSessionState,
     initial_diagnostics: Option<WorldSessionDiagnostics>,
@@ -97,7 +97,7 @@ struct WorldModel {
     state: WorldSessionState,
     diagnostics: Option<WorldSessionDiagnostics>,
     diagnostics_problem: Option<String>,
-    pending: Option<WorldSessionControlRequest>,
+    pending: Option<WorldControl>,
     confirming_stop: bool,
     stop_requested: bool,
     stop_acknowledged: bool,
@@ -159,7 +159,7 @@ impl WorldModel {
                 if self.pending == Some(request) {
                     self.pending = None;
                 }
-                if request == WorldSessionControlRequest::Stop {
+                if request == WorldControl::Stop {
                     self.stop_requested = false;
                 }
                 self.diagnostic = Some(format!("control failed: {reason}; retry"));
@@ -179,26 +179,23 @@ impl WorldModel {
         let completed = matches!(
             (self.pending, state.lifecycle),
             (
-                Some(WorldSessionControlRequest::Pause),
+                Some(WorldControl::Pause),
                 WorldLifecycle::Ready {
                     motion: WorldMotion::Paused,
                 },
             ) | (
-                Some(WorldSessionControlRequest::Resume),
+                Some(WorldControl::Resume),
                 WorldLifecycle::Ready {
                     motion: WorldMotion::Running,
                 },
-            ) | (
-                Some(WorldSessionControlRequest::Stop),
-                WorldLifecycle::Stopping
-            )
+            ) | (Some(WorldControl::Stop), WorldLifecycle::Stopping)
         );
         if completed {
             self.pending = None;
         }
     }
 
-    fn key(&mut self, key: KeyEvent) -> Option<WorldSessionControlRequest> {
+    fn key(&mut self, key: KeyEvent) -> Option<WorldControl> {
         if key.kind != KeyEventKind::Press {
             return None;
         }
@@ -216,9 +213,9 @@ impl WorldModel {
                 KeyCode::Enter if self.pending.is_none() => {
                     self.confirming_stop = false;
                     self.stop_requested = true;
-                    self.pending = Some(WorldSessionControlRequest::Stop);
+                    self.pending = Some(WorldControl::Stop);
                     self.redraw = true;
-                    return Some(WorldSessionControlRequest::Stop);
+                    return Some(WorldControl::Stop);
                 }
                 _ => {}
             }
@@ -235,10 +232,10 @@ impl WorldModel {
                 let request = match self.state.lifecycle {
                     WorldLifecycle::Ready {
                         motion: WorldMotion::Running,
-                    } => WorldSessionControlRequest::Pause,
+                    } => WorldControl::Pause,
                     WorldLifecycle::Ready {
                         motion: WorldMotion::Paused,
-                    } => WorldSessionControlRequest::Resume,
+                    } => WorldControl::Resume,
                     _ => {
                         self.diagnostic =
                             Some("pause is available only while the world is ready".to_owned());
@@ -258,7 +255,7 @@ impl WorldModel {
 
 fn run_blocking(
     mut ingress: mpsc::Receiver<WorldInput>,
-    controls: mpsc::UnboundedSender<WorldSessionControlRequest>,
+    controls: mpsc::UnboundedSender<WorldControl>,
     options: WorldUiOptions,
     initial_state: WorldSessionState,
     initial_diagnostics: Option<WorldSessionDiagnostics>,
@@ -647,7 +644,7 @@ mod tests {
         let mut running = WorldModel::new(state(WorldMotion::Running), Some(diagnostics()));
         assert_eq!(
             running.key(key(KeyCode::Char('p'), KeyModifiers::NONE)),
-            Some(WorldSessionControlRequest::Pause)
+            Some(WorldControl::Pause)
         );
         assert_eq!(
             running.key(key(KeyCode::Char('p'), KeyModifiers::NONE)),
@@ -658,7 +655,7 @@ mod tests {
         let mut paused = WorldModel::new(state(WorldMotion::Paused), Some(diagnostics()));
         assert_eq!(
             paused.key(key(KeyCode::Char('p'), KeyModifiers::NONE)),
-            Some(WorldSessionControlRequest::Resume)
+            Some(WorldControl::Resume)
         );
     }
 
@@ -678,7 +675,7 @@ mod tests {
         confirmed.key(key(KeyCode::Char('S'), KeyModifiers::SHIFT));
         assert_eq!(
             confirmed.key(key(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(WorldSessionControlRequest::Stop)
+            Some(WorldControl::Stop)
         );
         assert!(confirmed.stop_requested);
     }

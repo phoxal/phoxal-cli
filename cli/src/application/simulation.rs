@@ -9,7 +9,7 @@ use phoxal::model::identity::SpawnId;
 use phoxal::session::WorldSessionClient;
 use phoxal::version::FrameworkVersion;
 use phoxal::world::api::session::connect::WorldSessionBootstrap;
-use phoxal::world::api::session::control::WorldSessionControlRequest;
+use phoxal::world::api::session::control::WorldControl;
 use phoxal::world::api::session::state::WorldSessionState;
 use phoxal::world::api::session::{
     WorldLifecycle, WorldMemberCleanup, WorldMemberEndReason, WorldMemberPhase, WorldMotion,
@@ -152,14 +152,14 @@ pub(crate) async fn stop_command(_app: &AppContext, instance: &str) -> Result<()
 }
 
 pub(crate) async fn pause_command(_app: &AppContext, instance: &str) -> Result<()> {
-    control_world(instance, WorldSessionControlRequest::Pause).await
+    control_world(instance, WorldControl::Pause).await
 }
 
 pub(crate) async fn resume_command(_app: &AppContext, instance: &str) -> Result<()> {
-    control_world(instance, WorldSessionControlRequest::Resume).await
+    control_world(instance, WorldControl::Resume).await
 }
 
-async fn control_world(instance: &str, operation: WorldSessionControlRequest) -> Result<()> {
+async fn control_world(instance: &str, operation: WorldControl) -> Result<()> {
     let stores = Stores::discover()?;
     let registration = stores.registry.resolve(instance)?;
     let client = connect_verified(&registration).await?;
@@ -493,10 +493,7 @@ async fn connect_fresh_execution(
     startup.ready();
     if detach {
         launched.detach();
-        app.ui.success(format!(
-            "robot execution {execution} is active; world physics remains paused. Resume with `phoxal simulation resume {}`",
-            registration.instance
-        ));
+        report_detached_attachment(app, execution, &attached, registration.instance);
         report_world_commands(app, registration.instance);
         return Ok(());
     }
@@ -517,6 +514,32 @@ async fn connect_fresh_execution(
         report_world_commands(app, registration.instance);
     }
     Ok(())
+}
+
+fn report_detached_attachment(
+    app: &AppContext,
+    execution: phoxal::identity::ExecutionId,
+    state: &WorldSessionState,
+    instance: phoxal::model::world::WorldInstanceId,
+) {
+    match state.lifecycle {
+        WorldLifecycle::Ready {
+            motion: WorldMotion::Paused,
+        } => app.ui.success(format!(
+            "robot execution {execution} is active; world physics is paused. Resume with `phoxal simulation resume {instance}`"
+        )),
+        WorldLifecycle::Ready {
+            motion: WorldMotion::Running,
+        } => app.ui.success(format!(
+            "robot execution {execution} is active; world physics is running"
+        )),
+        WorldLifecycle::Stopping | WorldLifecycle::Failed { .. } | WorldLifecycle::Starting => {
+            app.ui.info(format!(
+                "robot execution {execution} attached, but world lifecycle is {:?}",
+                state.lifecycle
+            ));
+        }
+    }
 }
 
 fn report_world_commands(app: &AppContext, instance: phoxal::model::world::WorldInstanceId) {
@@ -919,7 +942,7 @@ fn spawn_control_router(
     tasks: &mut tokio::task::JoinSet<()>,
     client: WorldSessionClient,
     registration: LocalWorldRegistration,
-    mut controls: tokio::sync::mpsc::UnboundedReceiver<WorldSessionControlRequest>,
+    mut controls: tokio::sync::mpsc::UnboundedReceiver<WorldControl>,
     ingress: tokio::sync::mpsc::Sender<phoxal_cli_ui::WorldInput>,
 ) {
     tasks.spawn(async move {
@@ -1000,7 +1023,7 @@ async fn stop_world(
 ) -> Result<TerminalWorldSummary> {
     let client = connect_verified(&registration).await?;
     let state = client
-        .control(WorldSessionControlRequest::Stop)
+        .control(WorldControl::Stop)
         .await
         .context("world host refused stop")?;
     ensure_state_matches_registration(&state, &registration)?;
@@ -1313,16 +1336,11 @@ mod tests {
             self.diagnostic_updates.lock().unwrap().subscribe()
         }
 
-        fn control(
-            &self,
-            request: WorldSessionControlRequest,
-        ) -> WorldSessionOperation<'_, WorldSessionState> {
+        fn control(&self, request: WorldControl) -> WorldSessionOperation<'_, WorldSessionState> {
             Box::pin(async move {
                 match request {
-                    WorldSessionControlRequest::Stop => self.stop(),
-                    WorldSessionControlRequest::Pause | WorldSessionControlRequest::Resume => {
-                        Ok(self.state())
-                    }
+                    WorldControl::Stop => self.stop(),
+                    WorldControl::Pause | WorldControl::Resume => Ok(self.state()),
                 }
             })
         }
