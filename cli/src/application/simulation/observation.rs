@@ -1,5 +1,6 @@
 //! Read-only world inspection, terminal evidence, and textual presentation.
 
+use super::connect::{connect_verified, current_verified};
 use super::*;
 
 pub(super) enum StatusReport {
@@ -91,35 +92,6 @@ pub(super) async fn load_list(stores: &Stores, all: bool) -> Result<ListReport> 
     Ok(ListReport { live, terminal })
 }
 
-pub(super) fn print_live_status(state: &WorldSessionState) {
-    println!("{}", format_live_status(state));
-}
-
-pub(super) fn format_live_status(state: &WorldSessionState) -> String {
-    let mut lines = vec![
-        format!("instance:  {}", state.instance),
-        format!("world:     {}", state.provenance.world),
-        format!("digest:    {}", state.provenance.digest),
-        format!("lifecycle: {}", lifecycle_text(state.lifecycle)),
-        format!("train:     {}", state.provenance.framework),
-        format!(
-            "adapter:   {} {}",
-            state.provenance.adapter, state.provenance.adapter_version
-        ),
-        format!("simulator: {}", state.provenance.simulator_version),
-        format!("step:      {}", state.progress.completed_step()),
-        format!("world ns:  {}", state.progress.elapsed_ns()),
-        format!("members:   {}", state.members.len()),
-    ];
-    for member in &state.members {
-        lines.push(format!(
-            "  {}  {:?}  {}",
-            member.robot, member.phase, member.execution
-        ));
-    }
-    lines.join("\n")
-}
-
 pub(super) fn ensure_state_matches_registration(
     state: &WorldSessionState,
     registration: &LocalWorldRegistration,
@@ -138,15 +110,6 @@ pub(super) fn ensure_state_matches_registration(
         registration.instance
     );
     Ok(())
-}
-
-pub(super) fn lifecycle_text(lifecycle: WorldLifecycle) -> String {
-    match lifecycle {
-        WorldLifecycle::Starting => "starting".to_owned(),
-        WorldLifecycle::Ready { motion } => format!("ready/{motion:?}").to_lowercase(),
-        WorldLifecycle::Stopping => "stopping".to_owned(),
-        WorldLifecycle::Failed { reason } => format!("failed/{reason:?}").to_lowercase(),
-    }
 }
 
 pub(super) async fn stop_world(
@@ -193,71 +156,4 @@ pub(super) async fn stop_world(
         );
     }
     Ok(summary)
-}
-
-pub(super) fn print_terminal_status(summary: &WorldTerminalSummary, ended: &[WorldMemberEvidence]) {
-    println!("instance:  {}", summary.instance);
-    println!("world:     {}", summary.provenance.world);
-    println!("digest:    {}", summary.provenance.digest);
-    println!("lifecycle: {}", summary.outcome.kind());
-    println!("reason:    {:?}", summary.outcome.reason());
-    if let Some(detail) = summary.outcome.detail() {
-        println!("detail:    {detail}");
-    }
-    println!("train:     {}", summary.provenance.framework);
-    println!(
-        "adapter:   {} {}",
-        summary.provenance.adapter, summary.provenance.adapter_version
-    );
-    println!("simulator: {}", summary.provenance.simulator_version);
-    println!("platform:  {}", summary.provenance.platform);
-    println!("seed:      {}", summary.provenance.random_seed);
-    println!("quantum:   {} ns", summary.provenance.time_step_ns);
-    println!("step:      {}", summary.progress.completed_step());
-    println!("world ns:  {}", summary.progress.elapsed_ns());
-    println!(
-        "members:   {} at shutdown, {} ended",
-        summary.members.len(),
-        ended.len()
-    );
-    for member in &summary.members {
-        println!(
-            "  {}  at-shutdown/{:?}  {}",
-            member.robot, member.phase, member.execution
-        );
-    }
-    for member in ended {
-        println!(
-            "  {}  ended/{:?}  {}  cleanup/{:?}",
-            member.terminal.robot,
-            member.terminal.reason,
-            member.terminal.execution,
-            member.terminal.cleanup
-        );
-    }
-    if let Some(process) = summary.failing.process {
-        println!(
-            "failure:   process {} born {}",
-            process.pid, process.started_at_unix_s
-        );
-    }
-    if let Some(producer) = summary.failing.producer {
-        println!("failure:   producer {producer}");
-    }
-    println!(
-        "cleanup:   {}{}",
-        if summary.cleanup.complete {
-            "complete"
-        } else {
-            "incomplete"
-        },
-        summary
-            .cleanup
-            .detail
-            .as_deref()
-            .map_or_else(String::new, |detail| format!(" ({detail})"))
-    );
-    if !summary.retention.truncated.is_empty() {
-        println!("truncated: {}", summary.retention.truncated.join(", "));
-    }
 }

@@ -1,5 +1,6 @@
 //! Terminal world-view task orchestration and stream reconnection.
 
+use super::connect::connect_verified;
 use super::*;
 
 pub(super) async fn open_world_tui(

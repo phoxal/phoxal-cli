@@ -14,6 +14,7 @@ pub(crate) mod brand;
 pub(crate) mod diagnostics;
 pub(crate) mod plain;
 pub(crate) mod progress;
+pub(crate) mod simulation;
 pub(crate) mod welcome;
 
 #[must_use]

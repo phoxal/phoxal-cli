@@ -1320,8 +1320,9 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let lifecycle = std::fs::read_to_string(root.join("src/application/lifecycle.rs"))
             .expect("the lifecycle source is readable");
-        let simulation = std::fs::read_to_string(root.join("src/application/simulation.rs"))
-            .expect("the simulation source is readable");
+        let simulation =
+            std::fs::read_to_string(root.join("src/application/simulation/connect.rs"))
+                .expect("the simulation connection source is readable");
 
         let prepare = lifecycle
             .split_once("pub(crate) async fn prepare_driver_free_execution(")

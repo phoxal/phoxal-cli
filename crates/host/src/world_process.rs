@@ -428,16 +428,16 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn launch_failure_uses_orderly_rollback_before_drop_can_kill() {
+    async fn registration_validation_failure_leaves_no_orphaned_host_group() {
         let child = spawn_group("sleep", &["120"]);
         let pid = child.id();
         let error = rollback_launch(
             LaunchedWorldHost::from_spawned(child).unwrap(),
-            anyhow::anyhow!("readiness failed"),
+            anyhow::anyhow!("registration validation failed"),
         )
         .await;
 
-        assert_eq!(error.to_string(), "readiness failed");
+        assert_eq!(error.to_string(), "registration validation failed");
         wait_for_group_exit(pid);
     }
 

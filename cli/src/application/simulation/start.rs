@@ -1,6 +1,45 @@
 //! World compilation, exact-train materialization, and launch commitment.
 
+use super::connect::{current_verified, ensure_ready_and_paused};
 use super::*;
+
+pub(super) struct StartedWorld {
+    pub(super) registration: LocalWorldRegistration,
+    pub(super) host: LaunchedWorldHost,
+}
+
+struct WorldStartTransaction {
+    _staging: tempfile::TempDir,
+    host: Option<LaunchedWorldHost>,
+}
+
+impl WorldStartTransaction {
+    fn new(staging: tempfile::TempDir) -> Self {
+        Self {
+            _staging: staging,
+            host: None,
+        }
+    }
+
+    fn retain_host(&mut self, host: LaunchedWorldHost) {
+        self.host = Some(host);
+    }
+
+    fn commit(mut self, registration: LocalWorldRegistration) -> Result<StartedWorld> {
+        let host = self
+            .host
+            .take()
+            .context("cannot commit world startup before launching its host")?;
+        Ok(StartedWorld { registration, host })
+    }
+
+    async fn rollback(mut self, error: anyhow::Error) -> anyhow::Error {
+        match self.host.take() {
+            Some(host) => rollback_host(host, error).await,
+            None => error,
+        }
+    }
+}
 
 pub(super) async fn start_world(app: &AppContext, source: &Path) -> Result<StartedWorld> {
     let stores = Stores::discover()?;
@@ -43,9 +82,11 @@ pub(super) async fn start_world(app: &AppContext, source: &Path) -> Result<Start
         DEFAULT_LOG_BYTE_LIMIT,
     )
     .await?;
+    let mut transaction = WorldStartTransaction::new(staging);
+    transaction.retain_host(host);
     let registration = match stores.registry.resolve(&instance) {
         Ok(registration) => registration,
-        Err(error) => return Err(rollback_host(host, error).await),
+        Err(error) => return Err(transaction.rollback(error).await),
     };
     let validation = || -> Result<()> {
         ensure!(
@@ -67,17 +108,16 @@ pub(super) async fn start_world(app: &AppContext, source: &Path) -> Result<Start
         Ok(())
     };
     if let Err(error) = validation() {
-        return Err(rollback_host(host, error).await);
+        return Err(transaction.rollback(error).await);
     }
     let ready = match current_verified(&registration).await {
         Ok((_, state)) => ensure_ready_and_paused(&state),
         Err(error) => Err(error),
     };
     if let Err(error) = ready {
-        return Err(rollback_host(host, error).await);
+        return Err(transaction.rollback(error).await);
     }
-    drop(staging);
-    Ok(StartedWorld { registration, host })
+    transaction.commit(registration)
 }
 
 pub(super) async fn rollback_host(host: LaunchedWorldHost, error: anyhow::Error) -> anyhow::Error {

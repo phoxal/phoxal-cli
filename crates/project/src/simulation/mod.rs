@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use phoxal::bundle::RuntimeBundle;
+use phoxal::bundle::WorldBundle;
 use phoxal::model::simulation::FullSimulationPlan;
-use phoxal::model::world::{WorldBundle, WorldDigest};
+use phoxal::model::world::WorldDigest;
 use phoxal::version::FrameworkVersion;
 
 use crate::Reporter;
