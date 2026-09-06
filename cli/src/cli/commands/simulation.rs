@@ -23,6 +23,10 @@ pub enum SimulationSubcommand {
     Open(InstanceCommand),
     #[command(about = "Connect a fresh driver-free execution to a live world.")]
     Connect(SimulationConnect),
+    #[command(about = "Pause physics for a live world.")]
+    Pause(InstanceCommand),
+    #[command(about = "Resume real-time physics for a live world.")]
+    Resume(InstanceCommand),
     #[command(about = "Report live state or retained terminal evidence for a world.")]
     Status(InstanceCommand),
     #[command(about = "Print retained process evidence for a world.")]
@@ -53,6 +57,11 @@ pub struct SimulationConnect {
     pub(crate) instance: String,
     #[arg(long, value_name = "NAME", help = "Named world spawn point.")]
     pub(crate) spawn: Option<String>,
+    #[arg(
+        long,
+        help = "Leave the fresh execution and attached robot running without opening the terminal view."
+    )]
+    pub(crate) detach: bool,
 }
 
 #[derive(Debug, Args)]
@@ -74,7 +83,7 @@ impl Simulation {
             self.command,
             SimulationSubcommand::Run(_)
                 | SimulationSubcommand::Open(_)
-                | SimulationSubcommand::Connect(_)
+                | SimulationSubcommand::Connect(SimulationConnect { detach: false, .. })
         )
     }
 
@@ -99,8 +108,15 @@ impl Simulation {
                     app,
                     &command.instance,
                     command.spawn.as_deref(),
+                    command.detach,
                 )
                 .await
+            }
+            SimulationSubcommand::Pause(command) => {
+                crate::application::simulation::pause_command(app, &command.instance).await
+            }
+            SimulationSubcommand::Resume(command) => {
+                crate::application::simulation::resume_command(app, &command.instance).await
             }
             SimulationSubcommand::Status(command) => {
                 crate::application::simulation::status_command(app, &command.instance).await
@@ -124,7 +140,7 @@ mod tests {
 
     use crate::cli::args::{Cli, RootCommand};
 
-    use super::SimulationSubcommand;
+    use super::{SimulationConnect, SimulationSubcommand};
 
     fn simulation(args: &[&str]) -> SimulationSubcommand {
         let cli = Cli::try_parse_from(args).expect("command parses");
@@ -163,6 +179,34 @@ mod tests {
                 "loading-bay",
             ]),
             SimulationSubcommand::Connect(_)
+        ));
+        assert!(matches!(
+            simulation(&[
+                "phoxal",
+                "simulation",
+                "connect",
+                "0123456789abcdef0123456789abcdef",
+                "--detach",
+            ]),
+            SimulationSubcommand::Connect(SimulationConnect { detach: true, .. })
+        ));
+        assert!(matches!(
+            simulation(&[
+                "phoxal",
+                "simulation",
+                "pause",
+                "0123456789abcdef0123456789abcdef",
+            ]),
+            SimulationSubcommand::Pause(_)
+        ));
+        assert!(matches!(
+            simulation(&[
+                "phoxal",
+                "simulation",
+                "resume",
+                "0123456789abcdef0123456789abcdef",
+            ]),
+            SimulationSubcommand::Resume(_)
         ));
         assert!(matches!(
             simulation(&[
@@ -225,13 +269,6 @@ mod tests {
                 "world.yaml",
                 "--speed",
                 "1.0",
-            ],
-            vec![
-                "phoxal",
-                "simulation",
-                "connect",
-                "0123456789abcdef0123456789abcdef",
-                "--detach",
             ],
         ] {
             assert!(Cli::try_parse_from(args).is_err());

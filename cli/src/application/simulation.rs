@@ -43,6 +43,7 @@ struct StartedWorld {
 struct ConnectionIntent {
     spawn: Option<SpawnId>,
     target: super::lifecycle::Target,
+    detach: bool,
 }
 
 enum ConnectedSimulationEnding {
@@ -51,7 +52,7 @@ enum ConnectedSimulationEnding {
 }
 
 pub(crate) async fn run_command(app: &AppContext, world: &Path, spawn: Option<&str>) -> Result<()> {
-    let intent = connection_intent(app, spawn)?;
+    let intent = connection_intent(app, spawn, false)?;
     let started = start_world(app, world).await?;
     connect_world(
         app,
@@ -82,8 +83,9 @@ pub(crate) async fn connect_command(
     app: &AppContext,
     instance: &str,
     spawn: Option<&str>,
+    detach: bool,
 ) -> Result<()> {
-    connect_world(app, instance, connection_intent(app, spawn)?, None).await
+    connect_world(app, instance, connection_intent(app, spawn, detach)?, None).await
 }
 
 pub(crate) async fn status_command(_app: &AppContext, instance: &str) -> Result<()> {
@@ -146,6 +148,24 @@ pub(crate) async fn stop_command(_app: &AppContext, instance: &str) -> Result<()
     let registration = stores.registry.resolve(instance)?;
     stop_world(registration, &stores).await?;
     println!("stopped world {instance}");
+    Ok(())
+}
+
+pub(crate) async fn pause_command(_app: &AppContext, instance: &str) -> Result<()> {
+    control_world(instance, WorldSessionControlRequest::Pause).await
+}
+
+pub(crate) async fn resume_command(_app: &AppContext, instance: &str) -> Result<()> {
+    control_world(instance, WorldSessionControlRequest::Resume).await
+}
+
+async fn control_world(instance: &str, operation: WorldSessionControlRequest) -> Result<()> {
+    let stores = Stores::discover()?;
+    let registration = stores.registry.resolve(instance)?;
+    let client = connect_verified(&registration).await?;
+    let state = client.control(operation).await?;
+    ensure_state_matches_registration(&state, &registration)?;
+    print_live_status(&state);
     Ok(())
 }
 
@@ -323,13 +343,21 @@ async fn rollback_host(host: LaunchedWorldHost, error: anyhow::Error) -> anyhow:
     }
 }
 
-fn connection_intent(app: &AppContext, spawn: Option<&str>) -> Result<ConnectionIntent> {
+fn connection_intent(
+    app: &AppContext,
+    spawn: Option<&str>,
+    detach: bool,
+) -> Result<ConnectionIntent> {
     let spawn = spawn
         .map(SpawnId::new)
         .transpose()
         .context("invalid world spawn name")?;
     let target = super::lifecycle::Target::resolve(None, app.project.root())?;
-    Ok(ConnectionIntent { spawn, target })
+    Ok(ConnectionIntent {
+        spawn,
+        target,
+        detach,
+    })
 }
 
 async fn connect_world(
@@ -384,7 +412,11 @@ async fn connect_fresh_execution(
     intent: ConnectionIntent,
     mut started: Option<StartedWorld>,
 ) -> Result<()> {
-    let ConnectionIntent { spawn, target } = intent;
+    let ConnectionIntent {
+        spawn,
+        target,
+        detach,
+    } = intent;
     let startup = super::startup::Startup::begin(app, &target.project, Mode::Simulation);
     let prepared =
         match super::lifecycle::prepare_driver_free_execution(app, &target, &startup).await {
@@ -459,6 +491,15 @@ async fn connect_fresh_execution(
         started.host.detach();
     }
     startup.ready();
+    if detach {
+        launched.detach();
+        app.ui.success(format!(
+            "robot execution {execution} is active; world physics remains paused. Resume with `phoxal simulation resume {}`",
+            registration.instance
+        ));
+        report_world_commands(app, registration.instance);
+        return Ok(());
+    }
     let outcome =
         super::lifecycle::drive_launched_session(app, &target, launched, Mode::Simulation).await?;
     if outcome == phoxal_cli_ui::AttachmentOutcome::Detached {
@@ -480,7 +521,7 @@ async fn connect_fresh_execution(
 
 fn report_world_commands(app: &AppContext, instance: phoxal::model::world::WorldInstanceId) {
     app.ui.info(format!(
-        "inspect the independent world with `phoxal simulation status {instance}`; while live, use `phoxal simulation open {instance}` or `phoxal simulation stop {instance}`"
+        "world physics is independent of robot execution. Inspect it with `phoxal simulation status {instance}`, control it with `phoxal simulation pause {instance}` or `phoxal simulation resume {instance}`, open the terminal view with `phoxal simulation open {instance}`, or stop it with `phoxal simulation stop {instance}`"
     ));
 }
 

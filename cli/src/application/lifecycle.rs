@@ -177,6 +177,12 @@ impl LaunchedSession {
         OwnedSession::new(self.record.clone(), self.paths.clone(), self.mode)
     }
 
+    /// Release local launch ownership after a simulation member becomes Active.
+    ///
+    /// The supervisor, runtimes, and session record deliberately outlive this
+    /// command. The normal `stop` path retains authoritative cleanup.
+    pub(crate) fn detach(self) {}
+
     /// Refuse attachment while any physical driver is already present.
     ///
     /// A fresh simulation execution launches only the brain and services. The
