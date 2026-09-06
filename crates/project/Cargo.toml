@@ -10,13 +10,10 @@ publish = ["phoxal-internal"]
 anyhow = { workspace = true }
 dirs = { workspace = true }
 flate2 = { workspace = true }
-heck = { workspace = true }
 hex = { workspace = true }
 jsonschema = { workspace = true }
 libc = { workspace = true }
-nalgebra = { workspace = true }
 object = { workspace = true }
-pathdiff = { workspace = true }
 phoxal = { workspace = true }
 phoxal-cli-catalog = { workspace = true }
 phoxal-cli-host = { workspace = true }
@@ -29,7 +26,6 @@ sha2 = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
-webots-proto = { workspace = true }
 
 [dev-dependencies]
 object = { workspace = true, features = ["write"] }

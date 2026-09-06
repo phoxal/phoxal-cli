@@ -1,6 +1,6 @@
 //! The shared attach-and-drive-the-TUI path.
 //!
-//! `run`, `attach`, and `simulation webots run` all end here: one attachment,
+//! `run`, `attach`, and `simulation connect` all end here: one attachment,
 //! one terminal application, one set of effects routed back to the supervisor
 //! API. The commands differ in how they *get* an execution to attach to, never
 //! in how they attach.
@@ -23,22 +23,6 @@ const UI_INGRESS_CAPACITY: usize = 256;
 const EFFECT_CAPACITY: usize = 64;
 const DIAGNOSTIC_CAPACITY: usize = 256;
 const SESSION_SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
-
-/// Whether leaving this session may leave the execution running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Detachable {
-    /// A real execution: `q` detaches and the supervisor keeps running.
-    Yes,
-    /// A simulation session: this client owns Webots, so leaving would strand
-    /// a simulator with no operator. `q` ends the whole session.
-    No,
-}
-
-impl Detachable {
-    const fn allows_detach(self) -> bool {
-        matches!(self, Self::Yes)
-    }
-}
 
 /// Terminal evidence from a supervisor process owned by the calling command.
 ///
@@ -66,7 +50,6 @@ pub(crate) async fn drive(
     app: &AppContext,
     project: &Path,
     session: Attachment,
-    detachable: Detachable,
     ownership: SessionOwnership,
 ) -> Result<AttachmentOutcome> {
     let SessionOwnership {
@@ -104,7 +87,6 @@ pub(crate) async fn drive(
     let options = UiOptions {
         title: terminal_title(project),
         theme: app.output.theme,
-        detachable: detachable.allows_detach(),
         stoppable,
     };
     let ui = phoxal_cli_ui::run(
@@ -142,8 +124,7 @@ pub(crate) async fn drive(
             }
             // External termination is not a stop request. The supervisor is
             // durable and outside this process group, so the client leaves and
-            // the execution continues - except in a simulation session, where
-            // the UI turns leaving into a stop because this client owns Webots.
+            // the execution continues.
             _ = terminates.recv() => {
                 if send_input(&ingress_tx, SessionInput::Terminate).await.is_err() {
                     break (&mut ui).await;
@@ -208,6 +189,11 @@ pub(crate) async fn drive(
             }
             effect = guaranteed_rx.recv(), if guaranteed_open => {
                 if let Some(effect) = effect {
+                    if matches!(effect, Effect::StopSession) {
+                        // Confirmed stop takes over reaping. Its completion is authoritative;
+                        // the child watcher must not reinterpret ECHILD as an execution fault.
+                        owned_supervisor_exit = None;
+                    }
                     spawn_effect(
                         &mut effect_tasks,
                         &mut confirmed_stop_tasks,
@@ -222,6 +208,9 @@ pub(crate) async fn drive(
             }
             effect = command_rx.recv(), if commands_open => {
                 if let Some(effect) = effect {
+                    if matches!(effect, Effect::StopSession) {
+                        owned_supervisor_exit = None;
+                    }
                     spawn_effect(
                         &mut effect_tasks,
                         &mut confirmed_stop_tasks,

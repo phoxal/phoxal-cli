@@ -229,7 +229,8 @@ mod tests {
             [
                 "robot.schema.json",
                 "component.schema.json",
-                "simulation.schema.json"
+                "simulation.schema.json",
+                "world.schema.json"
             ]
         );
     }

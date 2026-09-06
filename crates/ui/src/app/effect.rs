@@ -8,10 +8,10 @@ pub struct DeviceId(pub String);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    /// End the session this client launched: its runtimes, then its
-    /// supervisor. There is no restart beside it and no stop that reaches a
-    /// remote execution - the supervisor starts nothing, so it stops nothing,
-    /// and a client that launched no process has none to end.
+    /// End the session this client launched using its mode-specific process
+    /// ownership order. There is no restart beside it and no stop that reaches
+    /// a remote execution - the supervisor starts nothing, so it stops
+    /// nothing, and a client that launched no process has none to end.
     StopSession,
     InputSelect(DeviceId),
     InputEnable(bool),
@@ -29,8 +29,7 @@ pub struct EffectSenders {
 /// How an attachment session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachmentOutcome {
-    /// The client left; everything keeps running. This is what `q` means in a
-    /// detachable session.
+    /// The client left with `q`; everything keeps running.
     Detached,
     /// The operator ended the session this client launched, and it is down.
     SessionStopped,

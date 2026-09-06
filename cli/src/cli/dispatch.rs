@@ -15,7 +15,11 @@ impl RootCommand {
     /// `start` is the headless verb - it launches, waits for readiness, and
     /// returns without ever attaching.
     fn requires_terminal(&self) -> bool {
-        matches!(self, Self::Attach(_) | Self::Run(_) | Self::Simulation(_))
+        match self {
+            Self::Attach(_) | Self::Run(_) => true,
+            Self::Simulation(command) => command.requires_terminal(),
+            _ => false,
+        }
     }
 
     async fn run(&self, app: &AppContext) -> Result<()> {
@@ -71,7 +75,19 @@ mod tests {
         for attaching in [
             vec!["phoxal", "attach"],
             vec!["phoxal", "run"],
-            vec!["phoxal", "simulation", "webots", "run", "default"],
+            vec!["phoxal", "simulation", "run", "world.yaml"],
+            vec![
+                "phoxal",
+                "simulation",
+                "open",
+                "0123456789abcdef0123456789abcdef",
+            ],
+            vec![
+                "phoxal",
+                "simulation",
+                "connect",
+                "0123456789abcdef0123456789abcdef",
+            ],
         ] {
             let cli = Cli::try_parse_from(attaching.clone()).unwrap();
             assert!(
@@ -85,6 +101,26 @@ mod tests {
             vec!["phoxal", "stop"],
             vec!["phoxal", "logs"],
             vec!["phoxal", "build"],
+            vec!["phoxal", "simulation", "start", "world.yaml"],
+            vec![
+                "phoxal",
+                "simulation",
+                "status",
+                "0123456789abcdef0123456789abcdef",
+            ],
+            vec![
+                "phoxal",
+                "simulation",
+                "logs",
+                "0123456789abcdef0123456789abcdef",
+            ],
+            vec!["phoxal", "simulation", "list"],
+            vec![
+                "phoxal",
+                "simulation",
+                "stop",
+                "0123456789abcdef0123456789abcdef",
+            ],
         ] {
             let cli = Cli::try_parse_from(headless.clone()).unwrap();
             assert!(

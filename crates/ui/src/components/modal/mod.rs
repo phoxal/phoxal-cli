@@ -20,7 +20,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
             " Help ",
             format!(
                 "Enter descends from tabs to panels to content. Esc restores the previous depth. Panel-local shortcuts work only after entering that panel.\n\nRuntimes: arrows, Enter detail, l logs\nLogs: filters / f s, stream arrows/End/Space\nBus: / s a and arrows\nInput: arrows, Enter select, e enable, x disable, r rescan\nCtrl+C: stop confirmation; {}",
-                quit_meaning(model.detachable)
+                QUIT_MEANING
             ),
         ),
         ModalId::SessionInfo => {
@@ -41,9 +41,9 @@ pub fn render(frame: &mut Frame, area: Rect, model: &AppModel, theme: Theme) {
         ModalId::ConfirmStop => (
             " Stop session? ",
             format!(
-                "Enter stops every runtime this client started and then its supervisor. Esc \
+                "Enter stops this execution and every runtime this client started. Esc \
                  cancels. {}",
-                quit_meaning(model.detachable)
+                QUIT_MEANING
             ),
         ),
     };
@@ -67,14 +67,7 @@ fn sanitize(value: &str) -> String {
     crate::format::sanitize_terminal_text(value)
 }
 
-/// The sentence that spells out what leaving costs in this session.
-const fn quit_meaning(detachable: bool) -> &'static str {
-    if detachable {
-        "closing the UI with q only detaches - the supervisor keeps running."
-    } else {
-        "q ends the simulation session: the execution is stopped and Webots is closed."
-    }
-}
+const QUIT_MEANING: &str = "closing the UI with q only detaches - the supervisor keeps running.";
 
 #[cfg(test)]
 mod tests {
@@ -117,16 +110,10 @@ mod tests {
         }
     }
 
-    /// Both modals explain leaving in this session's own terms; neither may
-    /// promise a detach a simulation session cannot perform.
     #[test]
-    fn the_modals_explain_what_leaving_costs_in_this_session() {
-        assert!(quit_meaning(true).contains("only detaches"));
-        assert!(quit_meaning(false).contains("ends the simulation session"));
-
+    fn the_modals_explain_that_q_only_detaches() {
         for modal in [ModalId::Help, ModalId::ConfirmStop] {
             let model = AppModel {
-                detachable: false,
                 route: FocusRoute::Tabs {
                     page: PageId::Overview,
                     candidate: PageId::Overview,
@@ -154,11 +141,7 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect::<String>();
-            assert!(
-                contents.contains("ends the simulation session"),
-                "{contents}"
-            );
-            assert!(!contents.contains("only detaches"), "{contents}");
+            assert!(contents.contains("only detaches"), "{contents}");
         }
     }
 }

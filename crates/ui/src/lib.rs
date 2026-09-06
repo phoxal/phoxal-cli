@@ -22,6 +22,8 @@ pub mod components;
 pub mod format;
 pub mod terminal;
 pub mod theme;
+pub mod world;
 
 pub use app::{AttachmentOutcome, Effect, EffectSenders, SessionInput, UiOptions, run};
 pub use theme::{ColorCapability, Role, Theme};
+pub use world::{WorldInput, WorldOutcome, WorldUiOptions, run as run_world};

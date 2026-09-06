@@ -13,8 +13,9 @@
 //!
 //! The command surface is:
 //!
-//! - `run`/`start`/`simulation webots run <world>` - build and publish a fresh
-//!   bundle, launch its framework supervisor, and (for `run`) attach;
+//! - `run`/`start` - build and publish a fresh robot bundle, then launch its
+//!   framework supervisor;
+//! - `simulation` - start, inspect, connect to, and stop local world sessions;
 //! - `attach`/`stop`/`status`/`logs` - existing executions only, no build and
 //!   no project mutation;
 //! - `build`/`validate`/`deploy`/`install`/`rollback`/`service`/`schema` - the
@@ -76,7 +77,7 @@ fn init_tracing() {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("warn,zenoh=error,zenoh_link_unixsock_stream=error"));
     // `SessionAwareWriter` routes every line through whichever `run`/
-    // `simulation webots run` session (if any) has called `cli::output::diagnostics::install`
+    // `simulation run` session (if any) has called `cli::output::diagnostics::install`
     // at the moment of the write, falling back to the normal stderr write
     // otherwise (see that module's own docs) - installing it here, ONCE for
     // the process's whole lifetime, is what keeps a live `tracing::warn!`

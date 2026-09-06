@@ -81,6 +81,8 @@ pub enum MaterializationDestination {
     BundleBin,
     /// The framework supervisor beside `bundle/`, never inside it.
     ReleaseRoot,
+    /// A local adapter executable that never enters a robot release.
+    HostTools,
 }
 
 impl MaterializationDestination {
@@ -283,7 +285,11 @@ pub fn build_install_args(
         // A development checkout has no published version to pin and no
         // registry to reach it through: the path IS the selection.
         MaterializeSource::Path(path) => {
-            vec!["--path".to_string(), path.display().to_string()]
+            vec![
+                "--path".to_string(),
+                path.display().to_string(),
+                "--force".to_string(),
+            ]
         }
     };
     args.push("--locked".to_string());

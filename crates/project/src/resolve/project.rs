@@ -199,6 +199,8 @@ fn official_service_ids() -> Vec<phoxal::model::identity::ServiceId> {
 /// Resolve authored component roots directly from `components/<id>/` or the
 /// exact locked registry package. Cargo workspace membership is deliberately
 /// irrelevant to definition discovery.
+/// The explicit framework development override replaces official definition
+/// roots together with their runtime source, without overriding project-local components.
 struct ComponentResolutionContext<'a> {
     project_root: &'a Path,
     registry_cache_root: &'a Path,
@@ -226,12 +228,13 @@ fn resolve_components(
         let http = crate::registry_package::HttpClient::new()?;
         let cache =
             crate::registry_package::PackageCache::new(context.registry_cache_root.to_path_buf());
-        resolve_registry_component_roots(
+        resolve_official_component_roots(
             &registry_component_ids,
             &http,
             &cache,
             context.train,
             context.offline,
+            crate::build::overlay::framework_path().as_deref(),
         )?
     };
 
@@ -284,13 +287,37 @@ fn resolve_components(
     Ok(components)
 }
 
-fn resolve_registry_component_roots(
+fn resolve_official_component_roots(
     component_ids: &BTreeSet<String>,
     http: &dyn crate::registry_package::RegistryHttp,
     cache: &crate::registry_package::PackageCache,
     train: &str,
     offline: bool,
+    framework_checkout: Option<&Path>,
 ) -> Result<BTreeMap<String, std::path::PathBuf>> {
+    if let Some(checkout) = framework_checkout {
+        let checkout = checkout
+            .canonicalize()
+            .context("invalid framework development checkout")?;
+        return component_ids
+            .iter()
+            .map(|id| {
+                let root = checkout
+                    .join("components")
+                    .join(id)
+                    .canonicalize()
+                    .with_context(|| {
+                        format!("framework development checkout has no component '{id}'")
+                    })?;
+                anyhow::ensure!(
+                    root.starts_with(&checkout) && root.join("component.yaml").is_file(),
+                    "framework component '{id}' must contain component.yaml inside {}",
+                    checkout.display()
+                );
+                Ok((id.clone(), root))
+            })
+            .collect();
+    }
     component_ids
         .iter()
         .map(|id| {
@@ -955,9 +982,9 @@ robot:
         Ok(())
     }
 
-    /// The official set a resolution produces is services only. The Webots
-    /// controller used to be resolved beside them as a simulator artifact; it
-    /// is a host tool on its own train now and never enters a robot graph.
+    /// The official set a resolution produces is services only. Webots
+    /// adapter binaries are exact-framework-train host tools and never enter a
+    /// robot graph.
     #[test]
     fn resolution_never_produces_a_simulator_runtime() -> anyhow::Result<()> {
         let robot = minimal_robot("")?;
@@ -976,7 +1003,7 @@ robot:
                 .platform_runtimes
                 .iter()
                 .any(|runtime| runtime.package.contains("simulator")),
-            "the Webots controller is not a catalog artifact"
+            "Webots adapter host tools are not catalog artifacts"
         );
         Ok(())
     }
@@ -1275,6 +1302,50 @@ robot:
     }
 
     #[test]
+    fn development_component_assets_use_the_owner_checkout_without_registry_fallback()
+    -> anyhow::Result<()> {
+        struct NoHttp;
+        impl crate::registry_package::RegistryHttp for NoHttp {
+            fn get(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+                anyhow::bail!("development source must not request {url}")
+            }
+        }
+        let checkout = tempfile::tempdir()?;
+        let root = checkout.path().join("components/gnss");
+        fs::create_dir_all(&root)?;
+        let definition = "schema: phoxal/component/v0\ncapabilities: {}\n";
+        fs::write(root.join("component.yaml"), definition)?;
+        let cache_root = tempfile::tempdir()?;
+        let cache = crate::registry_package::PackageCache::new(cache_root.path().to_path_buf());
+        let ids = BTreeSet::from(["gnss".to_owned()]);
+        let roots = resolve_official_component_roots(
+            &ids,
+            &NoHttp,
+            &cache,
+            "0.68.0",
+            true,
+            Some(checkout.path()),
+        )?;
+        assert_eq!(roots["gnss"], root.canonicalize()?);
+        assert_eq!(
+            fs::read_to_string(roots["gnss"].join("component.yaml"))?,
+            definition
+        );
+        let missing = BTreeSet::from(["absent".to_owned()]);
+        let error = resolve_official_component_roots(
+            &missing,
+            &NoHttp,
+            &cache,
+            "0.68.0",
+            false,
+            Some(checkout.path()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no component 'absent'"));
+        Ok(())
+    }
+
+    #[test]
     fn registry_component_resolution_fetches_distinct_ids_once_and_keeps_excluded_driver_assets()
     -> anyhow::Result<()> {
         use std::collections::{BTreeMap, BTreeSet};
@@ -1348,10 +1419,10 @@ robot:
         let cache_root = tempfile::tempdir()?;
         let cache = crate::registry_package::PackageCache::new(cache_root.path().to_path_buf());
         let ids = BTreeSet::from(["left".to_string(), "right".to_string()]);
-        let roots = resolve_registry_component_roots(&ids, &http, &cache, version, false)?;
+        let roots = resolve_official_component_roots(&ids, &http, &cache, version, false, None)?;
         assert_eq!(roots.len(), 2);
         assert_eq!(http.downloads.load(Ordering::SeqCst), 2);
-        let repeated = resolve_registry_component_roots(&ids, &http, &cache, version, false)?;
+        let repeated = resolve_official_component_roots(&ids, &http, &cache, version, false, None)?;
         assert_eq!(repeated, roots);
         assert_eq!(http.downloads.load(Ordering::SeqCst), 2);
 
@@ -1360,7 +1431,7 @@ robot:
             project.path().join(".phoxal/cache/registry"),
         );
         let one_id = BTreeSet::from(["left".to_string()]);
-        resolve_registry_component_roots(&one_id, &http, &project_cache, version, false)?;
+        resolve_official_component_roots(&one_id, &http, &project_cache, version, false, None)?;
         let robot = minimal_robot_with_components(
             r#"
     left_drive:

@@ -122,7 +122,17 @@ mod tests {
     use super::*;
 
     fn epoch() -> AttachmentEpoch {
-        AttachmentEpoch::new(ExecutionId::mint())
+        AttachmentEpoch::new(
+            ExecutionId::parse("10000000000000000000000000000001")
+                .expect("a canonical fixture execution id"),
+        )
+    }
+
+    fn previous_epoch() -> AttachmentEpoch {
+        AttachmentEpoch::new(
+            ExecutionId::parse("10000000000000000000000000000002")
+                .expect("a canonical fixture execution id"),
+        )
     }
 
     fn row(index: usize) -> LogRow {
@@ -162,7 +172,7 @@ mod tests {
     /// one belongs to a run that has ended.
     #[test]
     fn a_row_from_a_previous_execution_is_rejected() {
-        let old = epoch();
+        let old = previous_epoch();
         let new = epoch();
         let mut store = LogStore::new(new);
         assert_eq!(store.record(old, row(1)), None);

@@ -34,10 +34,9 @@
 //! building every source/override binary, the source check, and the manifest
 //! write - runs against [`candidate::StagedCandidate::path`], a path nobody
 //! executes from yet. Only [`finalize_release`] ever touches the live path, and
-//! it is always the last call - see `run::prepare::refresh_staging` and
-//! `simulation::prepare_simulation`. It adds the supervisor before it
-//! publishes, so a published release always has both halves and they always
-//! match.
+//! it is always the last call - see `run::prepare::refresh_staging`. It adds
+//! the supervisor before it publishes, so a published release always has both
+//! halves and they always match.
 
 mod candidate;
 mod manifest;

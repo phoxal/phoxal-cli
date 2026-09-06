@@ -24,14 +24,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use phoxal::bus::BusError;
+use phoxal::participant::metadata::ParticipantKind;
 use phoxal::session::{ConnectError, ConnectOptions, Session};
+use phoxal::supervisor::api::execution::ProcessState;
 use phoxal::supervisor::api::execution::Snapshot;
 use phoxal_cli_observation::GraphSplit;
 
 use super::launcher::{
     self, LaunchedRuntime, OwnedSession, RecordedProcess, RecordedRuntime, Selection, SessionRecord,
 };
-use super::session::{self, Detachable, SessionOwnership};
+use super::session::{self, SessionOwnership};
 use super::startup::Startup;
 use super::summary::{SessionSummary, attachment_ending};
 use super::supervisor::{self, LaunchedSupervisor};
@@ -102,14 +104,14 @@ pub(crate) async fn run_command(
 ) -> Result<()> {
     let target = Target::resolve(requested_target, app.project.root())?;
     let startup = Startup::begin(app, &target.project, Mode::Native);
-    let launched = match open_fresh_execution(app, &target, &options, &startup, false).await {
+    let launched = match open_fresh_execution(app, &target, &options, &startup).await {
         Ok(launched) => launched,
         Err(error) => return Err(startup.failed(error)),
     };
     // The dashboard takes the terminal only from here: the graph is up, and
     // the checklist has already given the terminal back.
     startup.ready();
-    let outcome = drive_launched_session(app, &target, launched).await?;
+    let outcome = drive_launched_session(app, &target, launched, Mode::Native).await?;
     report_outcome(app, &target, &outcome)
 }
 
@@ -120,7 +122,7 @@ pub(crate) async fn start_command(
 ) -> Result<()> {
     let target = Target::resolve(requested_target, app.project.root())?;
     let startup = Startup::begin(app, &target.project, Mode::Native);
-    let launched = match open_fresh_execution(app, &target, &options, &startup, false).await {
+    let launched = match open_fresh_execution(app, &target, &options, &startup).await {
         Ok(launched) => launched,
         Err(error) => return Err(startup.failed(error)),
     };
@@ -154,11 +156,8 @@ pub(crate) struct LaunchedSession {
     /// checklist can say why an absent runtime is absent.
     pub(crate) children: tokio::task::JoinHandle<()>,
     record: SessionRecord,
-    /// The bundle every runtime of this session was launched against. It is a
-    /// live-session fact, not part of the record `stop` reads: what ends a
-    /// session is signalling pids.
-    bundle: PathBuf,
     paths: phoxal_cli_host::paths::RuntimePaths,
+    mode: Mode,
     /// Held for the whole session: the bundle being executed is the one this
     /// command just published, and a concurrent build would replace it.
     _lock: ProjectLock,
@@ -175,12 +174,42 @@ impl LaunchedSession {
     }
 
     pub(crate) fn owned(&self) -> OwnedSession {
-        OwnedSession::new(self.record.clone(), self.paths.clone())
+        OwnedSession::new(self.record.clone(), self.paths.clone(), self.mode)
     }
 
-    /// The bundle every runtime of this session was launched against.
-    pub(crate) fn bundle(&self) -> &Path {
-        &self.bundle
+    /// Release local launch ownership after a simulation member becomes Active.
+    ///
+    /// The supervisor, runtimes, and session record deliberately outlive this
+    /// command. The normal `stop` path retains authoritative cleanup.
+    pub(crate) fn detach(self) {}
+
+    /// Refuse attachment while any physical driver is already present.
+    ///
+    /// A fresh simulation execution launches only the brain and services. The
+    /// world host is the sole authority allowed to add simulated controllers,
+    /// so a driver lease observed before world attachment is an ownership
+    /// violation, never something to work around.
+    pub(crate) fn ensure_drivers_absent(&self) -> Result<()> {
+        let snapshot = self
+            .session
+            .handle()
+            .snapshot()
+            .context("the fresh execution published no supervisor snapshot")?;
+        let present = snapshot
+            .processes
+            .iter()
+            .filter(|process| {
+                process.kind == ParticipantKind::Driver && process.state == ProcessState::Present
+            })
+            .map(|process| process.participant.to_string())
+            .collect::<Vec<_>>();
+        if present.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "driver-free simulation launch observed physical driver lease(s) before world attachment: {}",
+            present.join(", ")
+        )
     }
 }
 
@@ -191,10 +220,73 @@ async fn open_fresh_execution(
     target: &Target,
     options: &RunOptions,
     startup: &Startup,
-    simulation: bool,
 ) -> Result<LaunchedSession> {
-    let launched = launch_execution(app, target, options, startup, simulation).await?;
+    let launched = launch_execution(app, target, LaunchPolicy::Native(options), startup).await?;
     await_session_ready(launched, startup).await
+}
+
+/// Launch a fresh monotonic robot execution with every physical driver omitted.
+///
+/// This is the robot half of `simulation connect`. It deliberately shares the
+/// ordinary build, supervisor, participant, record, readiness, and cleanup path
+/// rather than maintaining a second simulation launch implementation.
+pub(crate) struct PreparedDriverFreeExecution {
+    release: phoxal_cli_project::ReleaseLayout,
+    lock: ProjectLock,
+    admission: phoxal_cli_project::FullSimulationAdmission,
+}
+
+/// Build one release and prove that its exact compiled robot is complete for
+/// full simulation before any execution process or session record can exist.
+pub(crate) async fn prepare_driver_free_execution(
+    app: &AppContext,
+    target: &Target,
+    startup: &Startup,
+) -> Result<PreparedDriverFreeExecution> {
+    let (release, lock) = build_and_publish(app, target, startup).await?;
+    let admission = phoxal_cli_project::validate_full_simulation_bundle(&release.bundle)?;
+    Ok(PreparedDriverFreeExecution {
+        release,
+        lock,
+        admission,
+    })
+}
+
+/// Consume a successfully admitted release and launch it exactly once.
+pub(crate) async fn launch_driver_free_execution(
+    target: &Target,
+    startup: &Startup,
+    prepared: PreparedDriverFreeExecution,
+) -> Result<LaunchedSession> {
+    let PreparedDriverFreeExecution {
+        release,
+        lock,
+        admission,
+    } = prepared;
+    anyhow::ensure!(
+        admission.bundle() == release.bundle,
+        "simulation admission belongs to {}, but launch prepared {}",
+        admission.bundle().display(),
+        release.bundle.display()
+    );
+    let launched =
+        launch_prepared_execution(target, LaunchPolicy::DriverFree, startup, release, lock).await?;
+    await_session_ready(launched, startup).await
+}
+
+#[derive(Clone, Copy)]
+enum LaunchPolicy<'a> {
+    Native(&'a RunOptions),
+    DriverFree,
+}
+
+impl LaunchPolicy<'_> {
+    const fn mode(self) -> Mode {
+        match self {
+            Self::Native(_) => Mode::Native,
+            Self::DriverFree => Mode::Simulation,
+        }
+    }
 }
 
 /// Everything up to and including the attachment: build, publish, start the
@@ -204,15 +296,26 @@ async fn open_fresh_execution(
 /// something between the launch and the wait can. A simulation is exactly that
 /// caller: nothing becomes present until Webots is stepping, and Webots is
 /// staged against the bundle this function just published.
-pub(crate) async fn launch_execution(
+async fn launch_execution(
     app: &AppContext,
     target: &Target,
-    options: &RunOptions,
+    policy: LaunchPolicy<'_>,
     startup: &Startup,
-    simulation: bool,
 ) -> Result<LaunchedSession> {
     let (release, lock) = build_and_publish(app, target, startup).await?;
-    let selection = resolve_selection(&release.bundle, options, simulation)?;
+    launch_prepared_execution(target, policy, startup, release, lock).await
+}
+
+/// Spawn processes only from a release that its caller has already prepared.
+async fn launch_prepared_execution(
+    target: &Target,
+    policy: LaunchPolicy<'_>,
+    startup: &Startup,
+    release: phoxal_cli_project::ReleaseLayout,
+    lock: ProjectLock,
+) -> Result<LaunchedSession> {
+    let mode = policy.mode();
+    let selection = resolve_selection(&release.bundle, policy)?;
 
     startup.step(StepId::Supervisor, "waiting for the supervisor");
     let paths = target.paths();
@@ -223,13 +326,7 @@ pub(crate) async fn launch_execution(
     await_supervisor(target, &mut supervisor, HANDSHAKE_BUDGET).await?;
     startup.complete(StepId::Supervisor, format!("router on {}", target.endpoint));
 
-    let runtimes = launcher::launch(
-        &release.bundle,
-        &target.endpoint,
-        simulation,
-        &selection,
-        &paths,
-    )?;
+    let runtimes = launcher::launch(&release.bundle, &target.endpoint, &selection, &paths)?;
     let record = SessionRecord {
         endpoint: target.endpoint.clone(),
         supervisor: RecordedProcess {
@@ -266,8 +363,8 @@ pub(crate) async fn launch_execution(
         supervisor,
         children,
         record,
-        bundle: release.bundle,
         paths,
+        mode,
         _lock: lock,
     };
 
@@ -302,22 +399,27 @@ pub(crate) async fn await_session_ready(
     Ok(launched)
 }
 
+/// End every process and attachment owned by a launch that did not reach its
+/// commit point.
+pub(crate) async fn rollback_launched_session(launched: LaunchedSession) -> Result<()> {
+    let owned = launched.owned();
+    launched.children.abort();
+    let stopped = owned.stop().await;
+    launched.session.shutdown().await;
+    stopped.context("failed to roll back the fresh execution")
+}
+
 /// Which runtimes this launch starts, validated against the bundle's own set.
-fn resolve_selection(bundle: &Path, options: &RunOptions, simulation: bool) -> Result<Selection> {
+fn resolve_selection(bundle: &Path, policy: LaunchPolicy<'_>) -> Result<Selection> {
+    let options = match policy {
+        LaunchPolicy::Native(options) => options,
+        LaunchPolicy::DriverFree => return Ok(Selection::DriversOff),
+    };
     let available = phoxal_cli_project::bundle_runtimes(bundle)?
         .into_iter()
         .filter(|runtime| runtime.role == phoxal_cli_project::RuntimeRole::Driver)
         .map(|runtime| runtime.participant_id)
         .collect::<BTreeSet<_>>();
-    if simulation {
-        // Webots simulates the components, so a physical driver beside it would
-        // be a second thing driving the same hardware model.
-        anyhow::ensure!(
-            !options.drivers_off && options.drivers_subset.is_empty(),
-            "a simulation never starts component drivers; --drivers/--driver do not apply"
-        );
-        return Ok(Selection::DriversOff);
-    }
     Selection::resolve(
         options.drivers_off,
         options.drivers_subset.clone(),
@@ -345,6 +447,7 @@ async fn build_and_publish(
     // authority. A supervisor that has taken its lock but has not yet answered
     // connect is live, and this is what closes that startup window.
     crate::lock::refuse_while_execution_is_live(&target.project)?;
+    refuse_unconsumed_session_record(&target.paths())?;
 
     let runtime_target =
         phoxal_cli_project::resolve_target(Some(&target.project), &target.project)?;
@@ -362,6 +465,21 @@ async fn build_and_publish(
     Ok((prepared.release, lock))
 }
 
+/// A dead supervisor does not prove that its independently owned runtimes
+/// exited. Preserve their cleanup authority before rebuilding or launching.
+fn refuse_unconsumed_session_record(paths: &phoxal_cli_host::paths::RuntimePaths) -> Result<()> {
+    let path = launcher::record_path(paths);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+        Ok(_) => bail!(
+            "previous session cleanup record remains at {}; run `phoxal stop` for this project \
+             before starting again. Refusing to overwrite ownership of potentially surviving runtimes",
+            path.display()
+        ),
+    }
+}
+
 /// What the prepared release actually contains, counted from the release
 /// itself rather than from the build events that produced it: an unchanged
 /// project skips every build event and still stages the same binaries.
@@ -374,11 +492,17 @@ pub(crate) fn staged_detail(release: &phoxal_cli_project::ReleaseLayout) -> Stri
 
 /// Drive a launched session's dashboard, watching its own supervisor as it
 /// goes, and end whatever is still running when it returns.
-async fn drive_launched_session(
+pub(crate) async fn drive_launched_session(
     app: &AppContext,
     target: &Target,
     launched: LaunchedSession,
+    mode: Mode,
 ) -> Result<phoxal_cli_ui::AttachmentOutcome> {
+    anyhow::ensure!(
+        launched.mode == mode,
+        "launched {:?} session cannot be driven as {mode:?}",
+        launched.mode
+    );
     let LaunchedSession {
         session,
         supervisor,
@@ -387,7 +511,7 @@ async fn drive_launched_session(
         paths,
         ..
     } = launched;
-    let owned = OwnedSession::new(record, paths.clone());
+    let owned = OwnedSession::new(record, paths.clone(), mode);
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     let (stop_watch_tx, stop_watch_rx) = tokio::sync::oneshot::channel();
     let supervisor = std::sync::Arc::new(tokio::sync::Mutex::new(supervisor));
@@ -401,7 +525,6 @@ async fn drive_launched_session(
         app,
         &target.project,
         session,
-        Detachable::Yes,
         SessionOwnership {
             owned: Some(owned.clone()),
             supervisor_exit: Some(exit_rx),
@@ -413,7 +536,17 @@ async fn drive_launched_session(
     children.abort();
     let _ = children.await;
 
-    let outcome = outcome?;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(match owned.stop().await {
+                Ok(()) => error,
+                Err(cleanup) => error.context(format!(
+                    "session UI failed and owned-process cleanup also failed: {cleanup:#}"
+                )),
+            });
+        }
+    };
     // Detaching leaves everything running - that is what detaching means. Every
     // other ending means the session is over, so nothing of it is left behind.
     if outcome != phoxal_cli_ui::AttachmentOutcome::Detached {
@@ -501,11 +634,9 @@ async fn probe(endpoint: &str) -> Result<Option<Session>> {
 /// Whether a transport failure at a local endpoint is simply nothing being
 /// there.
 ///
-/// A `unixsock-stream` endpoint *is* a filesystem path: with no socket file at
-/// it, nothing has ever bound it, and the transport failure that follows is
-/// that absence rather than a fault. The transport cannot tell the two apart -
-/// it reports the same "unable to connect to any of [...]" for a missing socket
-/// and for a broken one - so this checks the one local fact that decides it.
+/// A missing Unix socket or a socket inode left behind by a dead listener is
+/// absence. Probe only after a transport failure, preserve non-socket files,
+/// permission errors, and live listeners as concrete failures, and never unlink here.
 ///
 /// Both halves are required. Only a *transport* failure qualifies, because
 /// every other opening failure means an execution was already discovered, and
@@ -520,9 +651,21 @@ fn is_absent_local_endpoint(endpoint: &str, error: &anyhow::Error) -> bool {
     ) {
         return false;
     }
-    endpoint
-        .strip_prefix("unixsock-stream/")
-        .is_some_and(|path| !Path::new(path).exists())
+    let Some(path) = endpoint.strip_prefix("unixsock-stream/") else {
+        return false;
+    };
+    use std::os::unix::fs::FileTypeExt;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
+    };
+    metadata.file_type().is_socket()
+        && std::os::unix::net::UnixStream::connect(path).is_err_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        })
 }
 
 /// Classify an opening failure against the endpoint it was addressed to.
@@ -703,14 +846,8 @@ pub(crate) async fn attach_command(
     let (target, session) = open_existing(app, requested_target, endpoint, Feeds::All).await?;
     // An attachment owns nothing: it launched no process, so it cannot stop
     // one, and the dashboard does not offer a key that would only refuse.
-    let outcome = session::drive(
-        app,
-        &target.project,
-        session,
-        Detachable::Yes,
-        SessionOwnership::default(),
-    )
-    .await?;
+    let outcome =
+        session::drive(app, &target.project, session, SessionOwnership::default()).await?;
     report_outcome(app, &target, &outcome)
 }
 
@@ -904,10 +1041,15 @@ mod tests {
 
     fn connected() -> phoxal::session::ConnectedExecution {
         phoxal::session::ConnectedExecution {
-            execution: phoxal::identity::ExecutionId::mint(),
+            execution: execution(1),
             robot: RobotId::new("rover").expect("fixture robot"),
             framework: phoxal::version::FrameworkVersion::CURRENT,
         }
+    }
+
+    fn execution(seed: u8) -> phoxal::identity::ExecutionId {
+        phoxal::identity::ExecutionId::parse(&format!("1{:031x}", seed))
+            .expect("a canonical fixture execution id")
     }
 
     fn record() -> SessionRecord {
@@ -980,7 +1122,7 @@ mod tests {
             ConnectFailure::RetryableAbsence
         );
 
-        let execution = phoxal::identity::ExecutionId::mint();
+        let execution = execution(2);
         for fatal in [
             ConnectError::MultipleExecutions {
                 endpoint: "tcp/127.0.0.1:7447".to_string(),
@@ -1031,14 +1173,28 @@ mod tests {
             ConnectFailure::RetryableAbsence
         );
 
-        // The same transport failure against a socket that exists is a real
-        // failure: something is bound there and it did not answer.
+        // A non-socket file must never be treated as a disposable stale listener.
         std::fs::write(&socket, b"").unwrap();
         assert_eq!(
             classify_connect_at(&endpoint, &transport),
             ConnectFailure::Fatal
         );
         std::fs::remove_file(&socket).unwrap();
+
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert_eq!(
+            classify_connect_at(&endpoint, &transport),
+            ConnectFailure::Fatal
+        );
+        drop(listener);
+        assert!(
+            socket.exists(),
+            "a killed listener leaves its socket inode behind"
+        );
+        assert_eq!(
+            classify_connect_at(&endpoint, &transport),
+            ConnectFailure::RetryableAbsence
+        );
 
         // A discovered execution keeps its evidence even with no socket file.
         assert_eq!(
@@ -1075,7 +1231,7 @@ mod tests {
             ConnectError::MultipleExecutions {
                 endpoint: "tcp/127.0.0.1:7447".to_string(),
                 count: 2,
-                executions: vec![phoxal::identity::ExecutionId::mint()],
+                executions: vec![execution(3)],
             },
             ConnectError::IncompatibleFramework {
                 remote: phoxal::version::FrameworkVersion::new(0, 57, 0),
@@ -1134,6 +1290,83 @@ mod tests {
         assert!(message.contains("phoxal attach /tmp/rover"), "{message}");
         assert!(message.contains("phoxal stop /tmp/rover"), "{message}");
         assert!(message.contains(&target.endpoint), "{message}");
+    }
+
+    #[test]
+    fn restarting_never_overwrites_even_an_unreadable_cleanup_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let target =
+            Target::at_endpoint("tcp/127.0.0.1:1".to_owned(), directory.path().to_path_buf());
+        let paths = target.paths();
+        assert!(refuse_unconsumed_session_record(&paths).is_ok());
+        let record = launcher::record_path(&paths);
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, b"unreadable but still ownership evidence").unwrap();
+        let error = refuse_unconsumed_session_record(&paths)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("phoxal stop"));
+        assert_eq!(
+            std::fs::read(&record).unwrap(),
+            b"unreadable but still ownership evidence"
+        );
+    }
+
+    /// Simulation admission is a typed, single-use phase before the first
+    /// supervisor process and before `SessionRecord::write` can create
+    /// `.phoxal/run/session.json`.
+    #[test]
+    fn full_simulation_preflight_precedes_execution_and_session_creation() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let lifecycle = std::fs::read_to_string(root.join("src/application/lifecycle.rs"))
+            .expect("the lifecycle source is readable");
+        let simulation =
+            std::fs::read_to_string(root.join("src/application/simulation/connect.rs"))
+                .expect("the simulation connection source is readable");
+
+        let prepare = lifecycle
+            .split_once("pub(crate) async fn prepare_driver_free_execution(")
+            .expect("the driver-free preparation phase exists")
+            .1
+            .split_once("/// Consume a successfully admitted release")
+            .expect("the launch phase follows preparation")
+            .0;
+        assert!(
+            prepare.contains("validate_full_simulation_bundle"),
+            "driver-free preparation must validate its compiled bundle"
+        );
+        for forbidden in ["supervisor::spawn", "SessionRecord {", "record.write"] {
+            assert!(
+                !prepare.contains(forbidden),
+                "simulation validation must precede `{forbidden}`"
+            );
+        }
+
+        let connect = simulation
+            .split_once("async fn connect_fresh_execution(")
+            .expect("the fresh simulation connection exists")
+            .1
+            .split_once("\n}\n")
+            .expect("the connection function has a stable end")
+            .0;
+        let prepare_call = connect
+            .find("prepare_driver_free_execution")
+            .expect("simulation invokes the preflight");
+        let launch_call = connect
+            .find("launch_driver_free_execution")
+            .expect("simulation launches an admitted release");
+        assert!(prepare_call < launch_call);
+
+        let launch = lifecycle
+            .split_once("pub(crate) async fn launch_driver_free_execution(")
+            .expect("the driver-free launch exists")
+            .1
+            .split_once("#[derive(Clone, Copy)]")
+            .expect("the launch function has a stable end")
+            .0;
+        assert!(launch.contains("prepared: PreparedDriverFreeExecution"));
+        assert!(!launch.contains("build_and_publish"));
+        assert!(!launch.contains("validate_full_simulation_bundle"));
     }
 
     /// `attach`, `stop`, `status`, and `logs` are existing-execution only.

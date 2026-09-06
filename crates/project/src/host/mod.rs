@@ -1,3 +1,3 @@
-//! Host prerequisite discovery used by project preparation.
+//! Generic host prerequisite checks used by project workflows.
 
 pub mod doctor;

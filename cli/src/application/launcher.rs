@@ -30,6 +30,8 @@ use phoxal::identity::ParticipantId;
 use phoxal::participant::launch::LaunchCommand;
 use serde::{Deserialize, Serialize};
 
+use crate::cli::output::welcome::Mode;
+
 /// How often a signalled process is re-checked while waiting for it to go.
 const REAP_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -122,25 +124,17 @@ impl LaunchedRuntime {
 /// The flags themselves are the framework's, rendered by the encoder that sits
 /// beside the parser every participant binary compiles, so the two halves of
 /// the launch contract cannot drift apart across repositories. What stays here
-/// is the only decision this launcher makes about them: whether this run
-/// follows a simulated world clock.
+/// is the only local decision this launcher makes about them: which child
+/// process to execute. Time mode is supervisor state, never child argv.
 ///
 /// # Errors
 ///
 /// When the bundle names a runtime whose id is not a launch identity.
-fn argv(
-    runtime: &str,
-    bundle_root: &Path,
-    endpoint: &str,
-    simulation: bool,
-) -> Result<Vec<String>> {
+fn argv(runtime: &str, endpoint: &str) -> Result<Vec<String>> {
     let participant = ParticipantId::new(runtime.to_string()).with_context(|| {
         format!("the bundle names a runtime '{runtime}' whose id is not a launch identity")
     })?;
-    Ok(LaunchCommand::new(participant, bundle_root)
-        .connect(endpoint)
-        .simulation(simulation)
-        .argv())
+    Ok(LaunchCommand::for_rendezvous(participant, endpoint).argv())
 }
 
 /// Where one runtime's output is retained for this session.
@@ -161,7 +155,6 @@ pub(crate) fn runtime_log(paths: &phoxal_cli_host::paths::RuntimePaths, runtime:
 pub(crate) fn launch(
     bundle_root: &Path,
     endpoint: &str,
-    simulation: bool,
     selection: &Selection,
     paths: &phoxal_cli_host::paths::RuntimePaths,
 ) -> Result<Vec<LaunchedRuntime>> {
@@ -172,7 +165,7 @@ pub(crate) fn launch(
         .filter(|runtime| selection.includes(runtime))
     {
         let log = runtime_log(paths, &runtime.participant_id);
-        match spawn_one(bundle_root, endpoint, simulation, runtime, &log) {
+        match spawn_one(bundle_root, endpoint, runtime, &log) {
             Ok(child) => launched.push(child),
             Err(error) => {
                 abandon(&launched);
@@ -204,7 +197,6 @@ fn abandon(launched: &[LaunchedRuntime]) {
 fn spawn_one(
     bundle_root: &Path,
     endpoint: &str,
-    simulation: bool,
     runtime: &phoxal_cli_project::RobotRuntime,
     log: &Path,
 ) -> Result<LaunchedRuntime> {
@@ -219,12 +211,7 @@ fn spawn_one(
         .with_context(|| format!("failed to open {} for {}", log.display(), runtime.binary))?;
     let mut command = Command::new(&executable);
     command
-        .args(argv(
-            &runtime.participant_id,
-            bundle_root,
-            endpoint,
-            simulation,
-        )?)
+        .args(argv(&runtime.participant_id, endpoint)?)
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(errors));
@@ -360,18 +347,24 @@ impl SessionRecord {
 pub(crate) struct OwnedSession {
     record: SessionRecord,
     paths: phoxal_cli_host::paths::RuntimePaths,
+    mode: Mode,
 }
 
 impl OwnedSession {
     pub(crate) const fn new(
         record: SessionRecord,
         paths: phoxal_cli_host::paths::RuntimePaths,
+        mode: Mode,
     ) -> Self {
-        Self { record, paths }
+        Self {
+            record,
+            paths,
+            mode,
+        }
     }
 
     pub(crate) async fn stop(&self) -> Result<()> {
-        stop_session(&self.record, &self.paths).await
+        stop_session_for_mode(&self.record, &self.paths, self.mode).await
     }
 }
 
@@ -379,8 +372,25 @@ impl OwnedSession {
 /// killed. A runtime that will not stop must not hold the operator's terminal.
 const RUNTIME_GRACE: Duration = Duration::from_secs(10);
 
-/// The same, for the supervisor, which is asked to go only after the graph has.
+/// The same, for an ordinary native supervisor stopped after the graph.
 const SUPERVISOR_GRACE: Duration = Duration::from_secs(10);
+
+/// The simulation supervisor owns the Removing handshake. Its process grace
+/// must exceed the framework's 10-second removal budget before escalation.
+const SIMULATION_SUPERVISOR_GRACE: Duration = Duration::from_secs(15);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopStage {
+    Runtimes,
+    Supervisor,
+}
+
+const fn stop_order(mode: Mode) -> [StopStage; 2] {
+    match mode {
+        Mode::Native => [StopStage::Runtimes, StopStage::Supervisor],
+        Mode::Simulation => [StopStage::Supervisor, StopStage::Runtimes],
+    }
+}
 
 /// End the session `record` describes and consume it.
 ///
@@ -391,13 +401,41 @@ pub(crate) async fn stop_session(
     record: &SessionRecord,
     paths: &phoxal_cli_host::paths::RuntimePaths,
 ) -> Result<()> {
+    stop_session_for_mode(record, paths, Mode::Native).await
+}
+
+async fn stop_session_for_mode(
+    record: &SessionRecord,
+    paths: &phoxal_cli_host::paths::RuntimePaths,
+    mode: Mode,
+) -> Result<()> {
     let runtimes = record
         .runtimes
         .iter()
         .map(|runtime| runtime.pid)
         .collect::<Vec<_>>();
-    terminate(&runtimes, RUNTIME_GRACE).await?;
-    terminate(&[record.supervisor.pid], SUPERVISOR_GRACE).await?;
+    let mut failures = Vec::new();
+    for stage in stop_order(mode) {
+        let result = match stage {
+            StopStage::Runtimes => terminate(&runtimes, RUNTIME_GRACE).await,
+            StopStage::Supervisor => {
+                let grace = match mode {
+                    Mode::Native => SUPERVISOR_GRACE,
+                    Mode::Simulation => SIMULATION_SUPERVISOR_GRACE,
+                };
+                terminate(&[record.supervisor.pid], grace).await
+            }
+        };
+        if let Err(error) = result {
+            failures.push(format!("{stage:?} shutdown failed: {error:#}"));
+        }
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "session stop was incomplete; its record was retained for retry: {}",
+            failures.join("; ")
+        );
+    }
     SessionRecord::remove(paths)
 }
 
@@ -519,24 +557,29 @@ mod tests {
             .collect()
     }
 
-    /// The launch contract is exactly four things, and `--simulation` is the
-    /// only one the CLI ever decides on its own.
     #[test]
-    fn a_runtimes_argv_is_the_id_the_bundle_the_endpoint_and_nothing_else() {
-        let plain = argv(
-            "drive",
-            Path::new("/srv/bundle"),
-            "tcp/127.0.0.1:7447",
-            false,
-        )
-        .expect("the fixture id is a launch identity");
+    fn native_and_simulation_shutdown_orders_preserve_their_owners() {
+        assert_eq!(
+            stop_order(Mode::Native),
+            [StopStage::Runtimes, StopStage::Supervisor]
+        );
+        assert_eq!(
+            stop_order(Mode::Simulation),
+            [StopStage::Supervisor, StopStage::Runtimes]
+        );
+        assert!(SIMULATION_SUPERVISOR_GRACE > SUPERVISOR_GRACE);
+    }
+
+    /// The launch contract is identity plus the supervisor rendezvous only.
+    #[test]
+    fn a_runtimes_argv_is_the_id_the_endpoint_and_nothing_else() {
+        let plain =
+            argv("drive", "tcp/127.0.0.1:7447").expect("the fixture id is a launch identity");
         assert_eq!(
             plain,
             vec![
                 "--participant-id",
                 "drive",
-                "--bundle-root",
-                "/srv/bundle",
                 "--connect",
                 "tcp/127.0.0.1:7447",
             ]
@@ -545,17 +588,11 @@ mod tests {
             "--execution-id",
             "--execution-origin",
             "--shutdown-grace-ms",
+            "--bundle-root",
+            "--simulation",
         ] {
             assert!(!plain.iter().any(|arg| arg == retired), "{plain:?}");
         }
-        let simulated = argv(
-            "drive",
-            Path::new("/srv/bundle"),
-            "tcp/127.0.0.1:7447",
-            true,
-        )
-        .expect("the fixture id is a launch identity");
-        assert_eq!(simulated.last().map(String::as_str), Some("--simulation"));
     }
 
     /// Driver selection never touches the brain or a service: those always run,
