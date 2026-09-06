@@ -967,25 +967,32 @@ fn spawn_control_router(
 }
 
 fn print_live_status(state: &WorldSessionState) {
-    println!("instance:  {}", state.instance);
-    println!("world:     {}", state.provenance.world);
-    println!("digest:    {}", state.provenance.digest);
-    println!("lifecycle: {}", lifecycle_text(state.lifecycle));
-    println!("train:     {}", state.provenance.framework);
-    println!(
-        "adapter:   {} {}",
-        state.provenance.adapter, state.provenance.adapter_version
-    );
-    println!("simulator: {}", state.provenance.simulator_version);
-    println!("step:      {}", state.progress.completed_step());
-    println!("world ns:  {}", state.progress.elapsed_ns());
-    println!("members:   {}", state.members.len());
+    println!("{}", format_live_status(state));
+}
+
+fn format_live_status(state: &WorldSessionState) -> String {
+    let mut lines = vec![
+        format!("instance:  {}", state.instance),
+        format!("world:     {}", state.provenance.world),
+        format!("digest:    {}", state.provenance.digest),
+        format!("lifecycle: {}", lifecycle_text(state.lifecycle)),
+        format!("train:     {}", state.provenance.framework),
+        format!(
+            "adapter:   {} {}",
+            state.provenance.adapter, state.provenance.adapter_version
+        ),
+        format!("simulator: {}", state.provenance.simulator_version),
+        format!("step:      {}", state.progress.completed_step()),
+        format!("world ns:  {}", state.progress.elapsed_ns()),
+        format!("members:   {}", state.members.len()),
+    ];
     for member in &state.members {
-        println!(
+        lines.push(format!(
             "  {}  {:?}  {}",
             member.robot, member.phase, member.execution
-        );
+        ));
     }
+    lines.join("\n")
 }
 
 fn ensure_state_matches_registration(
@@ -1508,6 +1515,22 @@ mod tests {
             lifecycle,
             progress: WorldProgress::at(0, 10_000_000).unwrap(),
             members: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn live_status_is_a_complete_pure_projection_of_the_returned_state() {
+        let rendered = format_live_status(&state(WorldLifecycle::Ready {
+            motion: WorldMotion::Paused,
+        }));
+        for expected in [
+            "instance:  1234567890abcdef1234567890abcdef",
+            "world:     warehouse",
+            "lifecycle: ready/paused",
+            "step:      0",
+            "members:   0",
+        ] {
+            assert!(rendered.contains(expected), "{rendered}");
         }
     }
 
